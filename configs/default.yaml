@@ -1,0 +1,74 @@
+paths:
+  data_root: "D:/EEGdata/TUEP/v3.1.0"
+  cache_dir: "cache"
+  results_dir: "results"
+
+dataset:
+  reference_scheme: "ar"
+  montage_dir: "01_tcp_ar"
+  classes:
+    epilepsy: "00_epilepsy"
+    control: "01_no_epilepsy"
+
+split:
+  train: 0.70
+  val: 0.10
+  test: 0.20
+  random_seed: 42
+
+preprocessing:
+  target_sfreq: 125
+  bandpass: [0.5, 40.0]
+  epoch_length_sec: 8.0
+  artifact_threshold_uv: 200.0
+  seizure_buffer_sec: 30.0
+
+channels:
+  standard_19:
+    - FP1
+    - FP2
+    - F3
+    - F4
+    - F7
+    - F8
+    - C3
+    - C4
+    - T3
+    - T4
+    - T5
+    - T6
+    - P3
+    - P4
+    - O1
+    - O2
+    - Fz
+    - Cz
+    - Pz
+  bilateral_pairs:
+    - [FP1, FP2]
+    - [F3, F4]
+    - [F7, F8]
+    - [C3, C4]
+    - [T3, T4]
+    - [T5, T6]
+    - [P3, P4]
+    - [O1, O2]
+  midline: [Fz, Cz, Pz]
+
+wiener:
+  mode: "frequency"
+  nperseg: 1000
+  freq_resolution_hz: 0.5
+  coherence_threshold: 0.15
+  freq_band: [0.5, 40.0]
+
+ica:
+  n_components: 19
+  method: "fastica"
+  artifact_corr_threshold: 0.8
+  random_state: 42
+
+verification:
+  v2_transitivity_amp_threshold: 0.1
+  v2_transitivity_phase_threshold: 0.392
+  v3_freq_variation_threshold: 0.20
