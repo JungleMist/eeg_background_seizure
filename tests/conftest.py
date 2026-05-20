@@ -12,7 +12,7 @@ BASE_CFG = {
     "preprocessing": {"target_sfreq": 125.0, "bandpass": [0.5, 40.0]},
     "wiener": {
         "mode": "frequency",
-        "nperseg": 1000,
+        "nperseg": 500,
         "coherence_threshold": 0.05,   # Low so decomposition always runs
         "freq_band": [0.5, 40.0],
     },
