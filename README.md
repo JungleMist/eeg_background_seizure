@@ -89,13 +89,15 @@ D:\eeg_background_seizure\
 │   └── visualization/
 │       ├── filter_plots.py          ← |h(f)| and ∠h(f) curves
 │       ├── coherence_plots.py       ← Coherence heatmaps, reduction boxplots, signal traces
-│       └── verification_plots.py    ← V1/V2/V3 summary figures, ICA vs Wiener comparison
+│       ├── verification_plots.py    ← V1/V2/V3 summary figures, ICA vs Wiener comparison
+│       └── waveform_plots.py        ← Stacked multi-channel waveform comparison
 │
 ├── scripts/
 │   ├── 01_extract_epochs.py         ← Step 1: EDF → cached epochs (.npz)
 │   ├── 02_run_wiener.py             ← Step 2: cached epochs → Wiener decomposition
 │   ├── 03_run_ica.py                ← Step 3: cached epochs → ICA decomposition
-│   └── 04_run_verification.py       ← Step 4: V1/V2/V3 verification → CSV reports
+│   ├── 04_run_verification.py       ← Step 4: V1/V2/V3 verification → CSV reports
+│   └── 05_run_visualization.py      ← Step 5: cached results → waveform figures
 │
 ├── configs/
 │   └── default.yaml                 ← All tunable parameters
@@ -120,7 +122,13 @@ D:\eeg_background_seizure\
 │   ├── wiener_scalar/               ← Scalar-ablation epochs
 │   └── ica/                         ← ICA-cleaned epochs
 │
+├── docs/
+│   └── Developer_qa.md              ← Developer Q&A (epoch validity, .npz schema, …)
+│
 ├── results/                         ← Figure and CSV outputs, git-ignored
+│   └── figures/                     ← PNG outputs from 05_run_visualization.py
+│       └── {subject_id}/
+│           └── waveform_comparison.png
 ├── setup.py
 ├── requirements.txt
 └── pytest.ini
@@ -161,6 +169,12 @@ cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/
           │
           ▼  results/
     v1_coherence.csv   v2_transitivity.csv   v3_frequency_variation.csv
+          │
+          ▼  Script 05
+    [visualization] load epoch + wiener_frequency + ica caches
+    [visualization] plot_multichannel_comparison  (19-ch stacked waveforms)
+          │
+          ▼  results/figures/{subject_id}/waveform_comparison.png
 ```
 
 ### Cache File Schema
@@ -324,6 +338,33 @@ python scripts/04_run_verification.py
 
 ---
 
+### Step 5 — Generate Waveform Figures
+
+Loads one representative epoch per subject from the epoch, Wiener, and ICA caches
+and saves a stacked 19-channel waveform comparison (Raw | Wiener specific | ICA cleaned).
+No decomposition is re-run — arrays are read directly from cached `.npz` files.
+
+```bash
+# All subjects, epoch 0 (default):
+python scripts/05_run_visualization.py
+
+# Limit to first 5 subjects, choose epoch 2:
+python scripts/05_run_visualization.py --n-subjects 5 --epoch-idx 2
+```
+
+**Output:** `results/figures/{subject_id}/waveform_comparison.png`
+
+Each figure contains up to three panels (panels are omitted if the corresponding cache
+does not yet exist):
+
+| Panel | Source | Content |
+|-------|--------|---------|
+| Raw | `cache/epochs/` | Unprocessed bandpass-filtered EEG |
+| Wiener specific | `cache/wiener_frequency/` | Coherent component removed |
+| ICA cleaned | `cache/ica/` | Artifact components projected out |
+
+---
+
 ### Complete Pipeline (one command chain)
 
 ```bash
@@ -333,6 +374,7 @@ python scripts/02_run_wiener.py --mode frequency
 python scripts/02_run_wiener.py --mode scalar
 python scripts/03_run_ica.py
 python scripts/04_run_verification.py
+python scripts/05_run_visualization.py
 ```
 
 ---
@@ -379,6 +421,7 @@ from eeg_bg.visualization.verification_plots import (
     plot_v2_transitivity, plot_v3_frequency_variation,
     plot_ica_vs_wiener_coherence
 )
+from eeg_bg.visualization.waveform_plots import plot_multichannel_comparison
 import numpy as np
 
 cfg = load_config()
@@ -413,6 +456,25 @@ v2_df = pd.read_csv("results/v2_transitivity.csv")
 v3_df = pd.read_csv("results/v3_frequency_variation.csv")
 plot_v2_transitivity(v2_df).savefig("results/v2_transitivity.png", dpi=150)
 plot_v3_frequency_variation(v3_df).savefig("results/v3_freq_variation.png", dpi=150)
+
+# Stacked 19-channel waveform comparison (Raw | Wiener specific | ICA cleaned)
+# Load arrays directly from caches — no re-decomposition needed
+import numpy as np
+edata = np.load("cache/epochs/aaaaabhz/abc123.npz", allow_pickle=True)
+raw   = edata["epochs"][0]                                   # (19, 1000)
+ch_names = list(edata["ch_names"])
+
+wdata          = np.load("cache/wiener_frequency/aaaaabhz/abc123.npz", allow_pickle=True)
+wiener_specific = wdata["specific"][0]                        # (19, 1000)
+
+idata        = np.load("cache/ica/aaaaabhz/abc123.npz", allow_pickle=True)
+ica_specific = idata["specific"][0]                           # (19, 1000)
+
+fig = plot_multichannel_comparison(
+    raw, wiener_specific, ica_specific,
+    ch_names, sfreq=125.0, title="aaaaabhz  epoch 0"
+)
+fig.savefig("results/figures/aaaaabhz/waveform_comparison.png", dpi=150, bbox_inches="tight")
 ```
 
 ---
@@ -435,12 +497,12 @@ conda run -n eeg_pipeline pytest tests/test_decomposition/ -v
 conda run -n eeg_pipeline pytest tests/ -m "not integration" -q
 ```
 
-**Current status:** 41 tests, all passing.
+**Current status:** 43 tests, all passing.
 
 | Test module | Count | What is verified |
 |-------------|-------|-----------------|
 | `test_config.py` | 5 | YAML loading, path resolution |
-| `test_io/` | 17 | Dataset traversal, EDF mocking, annotation parsing, cache read/write |
+| `test_io/` | 19 | Dataset traversal, EDF channel normalisation, annotation parsing, cache read/write |
 | `test_preprocessing/` | 7 | Epoch slicing, artifact rejection, bandpass filter, reference detection |
 | `test_decomposition/` | 8 | Wiener decomposition identity (`specific + coherent = raw`), scalar ablation, ICA shape |
 | `test_verification/` | 4 | V1 coherence reduction, V2/V3 DataFrame structure |
