@@ -4,7 +4,7 @@ import yaml
 
 def load_config(config_path: str | Path = "configs/default.yaml") -> dict:
     config_path = Path(config_path)
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     project_root = config_path.parent.parent.resolve()
     for key in ("cache_dir", "results_dir"):
