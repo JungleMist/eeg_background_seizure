@@ -55,7 +55,7 @@ channels:
 
 wiener:
   mode: "frequency"
-  nperseg: 1000
+  nperseg: 250
   freq_resolution_hz: 0.5
   coherence_threshold: 0.15
   freq_band: [0.5, 40.0]
