@@ -57,7 +57,8 @@ def run_v2(results: list, cfg: dict) -> pd.DataFrame:
                 "eps_amp": eps_amp,
                 "eps_phase": eps_phase,
             })
-    return pd.DataFrame(rows)
+    cols = ["subject_id", "epoch_idx", "triplet", "eps_amp", "eps_phase"]
+    return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
 
 def run_v3(results: list, cfg: dict) -> pd.DataFrame:

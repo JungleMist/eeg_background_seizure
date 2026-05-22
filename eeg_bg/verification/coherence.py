@@ -27,7 +27,11 @@ def compute_pairwise_coherence(
 
 def run_v1(results: list, cfg: dict) -> pd.DataFrame:
     sfreq = float(cfg["preprocessing"]["target_sfreq"])
-    nperseg = cfg["wiener"]["nperseg"]
+    # Use freq_resolution_hz to derive nperseg for coherence estimation.
+    # The Wiener nperseg may equal n_times (exact single-window filter), which
+    # causes scipy.signal.coherence to return 1.0 everywhere (no averaging).
+    freq_res = cfg["wiener"].get("freq_resolution_hz", 0.5)
+    nperseg = int(sfreq / freq_res)   # e.g. 125 / 0.5 = 250 → 4 segments per epoch
     freq_band = tuple(cfg["wiener"]["freq_band"])
 
     rows = []
