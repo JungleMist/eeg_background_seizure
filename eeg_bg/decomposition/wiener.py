@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from itertools import combinations
 
 import numpy as np
 from scipy.signal import csd, welch, coherence as scipy_coherence
@@ -111,8 +112,7 @@ def decompose_epoch(
     sfreq = float(cfg["preprocessing"]["target_sfreq"])
     nperseg = cfg["wiener"]["nperseg"]
     coh_threshold = cfg["wiener"]["coherence_threshold"]
-    bilateral_pairs = cfg["channels"]["bilateral_pairs"]
-    midline = cfg["channels"]["midline"]
+    channel_groups = cfg["channels"]["channel_groups"]
     freq_band = cfg["wiener"]["freq_band"]
     n_times = epoch.shape[1]
 
@@ -124,7 +124,7 @@ def decompose_epoch(
     freqs, _ = welch(epoch[0], fs=sfreq, nperseg=nperseg)
     freq_mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
 
-    for pair in bilateral_pairs:
+    for pair in channel_groups:
         try:
             indices = [ch_names.index(ch) for ch in pair]
         except ValueError:
@@ -133,10 +133,14 @@ def decompose_epoch(
 
         group_data = epoch[indices]
 
-        # Coherence gate
-        _, coh = scipy_coherence(group_data[0], group_data[1],
-                                  fs=sfreq, nperseg=nperseg)
-        if np.max(coh[freq_mask]) < coh_threshold:
+        # Coherence gate — max pairwise coherence over all channel pairs in the group
+        # (handles k=2 pairs and k=3 chains uniformly)
+        max_pairwise_coh = 0.0
+        for i, j in combinations(range(len(pair)), 2):
+            _, c = scipy_coherence(group_data[i], group_data[j],
+                                   fs=sfreq, nperseg=nperseg)
+            max_pairwise_coh = max(max_pairwise_coh, np.max(c[freq_mask]))
+        if max_pairwise_coh < coh_threshold:
             skipped.append("-".join(pair))
             continue
 

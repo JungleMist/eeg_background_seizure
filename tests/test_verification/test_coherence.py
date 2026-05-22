@@ -27,11 +27,11 @@ def test_run_v1_output_schema(synthetic_epoch):
     assert (df["coh_pre"] >= 0).all() and (df["coh_pre"] <= 1).all()
 
 
-def test_run_v1_reduction_positive_for_bilateral_pairs(synthetic_epoch):
+def test_run_v1_reduction_positive_for_channel_groups(synthetic_epoch):
     epoch, ch_names, cfg, *_ = synthetic_epoch
     result = decompose_epoch(epoch, ch_names, cfg, subject_id="s1")
     df = run_v1([result], cfg)
-    bilateral_flat = [ch for pair in cfg["channels"]["bilateral_pairs"] for ch in pair]
-    bilateral_df = df[df["ch_i"].isin(bilateral_flat) & df["ch_j"].isin(bilateral_flat)]
-    if len(bilateral_df):
-        assert bilateral_df["reduction"].mean() > 0
+    grouped_flat = [ch for group in cfg["channels"]["channel_groups"] for ch in group]
+    grouped_df = df[df["ch_i"].isin(grouped_flat) & df["ch_j"].isin(grouped_flat)]
+    if len(grouped_df):
+        assert grouped_df["reduction"].mean() > 0

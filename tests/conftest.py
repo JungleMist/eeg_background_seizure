@@ -24,11 +24,15 @@ BASE_CFG = {
     },
     "channels": {
         "standard_19": CH_NAMES_19,
-        "bilateral_pairs": [
-            ["FP1", "FP2"], ["F3", "F4"], ["F7", "F8"], ["C3", "C4"],
-            ["T3", "T4"], ["T5", "T6"], ["P3", "P4"], ["O1", "O2"],
+        "channel_groups": [               # G1–G6 movement-artifact conduction paths
+            ["FP1", "FP2"],               # G1 – symmetric facial
+            ["F7", "T3"],                 # G2 – left SCM
+            ["T3", "T5", "O1"],           # G3 – left posterior neck (3-ch chain)
+            ["O1", "O2"],                 # G4 – bilateral occipitalis
+            ["F8", "T4"],                 # G5 – right SCM
+            ["T4", "T6", "O2"],           # G6 – right posterior neck (3-ch chain)
         ],
-        "midline": ["Fz", "Cz", "Pz"],
+        "passthrough": ["F3", "F4", "C3", "C4", "P3", "P4", "Fz", "Cz", "Pz"],
     },
 }
 

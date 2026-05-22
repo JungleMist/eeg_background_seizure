@@ -60,10 +60,10 @@ def test_decompose_epoch_reduces_coherence(synthetic_epoch):
     assert np.mean(coh_pre) > np.mean(coh_post)
 
 
-def test_decompose_epoch_midline_unchanged(synthetic_epoch):
+def test_decompose_epoch_passthrough_unchanged(synthetic_epoch):
     epoch, ch_names, cfg, *_ = synthetic_epoch
     result = decompose_epoch(epoch, ch_names, cfg)
-    for ch in cfg["channels"]["midline"]:
+    for ch in cfg["channels"]["passthrough"]:
         idx = ch_names.index(ch)
         np.testing.assert_array_equal(result.specific[idx], epoch[idx])
 
