@@ -37,14 +37,15 @@ def test_psd_comparison_with_all_signals(epoch):
         ica_specific=ica,
     )
     assert isinstance(fig, plt.Figure)
-    # Two rows of axes
-    assert len(fig.axes) == 2
+    # 3-column grid (Raw | Wiener Specific | ICA Cleaned) × 2 channel rows = 6 axes
+    assert len(fig.axes) == 6
     plt.close(fig)
 
 
 def test_psd_comparison_channel_subset(epoch):
     fig = plot_psd_comparison(epoch, CH_NAMES, SFREQ, channels=["FP1"])
-    assert len(fig.axes) == 1
+    # 3-column grid × 1 channel row = 3 axes
+    assert len(fig.axes) == 3
     plt.close(fig)
 
 

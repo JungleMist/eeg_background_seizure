@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Python via **conda env `eeg_pipeline`** (`C:\ProgramData\anaconda3\envs\eeg_pipeline`). Use `conda run -n eeg_pipeline` or activate it before running commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib.
 - Install the package in development mode: `pip install -e .`
-- Core dependencies: numpy 1.26.4, scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, pandas, matplotlib, pyyaml, pytest, tqdm.
+- Core dependencies: numpy (2.x), scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, xgboost≥2.0, shap≥0.45, pandas, matplotlib, pyyaml, pytest, tqdm.
+- **Note**: `np.trapezoid` is used (not `np.trapz`, removed in NumPy 2.0).
 
 ## Common Commands
 
@@ -43,6 +44,10 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
   → cache/wiener|ica/       — checkpoint 2
   → verification/           — V1 coherence, V2 transitivity, V3 frequency variation
   → visualization/          — matplotlib figures returned as plt.Figure (never call plt.show())
+  → features/extraction.py  — extract_epoch_features() → 171-dim vector per epoch
+  → ml/xgb_pipeline.py      — GridSearchCV + early stopping; subject-level aggregation
+  → ml/shap_analysis.py     — TreeExplainer SHAP; band/channel aggregation; comparison plot
+  → results/xgboost/        — model.joblib, metrics JSON, SHAP plots
 ```
 
 ### Key modules
@@ -56,6 +61,9 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/visualization/psd_plots.py` | `plot_psd_comparison`: PSD overlay (raw / Wiener-specific / ICA-cleaned) for target channels. Channels default to `cfg["visualization"]["psd_target_channels"]` (FP1, FP2). Uses boxcar Welch consistent with decomposition. |
 | `eeg_bg/io/dataset.py` | Traverses TUEP directory tree → subject index DataFrame; `assign_splits` splits by subject (not recording). |
 | `eeg_bg/io/cache.py` | `load_or_compute` wraps any `compute_fn` with `.npz` on-disk caching; cache key = SHA-256 of `edf_path|start_sec|sfreq|bandpass`. |
+| `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(171,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
+| `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. |
+| `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×3 cross-condition publication figure). |
 
 ### Channel groups (G1–G6)
 
@@ -80,17 +88,30 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 
 ```
 results/
-├── figures/
-│   └── {subject_id}/
-│       ├── waveform_comparison.png   — all-channel stacked waveform (raw | Wiener | ICA)
-│       └── psd_comparison.png        — PSD overlay for psd_target_channels
-└── verification/
-    ├── v1_coherence.csv
-    ├── v2_transitivity.csv
-    └── v3_frequency_variation.csv
+├── figures/{subject_id}/
+│   ├── waveform_comparison.png       — all-channel stacked waveform (raw | Wiener | ICA)
+│   └── psd_comparison.png            — PSD overlay for psd_target_channels
+├── verification/
+│   ├── v1_coherence.csv
+│   ├── v2_transitivity.csv
+│   └── v3_frequency_variation.csv
+└── xgboost/
+    ├── {raw,ica,wiener}/
+    │   ├── model.joblib              — fitted XGBClassifier
+    │   ├── scaler.joblib             — StandardScaler (fit on train)
+    │   ├── best_params.json          — GridSearchCV best hyperparameters
+    │   ├── val_metrics.json / test_metrics.json  — {auroc, f1, accuracy}
+    │   ├── val_predictions.csv / test_predictions.csv  — subject_id, pred_proba, true_label
+    │   ├── shap_values_test.npy      — (n_test_epochs, 171) raw SHAP values
+    │   ├── shap_summary.png          — beeswarm plot (top 20 features)
+    │   ├── shap_by_band.json         — mean |SHAP| per feature-type group
+    │   └── shap_by_channel.json      — mean |SHAP| per EEG channel
+    ├── comparison_summary.csv        — 3 conditions × {val_auroc, test_auroc, f1, acc}
+    └── shap_comparison.png           — 2×3 publication comparison figure
 ```
 
-Script 05 accepts `--channels "FP1,FP2,T3"` to override `psd_target_channels` at runtime.
+Script 05 accepts `--channels "FP1,FP2,T3"` to override `psd_target_channels` at runtime.  
+Script 06 accepts `--condition {raw,ica,wiener,all}` and `--force` (re-extract features).
 
 ## Tests
 

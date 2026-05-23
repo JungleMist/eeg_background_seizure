@@ -60,6 +60,8 @@ pip install -e .
 | matplotlib | ≥3.7 | All visualization |
 | pyyaml | ≥6.0 | Configuration loading |
 | tqdm | ≥4.0 | Pipeline progress bars |
+| xgboost | ≥2.0 | XGBoost classifier, GridSearchCV, early stopping |
+| shap | ≥0.45 | TreeExplainer SHAP values, beeswarm summary plots |
 
 ---
 
@@ -86,21 +88,30 @@ D:\eeg_background_seizure\
 │   ├── verification/
 │   │   ├── coherence.py             ← V1: pairwise coherence reduction
 │   │   └── transitivity.py          ← V2: transitivity constraint, V3: frequency variation
-│   └── visualization/
-│       ├── filter_plots.py          ← |h(f)| and ∠h(f) curves
-│       ├── coherence_plots.py       ← Coherence heatmaps, reduction boxplots, signal traces
-│       ├── verification_plots.py    ← V1/V2/V3 summary figures, ICA vs Wiener comparison
-│       └── waveform_plots.py        ← Stacked multi-channel waveform comparison
+│   ├── visualization/
+│   │   ├── filter_plots.py          ← |h(f)| and ∠h(f) curves
+│   │   ├── coherence_plots.py       ← Coherence heatmaps, reduction boxplots, signal traces
+│   │   ├── verification_plots.py    ← V1/V2/V3 summary figures, ICA vs Wiener comparison
+│   │   └── waveform_plots.py        ← Stacked multi-channel waveform comparison
+│   ├── features/
+│   │   ├── band_power.py            ← Relative band power (5 EEG bands, boxcar Welch)
+│   │   ├── hjorth.py                ← Hjorth activity / mobility / complexity
+│   │   ├── spectral_entropy.py      ← Shannon entropy of normalized PSD
+│   │   └── extraction.py           ← extract_epoch_features(), build_dataset(), FEATURE_NAMES
+│   └── ml/
+│       ├── xgb_pipeline.py          ← train_xgboost(), subject_level_predict(), evaluate_subject_level()
+│       └── shap_analysis.py         ← compute_shap_values(), aggregate/plot functions
 │
 ├── scripts/
 │   ├── 01_extract_epochs.py         ← Step 1: EDF → cached epochs (.npz)
 │   ├── 02_run_wiener.py             ← Step 2: cached epochs → Wiener decomposition
 │   ├── 03_run_ica.py                ← Step 3: cached epochs → ICA decomposition
 │   ├── 04_run_verification.py       ← Step 4: V1/V2/V3 verification → CSV reports
-│   └── 05_run_visualization.py      ← Step 5: cached results → waveform figures
+│   ├── 05_run_visualization.py      ← Step 5: cached results → waveform + PSD figures
+│   └── 06_train_xgboost.py         ← Step 6: feature extraction + XGBoost × 3 conditions + SHAP
 │
 ├── configs/
-│   └── default.yaml                 ← All tunable parameters
+│   └── default.yaml                 ← All tunable parameters (including ml: section)
 │
 ├── tests/
 │   ├── conftest.py                  ← Synthetic EEG fixtures (no real data needed)
@@ -108,7 +119,9 @@ D:\eeg_background_seizure\
 │   ├── test_io/                     ← dataset, edf_reader, annotation, cache
 │   ├── test_preprocessing/          ← epoch slicing, reference detection
 │   ├── test_decomposition/          ← wiener, wiener_scalar, ica
-│   └── test_verification/           ← coherence V1, transitivity V2/V3
+│   ├── test_verification/           ← coherence V1, transitivity V2/V3
+│   ├── test_features/               ← band_power, hjorth, spectral_entropy, extraction (~16 tests)
+│   └── test_ml/                     ← xgb_pipeline, shap_analysis (~12 tests)
 │
 ├── notebooks/                       ← Interactive exploration (cells to be written)
 │   ├── 01_data_exploration.ipynb
@@ -120,15 +133,25 @@ D:\eeg_background_seizure\
 │   ├── epochs/                      ← Per-subject .npz epoch files + index.csv
 │   ├── wiener_frequency/            ← Wiener-decomposed epochs
 │   ├── wiener_scalar/               ← Scalar-ablation epochs
-│   └── ica/                         ← ICA-cleaned epochs
+│   ├── ica/                         ← ICA-cleaned epochs
+│   └── features/                    ← Extracted feature matrices {condition}_{split}.npz
 │
 ├── docs/
 │   └── Developer_qa.md              ← Developer Q&A (epoch validity, .npz schema, …)
 │
 ├── results/                         ← Figure and CSV outputs, git-ignored
-│   └── figures/                     ← PNG outputs from 05_run_visualization.py
-│       └── {subject_id}/
-│           └── waveform_comparison.png
+│   ├── figures/{subject_id}/        ← PNG outputs from script 05
+│   │   ├── waveform_comparison.png
+│   │   └── psd_comparison.png
+│   ├── verification/                ← CSV reports from script 04
+│   │   ├── v1_coherence.csv
+│   │   ├── v2_transitivity.csv
+│   │   └── v3_frequency_variation.csv
+│   └── xgboost/                     ← Outputs from script 06
+│       ├── {raw,ica,wiener}/        ← model.joblib, scaler.joblib, metrics JSONs,
+│       │                               predictions CSVs, SHAP values + plots
+│       ├── comparison_summary.csv
+│       └── shap_comparison.png
 ├── setup.py
 ├── requirements.txt
 └── pytest.ini
@@ -173,8 +196,20 @@ cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/
           ▼  Script 05
     [visualization] load epoch + wiener_frequency + ica caches
     [visualization] plot_multichannel_comparison  (19-ch stacked waveforms)
+    [visualization] plot_psd_comparison           (PSD overlay for target channels)
           │
-          ▼  results/figures/{subject_id}/waveform_comparison.png
+          ▼  results/figures/{subject_id}/{waveform,psd}_comparison.png
+          │
+          ▼  Script 06
+    [features] extract_epoch_features × 3 conditions (171 features/epoch)
+               19 channels × (5 band powers + 3 Hjorth + spectral entropy)
+    [ml] train_xgboost: GridSearchCV(5-fold) + early stopping on val
+    [ml] subject_level_predict → evaluate_subject_level (AUROC / F1 / Acc)
+    [ml] compute_shap_values → aggregate_shap_by_band / _by_channel
+          │
+          ▼  results/xgboost/
+    {condition}/model.joblib  test_metrics.json  shap_summary.png
+    comparison_summary.csv    shap_comparison.png
 ```
 
 ### Cache File Schema
@@ -365,6 +400,34 @@ does not yet exist):
 
 ---
 
+---
+
+### Step 6 — Train XGBoost Classifiers + SHAP Analysis
+
+Extracts 171 handcrafted features per epoch (relative band power × 5 bands,
+Hjorth parameters × 3, spectral entropy — for each of 19 channels) under three
+preprocessing conditions, trains an XGBoost classifier per condition via 5-fold
+GridSearchCV + early-stopping refit on the validation set, evaluates at subject
+level, and generates SHAP feature importance comparison figures.
+
+```bash
+# All three conditions (raw / ica / wiener) — default
+python scripts/06_train_xgboost.py
+
+# Single condition
+python scripts/06_train_xgboost.py --condition wiener
+
+# Force re-extraction of features (ignore feature cache)
+python scripts/06_train_xgboost.py --force
+```
+
+**Output:** `results/xgboost/{condition}/` — model, metrics, per-subject
+predictions, SHAP values and plots; `results/xgboost/shap_comparison.png` —
+2 × 3 publication figure comparing SHAP band/channel importance across the three
+conditions (Raw C | ICA B | Wiener A).
+
+---
+
 ### Complete Pipeline (one command chain)
 
 ```bash
@@ -375,6 +438,7 @@ python scripts/02_run_wiener.py --mode scalar
 python scripts/03_run_ica.py
 python scripts/04_run_verification.py
 python scripts/05_run_visualization.py
+python scripts/06_train_xgboost.py
 ```
 
 ---
@@ -497,7 +561,7 @@ conda run -n eeg_pipeline pytest tests/test_decomposition/ -v
 conda run -n eeg_pipeline pytest tests/ -m "not integration" -q
 ```
 
-**Current status:** 43 tests, all passing.
+**Current status:** ~92 tests, all passing.
 
 | Test module | Count | What is verified |
 |-------------|-------|-----------------|
@@ -506,6 +570,9 @@ conda run -n eeg_pipeline pytest tests/ -m "not integration" -q
 | `test_preprocessing/` | 7 | Epoch slicing, artifact rejection, bandpass filter, reference detection |
 | `test_decomposition/` | 8 | Wiener decomposition identity (`specific + coherent = raw`), scalar ablation, ICA shape |
 | `test_verification/` | 4 | V1 coherence reduction, V2/V3 DataFrame structure |
+| `test_visualization/` | 4 | PSD figure shape, 3-column grid layout, config channel defaults |
+| `test_features/` | ~20 | Band power normalisation, Hjorth correctness, spectral entropy range, FEATURE_NAMES length/uniqueness, build_dataset split filtering |
+| `test_ml/` | ~12 | subject_level_predict aggregation, evaluate_subject_level keys, SHAP shape/non-negativity, plot functions create files |
 
 ### Synthetic Fixture Design
 
