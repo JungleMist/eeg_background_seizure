@@ -12,8 +12,8 @@ from eeg_bg.verification.transitivity import run_v2, run_v3
 def main(config_path: str) -> None:
     cfg = load_config(config_path)
     epoch_root = Path(cfg["paths"]["cache_dir"]) / "epochs"
-    results_dir = Path(cfg["paths"]["results_dir"])
-    results_dir.mkdir(parents=True, exist_ok=True)
+    verif_dir = Path(cfg["paths"]["results_dir"]) / "verification"
+    verif_dir.mkdir(parents=True, exist_ok=True)
 
     all_results: list[WienerResult] = []
     for npz_path in tqdm(sorted(epoch_root.rglob("*.npz")), desc="V1/V2/V3"):
@@ -28,18 +28,18 @@ def main(config_path: str) -> None:
 
     print(f"Running V1 on {len(all_results)} epochs...")
     v1_df = run_v1(all_results, cfg)
-    v1_df.to_csv(results_dir / "v1_coherence.csv", index=False)
+    v1_df.to_csv(verif_dir / "v1_coherence.csv", index=False)
 
     print("Running V2...")
     v2_df = run_v2(all_results, cfg)
-    v2_df.to_csv(results_dir / "v2_transitivity.csv", index=False)
+    v2_df.to_csv(verif_dir / "v2_transitivity.csv", index=False)
 
     print("Running V3...")
     v3_df = run_v3(all_results, cfg)
-    v3_df.to_csv(results_dir / "v3_frequency_variation.csv", index=False)
+    v3_df.to_csv(verif_dir / "v3_frequency_variation.csv", index=False)
 
     print(f"V1: {len(v1_df)} rows | V2: {len(v2_df)} rows | V3: {len(v3_df)} rows")
-    print(f"Results saved to {results_dir}")
+    print(f"Results saved to {verif_dir}")
 
 
 if __name__ == "__main__":

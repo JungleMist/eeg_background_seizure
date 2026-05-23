@@ -1,22 +1,25 @@
-"""Generate per-subject multi-channel waveform comparison figures.
+"""Generate per-subject multi-channel waveform and PSD comparison figures.
 
 For each subject, loads one representative epoch from the epoch cache and the
-corresponding Wiener / ICA caches (when available), then saves a stacked
-multi-channel waveform comparison PNG to results/figures/{subject_id}/.
+corresponding Wiener / ICA caches (when available), then saves figures to
+results/figures/{subject_id}/.
 
 Usage
 -----
-# All subjects, epoch 0 (default):
+# All subjects, epoch 0, default PSD channels from config:
 python scripts/05_run_visualization.py
 
-# Limit to first 5 subjects, epoch 2:
-python scripts/05_run_visualization.py --n-subjects 5 --epoch-idx 2
+# Limit to first 5 subjects, epoch 2, custom PSD channels:
+python scripts/05_run_visualization.py --n-subjects 5 --epoch-idx 2 --channels "FP1,FP2,T3"
 
 Output
 ------
 results/figures/{subject_id}/waveform_comparison.png
     1–3 side-by-side panels: Raw | Wiener specific | ICA cleaned
     All 19 channels stacked vertically; panels omitted if cache absent.
+
+results/figures/{subject_id}/psd_comparison.png
+    PSD overlay (raw / Wiener / ICA) for target channels (from config or --channels).
 """
 import argparse
 import matplotlib
@@ -28,6 +31,7 @@ from tqdm import tqdm
 
 from eeg_bg.config.settings import load_config
 from eeg_bg.visualization.waveform_plots import plot_multichannel_comparison
+from eeg_bg.visualization.psd_plots import plot_psd_comparison
 
 
 def _save(fig: plt.Figure, path: Path) -> None:
@@ -36,8 +40,9 @@ def _save(fig: plt.Figure, path: Path) -> None:
     plt.close(fig)
 
 
-def main(config_path: str, n_subjects: int, epoch_idx: int) -> None:
+def main(config_path: str, n_subjects: int, epoch_idx: int, channels: list[str] | None) -> None:
     cfg         = load_config(config_path)
+    channels    = channels or cfg["visualization"]["psd_target_channels"]
     epoch_root  = Path(cfg["paths"]["cache_dir"]) / "epochs"
     wiener_root = Path(cfg["paths"]["cache_dir"]) / "wiener_frequency"
     ica_root    = Path(cfg["paths"]["cache_dir"]) / "ica"
@@ -92,6 +97,17 @@ def main(config_path: str, n_subjects: int, epoch_idx: int) -> None:
         )
         _save(fig, subj_fig_dir / "waveform_comparison.png")
 
+        fig_psd = plot_psd_comparison(
+            raw, ch_names, sfreq,
+            channels=channels,
+            wiener_specific=wiener_specific,
+            ica_specific=ica_specific,
+            nperseg=cfg["wiener"]["nperseg"],
+            freq_band=tuple(cfg["wiener"]["freq_band"]),
+            title=f"{subj_id}  epoch {ei}",
+        )
+        _save(fig_psd, subj_fig_dir / "psd_comparison.png")
+
     print(f"Done. Figures saved to {fig_dir}")
 
 
@@ -105,5 +121,9 @@ if __name__ == "__main__":
                         help="Max number of subjects to process (0 = all)")
     parser.add_argument("--epoch-idx",  type=int, default=0,
                         help="Which epoch index to visualize per subject")
+    parser.add_argument("--channels",   default=None,
+                        help="Comma-separated channel names for PSD plot "
+                             "(default: visualization.psd_target_channels from config)")
     args = parser.parse_args()
-    main(args.config, args.n_subjects, args.epoch_idx)
+    channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
+    main(args.config, args.n_subjects, args.epoch_idx, channels)

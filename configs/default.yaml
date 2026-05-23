@@ -70,3 +70,6 @@ verification:
   v2_transitivity_amp_threshold: 0.1
   v2_transitivity_phase_threshold: 0.392
   v3_freq_variation_threshold: 0.20
+
+visualization:
+  psd_target_channels: ["FP1", "FP2"]
