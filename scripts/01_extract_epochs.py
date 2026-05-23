@@ -28,7 +28,9 @@ def main(config_path: str, force: bool = False) -> None:
         csv_bi_path = edf_path.with_suffix(".csv_bi")
 
         cache_key = make_cache_key(edf_path, 0.0, cfg)
-        cache_path = cache_root / row["subject_id"] / f"{cache_key}.npz"
+        label_prefix = "00" if row["label"] == 0 else "01"
+        prefixed_sid = f"{label_prefix}_{row['subject_id']}"
+        cache_path = cache_root / prefixed_sid / f"{cache_key}.npz"
 
         if cache_path.exists() and not force:
             continue
@@ -61,7 +63,7 @@ def main(config_path: str, force: bool = False) -> None:
             epochs=epochs,
             ch_names=np.array(ch_names),
             label=np.array(row["label"]),
-            subject_id=np.array(row["subject_id"]),
+            subject_id=np.array(prefixed_sid),
             split=np.array(row["split"]),
         )
 
