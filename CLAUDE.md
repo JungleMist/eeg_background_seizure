@@ -54,6 +54,31 @@ conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N
 conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force]
 ```
 
+### Cache invalidation tiers
+
+Changing a `configs/default.yaml` key requires re-running all scripts at or after its tier with `--force`:
+
+| Tier | Scripts to re-run | Config sections that trigger it |
+|------|-------------------|----------------------------------|
+| 1 | `01+` (all scripts) | `paths`, `dataset`, `split`, `preprocessing`, `channels.standard_19` |
+| 2 | `02+` | `channels.channel_groups`, `channels.passthrough`, `wiener` |
+| 3 | `03+` | `ica` |
+| 4 | `06` only | `ml` |
+
+Scripts 04 and 05 produce no cache and always re-run from existing caches — changing `verification` or `visualization` keys requires no `--force`.
+
+### Running with a local config
+
+To experiment without modifying the tracked `default.yaml`:
+
+```bash
+cp configs/default.yaml configs/local.yaml
+# edit configs/local.yaml freely
+conda run -n eeg_pipeline python scripts/01_extract_epochs.py --config configs/local.yaml
+```
+
+Add `configs/local*.yaml` to `.gitignore` to keep it untracked. **The config file must live directly inside `configs/`** (one level below the project root) — `load_config()` derives the project root as `config_path.parent.parent`, so placing it elsewhere breaks relative `cache_dir`/`results_dir` resolution. Use absolute paths in the config as an alternative.
+
 ## Architecture
 
 The package is `eeg_bg/`, pip-installed from `setup.py`. Configuration is loaded from `configs/default.yaml` via `eeg_bg.config.settings.load_config()`, which resolves relative `cache_dir` / `results_dir` paths against the project root.
@@ -188,6 +213,16 @@ Test files under `tests/test_visualization/` must call `matplotlib.use("Agg")` *
 Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark.integration`.
 
 `check_fixtures.py` (project root) is a standalone debug script that reconstructs fixture arrays and prints their shapes — useful for verifying conftest parity outside pytest.
+
+## Non-obvious constraints and gotchas
+
+- **Paired config keys**: `dataset.reference_scheme` and `dataset.montage_dir` must always change together (`"ar"` ↔ `"01_tcp_ar"`, `"le"` ↔ `"02_tcp_le"`). Mismatching them produces zero EDF files for one class. Similarly, `wiener.freq_band` must be a subset of `preprocessing.bandpass`, and `wiener.nperseg` must be ≤ `target_sfreq × epoch_length_sec`.
+- **`bandpass_filter()` in `epoch.py` is not used in the pipeline**: `load_edf` in `edf_reader.py` applies MNE's `raw.filter()` on the continuous signal before resampling. The standalone `bandpass_filter()` function in `epoch.py` (5th-order `sosfiltfilt`) is available for ad-hoc use but is never called by any script.
+- **XGBoost `n_estimators` in `param_grid` is ignored during Phase 1**: `xgb_pipeline.py` overrides it to 500 for the grid search and uses early stopping in Phase 2 to find the final tree count. The entry in `configs/default.yaml` is documentation only.
+- **`device="cuda"` automatically sets `n_jobs=1`**: `xgb_pipeline.py` detects the CUDA device setting and overrides GridSearchCV's `n_jobs` to avoid CUDA context conflicts across parallel workers. No manual change needed.
+- **ICA fits on a 1 Hz high-pass copy but applies to 0.5 Hz data**: `fit_ica()` creates a temporary high-pass-filtered copy for FastICA convergence (MNE best practice), then applies the fitted mixing matrix to the original 0.5 Hz bandpass epochs. The `specific` output in the ICA cache is in the original 0.5 Hz bandpass domain.
+- **`FEATURE_NAMES` must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 171)` are indexed by position against `FEATURE_NAMES`. Any reordering or insertion of channels in `configs/default.yaml` `standard_19` invalidates saved SHAP arrays.
+- **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
 
 ## Reference Documentation
 

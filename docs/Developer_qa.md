@@ -495,3 +495,112 @@ StandardScaler (fit on train)  →  XGBoost input
 | `eeg_bg/decomposition/wiener.py` | Stage 2 (wiener): vector Wiener filter |
 | `eeg_bg/decomposition/ica.py` | Stage 2 (ica): FastICA artefact removal |
 | `scripts/06_train_xgboost.py` | Stage 3: StandardScaler fit and application |
+
+---
+
+## Q: How do I run the pipeline with a modified config while keeping `configs/default.yaml` clean in git?
+
+### Approach: create a local override file in `configs/`
+
+Every pipeline script accepts a `--config` flag that defaults to `configs/default.yaml`.  The simplest workflow is to copy the default, edit the copy, and pass it explicitly.
+
+#### Step 1 — Copy the default config
+
+```bash
+cp configs/default.yaml configs/local.yaml
+```
+
+Name it anything you like; the convention `local.yaml` is suggested because the `.gitignore` entry added in Step 2 will match it.
+
+#### Step 2 — Add local configs to `.gitignore`
+
+Append a pattern so git never tracks your local overrides:
+
+```bash
+echo "configs/local*.yaml" >> .gitignore
+```
+
+After this, `configs/local.yaml`, `configs/local_debug.yaml`, etc. are ignored.  `configs/default.yaml` is still tracked normally.
+
+#### Step 3 — Edit your local config
+
+Open `configs/local.yaml` and change whatever you need — for example:
+
+```yaml
+# configs/local.yaml  (git-ignored, safe to modify freely)
+paths:
+  data_root: "D:/EEGdata/TUEP/v3.1.0"
+  cache_dir:   "cache_run2"     # separate cache tree for this experiment
+  results_dir: "results_run2"
+
+preprocessing:
+  artifact_threshold_uv: 150.0  # stricter artefact gate
+
+wiener:
+  coherence_threshold: 0.10     # lower gate to decompose more groups
+```
+
+Only the keys you change are worth including; `load_config()` reads the entire file so you must keep all sections present (start from a full copy of `default.yaml`).
+
+#### Step 4 — Pass `--config` to every script
+
+All six pipeline scripts accept the flag:
+
+```bash
+conda run -n eeg_pipeline python scripts/01_extract_epochs.py --config configs/local.yaml
+conda run -n eeg_pipeline python scripts/02_run_wiener.py     --config configs/local.yaml
+conda run -n eeg_pipeline python scripts/03_run_ica.py        --config configs/local.yaml
+conda run -n eeg_pipeline python scripts/04_run_verification.py --config configs/local.yaml
+conda run -n eeg_pipeline python scripts/05_run_visualization.py --config configs/local.yaml
+conda run -n eeg_pipeline python scripts/06_train_xgboost.py  --config configs/local.yaml
+```
+
+---
+
+### Path resolution constraint — configs must stay in `configs/`
+
+`load_config()` derives the project root as:
+
+```python
+project_root = config_path.parent.parent.resolve()
+# configs/local.yaml → parent = configs/ → parent.parent = project root  ✓
+```
+
+This means **the config file must be placed directly inside `configs/`** (one directory deep from the project root), not in a subdirectory.  If you put it elsewhere, relative `cache_dir` and `results_dir` values will resolve to the wrong location.
+
+Two safe alternatives if you cannot use `configs/`:
+
+1. **Use absolute paths** for `cache_dir` and `results_dir` in the config:
+   ```yaml
+   paths:
+     cache_dir:   "D:/eeg_background_seizure/cache_run2"
+     results_dir: "D:/eeg_background_seizure/results_run2"
+   ```
+
+2. **Pass the config by absolute path** — the resolution logic still applies, so the file still needs to be two directories deep from the project root, or use option 1.
+
+---
+
+### Keeping separate cache and results trees
+
+If you change settings that affect epoch content (bandpass, epoch length, artifact threshold) or the cache key inputs (`target_sfreq`, `bandpass`), the existing cache will be silently reused because the SHA-256 cache key is computed from those values.  To avoid mixing results from different configs, set distinct `cache_dir` and `results_dir` in your local config:
+
+```yaml
+paths:
+  cache_dir:   "cache_run2"
+  results_dir: "results_run2"
+```
+
+Both are relative to the project root when not absolute.  You can also re-run with `--force` to regenerate all cache files under the same directory.
+
+---
+
+### Quick reference
+
+| Task | Command |
+|------|---------|
+| Create local config | `cp configs/default.yaml configs/local.yaml` |
+| Ignore it in git | `echo "configs/local*.yaml" >> .gitignore` |
+| Run one script with it | `python scripts/01_extract_epochs.py --config configs/local.yaml` |
+| Force-recompute cache | add `--force` to any script |
+| Check which config a run used | the `index.csv` written to `cache/epochs/` records the split seed; config values are not logged separately |
