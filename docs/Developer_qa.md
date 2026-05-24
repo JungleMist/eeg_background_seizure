@@ -215,3 +215,97 @@ split    = str(data["split"])       # 'train'
 | `scripts/03_run_ica.py` | Writes ICA cache |
 | `eeg_bg/decomposition/wiener.py` | Defines `WienerResult`; `specific` and `coherent` come from here |
 | `eeg_bg/decomposition/ica.py` → `apply_ica()` | Returns cleaned `(n_epochs, 19, 1000)` array stored as `specific` |
+
+---
+
+## Q: Which features are extracted for XGBoost training in `scripts/06_train_xgboost.py`?
+
+### Short answer
+
+Each epoch is converted to a **171-dimensional vector** by `extract_epoch_features()` in `eeg_bg/features/extraction.py`.  The vector is built as **19 channels × 9 features** in a fixed channel-major order; names are in the public constant `FEATURE_NAMES`.
+
+### Feature types (9 per channel)
+
+#### 1–5: Relative band powers (`eeg_bg/features/band_power.py`)
+
+Power is estimated with Welch's method (boxcar window, `nperseg=250` = 2 s at 125 Hz — same parameters used by the Wiener decomposition).  Each value is the fraction of total power within the analysis band (0.5–40 Hz) that falls inside the sub-band, computed with `np.trapezoid`:
+
+| Index | Name | Band (Hz) |
+|-------|------|-----------|
+| 0 | `delta_power` | 0.5 – 4.0 |
+| 1 | `theta_power` | 4.0 – 8.0 |
+| 2 | `alpha_power` | 8.0 – 13.0 |
+| 3 | `beta_power`  | 13.0 – 30.0 |
+| 4 | `gamma_power` | 30.0 – 40.0 |
+
+The five values sum to approximately 1 (small discrepancies at band boundaries from trapezoidal integration are possible).
+
+#### 6–8: Hjorth parameters (`eeg_bg/features/hjorth.py`)
+
+Time-domain complexity descriptors (Hjorth 1970).  Let `x` = signal, `x'` = first difference, `x''` = second difference:
+
+| Index | Name | Formula |
+|-------|------|---------|
+| 5 | `hjorth_activity`   | `var(x)` |
+| 6 | `hjorth_mobility`   | `sqrt(var(x') / (var(x) + ε))` |
+| 7 | `hjorth_complexity` | `mobility(x') / (mobility(x) + ε)` |
+
+`ε = 1e-30` guards against division by zero for flat signals.  Activity is in µV²; mobility and complexity are dimensionless ratios.
+
+#### 9: Spectral entropy (`eeg_bg/features/spectral_entropy.py`)
+
+Shannon entropy of the normalised PSD within the analysis band:
+
+```
+p_i = PSD(f_i) / Σ PSD(f_j)   (for f_j in [0.5, 40] Hz)
+H   = -Σ p_i · log(p_i + ε)
+```
+
+Same Welch parameters as band power (`nperseg=250`, boxcar).  A pure sinusoid → H ≈ 0; white noise → H is maximised.
+
+### Channel order and missing channels
+
+Features iterate over the canonical 19-channel order from `configs/default.yaml`:
+
+```
+FP1, FP2, F3, F4, F7, F8, C3, C4, T3, T4, T5, T6, P3, P4, O1, O2, Fz, Cz, Pz
+```
+
+If a channel is absent from the epoch's `ch_names`, its 9-element slot is filled with zeros.  The vector length is always 171 regardless.
+
+### Which signal is used per condition
+
+`build_dataset()` selects the NPZ array key based on the `--condition` argument:
+
+| Condition | Cache directory | NPZ array key | Signal |
+|-----------|----------------|---------------|--------|
+| `raw`    | `cache/epochs/`           | `epochs`   | Raw EEG |
+| `wiener` | `cache/wiener_frequency/` | `specific` | Wiener source-specific component |
+| `ica`    | `cache/ica/`              | `specific` | ICA-cleaned signal |
+
+### Scaling and caching
+
+Before XGBoost training, a `StandardScaler` is fit on the training feature matrix and applied to val and test sets.  The scaler is saved to `results/xgboost/{condition}/scaler.joblib`.
+
+Extracted features are cached as `cache/features/{condition}_{split}.npz` (`X`, `y`, `subject_ids`) to avoid re-extraction on subsequent runs.  Pass `--force` to bypass this cache.
+
+### Feature name index
+
+`FEATURE_NAMES` (public list, `eeg_bg/features/extraction.py`) contains all 171 names in vector order, e.g.:
+
+```
+FP1_delta_power, FP1_theta_power, ..., FP1_spectral_entropy,
+FP2_delta_power, ..., Pz_spectral_entropy
+```
+
+SHAP value arrays (shape `(n_test_epochs, 171)`) are indexed positionally against this list, so `FEATURE_NAMES` must remain stable between runs.
+
+### Relevant source files
+
+| File | Role |
+|------|------|
+| `eeg_bg/features/extraction.py` | `extract_epoch_features()`, `build_dataset()`, `FEATURE_NAMES` |
+| `eeg_bg/features/band_power.py` | `relative_band_power()`, `BANDS` dict |
+| `eeg_bg/features/hjorth.py` | `hjorth_parameters()` |
+| `eeg_bg/features/spectral_entropy.py` | `spectral_entropy()` |
+| `scripts/06_train_xgboost.py` | Orchestration: feature loading, scaling, training, SHAP |

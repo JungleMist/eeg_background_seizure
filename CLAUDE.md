@@ -45,6 +45,8 @@ conda run -n eeg_pipeline python scripts/03_run_ica.py [--force]
 # 04 — Verification experiments V1/V2/V3 → results/verification/*.csv
 conda run -n eeg_pipeline python scripts/04_run_verification.py
 
+# Scripts 02, 03, and 04 all read only from cache/epochs/ — they can run in parallel after 01.
+
 # 05 — Per-subject waveform and PSD figures → results/figures/{subject_id}/
 conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N] [--epoch-idx I] [--channels "FP1,FP2,T3"]
 
@@ -78,6 +80,10 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 
 | Module | Responsibility |
 |--------|---------------|
+| `eeg_bg/config/settings.py` | `load_config(path)` — loads YAML and resolves relative `cache_dir`/`results_dir` to absolute paths against the project root. |
+| `eeg_bg/io/edf_reader.py` | `load_edf(path, cfg)` — loads EDF via MNE, strips `"EEG "` prefix and `"-REF"` suffix from channel names, resamples to 125 Hz, converts V→µV. |
+| `eeg_bg/io/annotation.py` | Parses `csv_bi` seizure annotation files; `extract_bckg_intervals` returns non-seizure segments with ±`seizure_buffer_sec` guard zones excluded. |
+| `eeg_bg/preprocessing/epoch.py` | `slice_epochs` — cuts fixed-length (8 s) epochs from a continuous recording; rejects epochs where any channel exceeds `artifact_threshold_uv` (200 µV). |
 | `eeg_bg/decomposition/wiener.py` | Core Wiener filter: `estimate_cross_psd` → `compute_wiener_filter` → `apply_wiener_filter` → `decompose_epoch` / `decompose_subject`. Returns `WienerResult` (raw, specific, coherent, filters dict, skipped_pairs). |
 | `eeg_bg/decomposition/wiener_scalar.py` | Fixed-scalar ablation baseline for comparison. |
 | `eeg_bg/decomposition/ica.py` | `fit_ica` uses FP1/FP2 as artifact-reference channels; `apply_ica` removes components correlated above `artifact_corr_threshold`. Stores cleaned signal as `specific` key (mirrors Wiener). |
@@ -97,6 +103,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/features/band_power.py` | `relative_band_power(signal, sfreq, band)` → scalar; `BANDS` dict mapping name→(low, high) Hz for delta/theta/alpha/beta/gamma. |
 | `eeg_bg/features/hjorth.py` | `hjorth_parameters(signal)` → `(activity, mobility, complexity)` triple. |
 | `eeg_bg/features/spectral_entropy.py` | `spectral_entropy(signal, sfreq)` → scalar normalised Shannon entropy of PSD. |
+| `eeg_bg/features/extraction.py` (constants) | `FEATURE_NAMES` — public list of 171 strings (`"{ch}_{suffix}"`) built at import time; must stay stable since downstream `.npy` SHAP arrays are indexed by position. `_CONDITION_TO_SUBDIR` maps `"wiener"→"wiener_frequency"` etc. |
 
 ### Channel groups (G1–G6)
 
@@ -170,11 +177,19 @@ Any script that saves figures must call `matplotlib.use("Agg")` **before** any `
 
 ## Tests
 
-All tests run without real EDF data. `tests/conftest.py` provides:
-- `synthetic_epoch`: 19-ch, 1000-sample epoch — single broadband point source mixed with known gains + independent noise (high SNR: source 50 µV, noise 1 µV).
-- `synthetic_epochs_batch`: batch of 5 epochs.
-- `tmp_cache_dir`: temporary directory for cache tests.
+All tests run without real EDF data. There are three conftest scopes:
+
+- **`tests/conftest.py`** (root): `synthetic_epoch` (19-ch 1000-sample epoch with a single point source, SNR ≈ 50:1), `synthetic_epochs_batch` (batch of 5), `tmp_cache_dir`, `cfg` (deep-copied `BASE_CFG` dict).
+- **`tests/test_features/conftest.py`**: `ch_names_19`, `sfreq`, `synthetic_epoch` (simple random — independent of root fixture), `pure_sine_signal` (10 Hz sine), `constant_signal`.
+- **`tests/test_ml/conftest.py`**: `tiny_xgb_model` (10-feature, 5-estimator, session-scoped), `full_feature_xgb_model` (171-feature, session-scoped).
+
+Test files under `tests/test_visualization/` must call `matplotlib.use("Agg")` **before** any `import matplotlib.pyplot` (same rule as scripts).
 
 Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark.integration`.
 
 `check_fixtures.py` (project root) is a standalone debug script that reconstructs fixture arrays and prints their shapes — useful for verifying conftest parity outside pytest.
+
+## Reference Documentation
+
+- **`docs/Developer_qa.md`** — Detailed Q&A: epoch validity criteria (4 criteria with decision flow), `.npz` cache file schemas (exact keys/shapes/dtypes per cache family), feature extraction internals (band definitions, Hjorth formulae, spectral entropy formula, per-condition signal mapping).
+- **`eeg_bg/README.md`** — Full package API reference: every public function signature, return type, parameter table, and usage example.

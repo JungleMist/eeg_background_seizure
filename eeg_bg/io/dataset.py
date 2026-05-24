@@ -39,14 +39,23 @@ def build_subject_index(cfg: dict) -> pd.DataFrame:
 
 def assign_splits(index: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     rng = np.random.default_rng(cfg["split"]["random_seed"])
-    subjects = index["subject_id"].unique().copy()
-    rng.shuffle(subjects)
+    train_frac = cfg["split"]["train"]
+    val_frac   = cfg["split"]["val"]
 
-    n = len(subjects)
-    n_train = int(n * cfg["split"]["train"])
-    n_val = int(n * cfg["split"]["val"])
-    train_set = set(subjects[:n_train])
-    val_set = set(subjects[n_train : n_train + n_val])
+    # Stratified by label: split each class independently so val/test always
+    # contain subjects from both classes even with a small val fraction (10%).
+    subject_label = index.drop_duplicates("subject_id").set_index("subject_id")["label"]
+    train_set, val_set = set(), set()
+    for _label, group in index.groupby(
+        index["subject_id"].map(subject_label)
+    ):
+        subjects = group["subject_id"].unique().copy()
+        rng.shuffle(subjects)
+        n = len(subjects)
+        n_train = int(n * train_frac)
+        n_val   = max(1, int(n * val_frac))   # guarantee ≥1 val subject per class
+        train_set.update(subjects[:n_train])
+        val_set.update(subjects[n_train : n_train + n_val])
 
     def _split(sid: str) -> str:
         if sid in train_set:

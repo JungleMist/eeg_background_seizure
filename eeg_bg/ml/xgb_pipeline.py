@@ -66,13 +66,18 @@ def train_xgboost(
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True,
                           random_state=fixed_params.get("random_state", 42))
 
+    # GPU context cannot be shared across sklearn parallel workers; run folds
+    # sequentially when CUDA is the compute device.
+    gs_n_jobs = 1 if fixed_params.get("device", "cpu") == "cuda" \
+        else fixed_params.get("n_jobs", -1)
+
     base_model = xgb.XGBClassifier(**fixed_params)
     grid = GridSearchCV(
         base_model,
         phase1_params,
         cv=cv,
         scoring="roc_auc",
-        n_jobs=fixed_params.get("n_jobs", -1),
+        n_jobs=gs_n_jobs,
         verbose=0,
         refit=False,           # we do the final fit ourselves
     )
