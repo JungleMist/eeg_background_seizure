@@ -1,28 +1,140 @@
+# =============================================================================
+# default.yaml — pipeline configuration
+# =============================================================================
+#
+# CACHE-INVALIDATION TIERS
+# Changing a value in a section requires re-running the indicated scripts with
+# --force (or deleting the corresponding cache subdirectory manually).
+#
+#   [01]  scripts/01_extract_epochs.py --force   → cache/epochs/
+#   [02]  scripts/02_run_wiener.py     --force   → cache/wiener_frequency/
+#   [03]  scripts/03_run_ica.py        --force   → cache/ica/
+#   [06]  scripts/06_train_xgboost.py  --force   → results/xgboost/
+#
+# Scripts 04 and 05 produce no cache; they always re-run from existing caches.
+# After a Tier 1 change you must re-run every subsequent tier in order.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Paths  (no cache impact — paths locate data, they do not affect processing)
+# -----------------------------------------------------------------------------
 paths:
-  data_root: "D:/EEGdata/TUEP/v3.1.0"
-  cache_dir: "cache"
-  results_dir: "results"
+  data_root: "D:/EEGdata/TUEP/v3.1.0"  # absolute path to TUEP dataset root
+  cache_dir: "cache"                    # relative to project root; resolved to
+                                        # absolute by load_config()
+  results_dir: "results"                # same resolution rule as cache_dir
 
+# -----------------------------------------------------------------------------
+# Dataset discovery  [Tier 1 — re-run 01+]
+# -----------------------------------------------------------------------------
+# PAIRED: reference_scheme ↔ montage_dir
+#   These two values must always be changed together:
+#     "ar"  →  montage_dir: "01_tcp_ar"
+#     "le"  →  montage_dir: "02_tcp_le"
+#   Mixing them causes build_subject_index() to find zero EDF files for one
+#   class (the montage subdirectory will not exist).
+#
+# classes: maps config label names to directory names under data_root.
+#   label=0 is always assigned to "epilepsy"; label=1 to any other key.
+#   The label encoding is hardcoded in io/dataset.py and propagated to every
+#   .npz cache file — do not reorder.
 dataset:
-  reference_scheme: "ar"
-  montage_dir: "01_tcp_ar"
+  reference_scheme: "ar"          # categorical: "ar" | "le"
+  montage_dir: "01_tcp_ar"        # PAIRED with reference_scheme (see above)
   classes:
-    epilepsy: "00_epilepsy"
-    control: "01_no_epilepsy"
+    epilepsy: "00_epilepsy"       # → label=0; folder name under data_root
+    control: "01_no_epilepsy"     # → label=1; folder name under data_root
 
+# -----------------------------------------------------------------------------
+# Train / val / test split  [Tier 1 — re-run 01+]
+# -----------------------------------------------------------------------------
+# CONSTRAINT: train + val + test must sum to exactly 1.0.
+#   test is the implicit remainder (all subjects assigned to neither train
+#   nor val); it is not read from this file directly.
+#
+# Splits are stratified by class label: each class is shuffled and partitioned
+# independently so both epilepsy and control subjects appear in every split,
+# even when val is as small as 10 %.  A floor of max(1, int(n * val_frac))
+# guarantees ≥1 val subject per class regardless of dataset size.
+#
+# IMPORTANT: split assignments are written into every .npz epoch cache file at
+# creation time.  Changing random_seed, train, or val reassigns subjects and
+# requires a full cache rebuild starting from script 01.
 split:
   train: 0.70
-  val: 0.10
-  test: 0.20
+  val:   0.10
+  test:  0.20         # kept for documentation; code derives test as remainder
   random_seed: 42
 
+# -----------------------------------------------------------------------------
+# Preprocessing  [Tier 1 — re-run 01+]
+# -----------------------------------------------------------------------------
+# FORMULA — epoch samples (affects multiple downstream settings):
+#   epoch_samples = target_sfreq × epoch_length_sec
+#                 = 125 × 8 = 1000 samples   (current)
+#
+# PAIRED: target_sfreq ↔ wiener.nperseg
+#   nperseg must be ≤ epoch_samples.  The recommended range is
+#   target_sfreq × 1 … target_sfreq × 4 (1–4 s window).  If you change
+#   target_sfreq, recalculate nperseg accordingly.
+#
+# PAIRED: target_sfreq ↔ wiener.freq_resolution_hz
+#   The coherence estimation window = target_sfreq / freq_resolution_hz.
+#   This must be < epoch_samples (otherwise scipy.coherence returns 1.0
+#   everywhere with a single window and no averaging).
+#   Constraint: freq_resolution_hz > target_sfreq / epoch_samples
+#               currently: 0.5 > 125 / 1000 = 0.125 Hz  ✓
+#
+# PAIRED: bandpass ↔ wiener.freq_band
+#   wiener.freq_band must be contained within bandpass.
+#   Extending bandpass beyond [0.5, 40.0] requires reconsidering
+#   the IIR filter order (order=5 in edf_reader.py).
+#
+# NOTE on filter method: a 5th-order zero-phase Butterworth IIR is applied
+# in edf_reader.py (method="iir").  The FIR default is intentionally avoided
+# because FIR tap counts at 0.5 Hz lower cutoff (~1691 taps at 256 Hz input)
+# exceed the length of short EDF recordings.
 preprocessing:
-  target_sfreq: 125
-  bandpass: [0.5, 40.0]
-  epoch_length_sec: 8.0
-  artifact_threshold_uv: 200.0
-  seizure_buffer_sec: 30.0
+  target_sfreq: 125             # Hz; EDF data is resampled to this rate after
+                                #   filtering.  PAIRED with wiener.nperseg and
+                                #   wiener.freq_resolution_hz (see above).
+  bandpass: [0.5, 40.0]         # [low_hz, high_hz]; 5th-order zero-phase
+                                #   Butterworth IIR.  PAIRED with wiener.freq_band
+                                #   (freq_band must be ⊆ bandpass).
+  epoch_length_sec: 8.0         # seconds; PAIRED with wiener.nperseg
+                                #   (nperseg ≤ target_sfreq × epoch_length_sec)
+  artifact_threshold_uv: 200.0  # µV; epochs where any channel exceeds this
+                                #   peak amplitude are discarded entirely
+  seizure_buffer_sec: 30.0      # seconds excluded on each side of a seizure
+                                #   annotation boundary (guard zone)
 
+# -----------------------------------------------------------------------------
+# Channel layout  (Tier 1 for channel_groups; structural for standard_19)
+# -----------------------------------------------------------------------------
+# standard_19: canonical 19-channel list in processing order.
+#   POSITION IS SIGNIFICANT: extract_epoch_features() builds a 171-dim vector
+#   as 19 channels × 9 features in this exact order.  Reordering or removing
+#   channels shifts feature indices and invalidates saved SHAP .npy arrays
+#   (which are indexed by position, not name).
+#   All channels listed here must be present in the EDF or the missing channels
+#   fill with zeros (no error is raised).
+#
+# CONSTRAINT: every channel in channel_groups and passthrough must appear in
+#   standard_19.  Together, channel_groups ∪ passthrough must cover all 19
+#   channels with no duplicates across the two sets.
+#   Current coverage check:
+#     groups:      FP1 FP2 F7 T3 T5 O1 O2 F8 T4 T6    (10 channels)
+#     passthrough: F3 F4 C3 C4 P3 P4 Fz Cz Pz           ( 9 channels)
+#     total: 19 ✓
+#
+# channel_groups: defines G1–G6 movement-artifact conduction pathways for the
+#   Wiener filter.  Groups with >2 channels model 3-electrode chains; the
+#   middle electrode(s) are filtered using both neighbours as reference.
+#   Changing groups [Tier 2 — re-run 02+].
+#
+# passthrough: channels that bypass all Wiener filtering unchanged.
+#   These are central/parietal electrodes where muscle-artifact conduction
+#   is not modelled.  Changing passthrough [Tier 2 — re-run 02+].
 channels:
   standard_19:
     - FP1
@@ -51,47 +163,160 @@ channels:
     - [O1, O2]                          # G4 – bilateral occipitalis
     - [F8, T4]                          # G5 – right SCM
     - [T4, T6, O2]                      # G6 – right posterior neck (3-ch chain)
-  passthrough: [F3, F4, C3, C4, P3, P4, Fz, Cz, Pz]
+  passthrough: [F3, F4, C3, C4, P3, P4, Fz, Cz, Pz]  # never Wiener-filtered
 
+# -----------------------------------------------------------------------------
+# Wiener decomposition  [Tier 2 — re-run 02+]
+# -----------------------------------------------------------------------------
+# PAIRED: nperseg ↔ preprocessing.target_sfreq + preprocessing.epoch_length_sec
+#   nperseg is the Welch window (samples) for PSD/CSD estimation inside the
+#   Wiener filter (estimate_cross_psd in decomposition/wiener.py).
+#   Spectral resolution of the estimated filter = target_sfreq / nperseg Hz.
+#   Current: 125 / 250 = 0.5 Hz per bin.
+#   Hard upper limit: epoch_samples = target_sfreq × epoch_length_sec = 1000.
+#   At nperseg == epoch_samples (single window), estimates are noisier; at
+#   nperseg < epoch_samples multiple segments are averaged for stability.
+#   Recommended: target_sfreq × 2 (2-second window) = 250 at 125 Hz.
+#   When nperseg < epoch_samples, wiener.py interpolates filter coefficients
+#   to the full rfft grid, so specific + coherent == raw is always guaranteed.
+#
+# INDEPENDENT: freq_resolution_hz (used only in V1 coherence verification)
+#   Sets the coherence estimation window in run_v1():
+#     nperseg_coh = int(target_sfreq / freq_resolution_hz)
+#                 = int(125 / 0.5) = 250 → 4 non-overlapping windows per epoch
+#   This is distinct from wiener.nperseg even though both equal 250 currently.
+#   The separation exists because coherence estimation requires multiple windows
+#   (to avoid trivial coherence=1), whereas Wiener filter estimation can use
+#   fewer, longer windows for smoother spectral estimates.
+#   Constraint: target_sfreq / freq_resolution_hz < epoch_samples
+#               i.e. freq_resolution_hz > target_sfreq / epoch_samples = 0.125 Hz
+#
+# PAIRED: freq_band ↔ preprocessing.bandpass
+#   freq_band must be ⊆ bandpass; extending freq_band outside the passband
+#   will include frequency bins that were filtered out in preprocessing.
 wiener:
-  mode: "frequency"
-  nperseg: 250
-  freq_resolution_hz: 0.5
-  coherence_threshold: 0.15
-  freq_band: [0.5, 40.0]
+  mode: "frequency"           # categorical: "frequency" (per-frequency Wiener
+                              #   filter, script 02) | "scalar" (fixed-scalar
+                              #   ablation baseline, wiener_scalar.py)
+  nperseg: 250                # Welch window for filter estimation (samples).
+                              #   PAIRED: ≤ target_sfreq × epoch_length_sec
+                              #   Formula: target_sfreq × window_sec
+                              #            = 125 × 2 = 250  (2 s window)
+  freq_resolution_hz: 0.5     # Hz; controls V1 coherence window independently
+                              #   of nperseg.  Constraint: must be >
+                              #   target_sfreq / epoch_samples = 0.125 Hz.
+  coherence_threshold: 0.15   # groups whose max pairwise coherence (over
+                              #   freq_band) falls below this value are skipped
+                              #   — no filtering applied to that group
+  freq_band: [0.5, 40.0]      # [low_hz, high_hz]; coherence gate and V1/V2/V3
+                              #   verification band.  PAIRED: must be ⊆ bandpass.
 
+# -----------------------------------------------------------------------------
+# ICA  [Tier 3 — re-run 03+]
+# -----------------------------------------------------------------------------
+# n_components must be ≤ len(channels.standard_19) = 19.
+#   Setting it equal to 19 uses all available degrees of freedom.
+#   Reducing it may improve convergence on short or noisy recordings.
+#
+# Fitting uses a 1 Hz high-pass copy of the data (MNE best practice for
+#   FastICA convergence) but the fitted ICA is applied to the original
+#   0.5 Hz bandpass data — see decomposition/ica.py for details.
+#
+# FP1 and FP2 are hardcoded as the EOG artifact reference channels in
+#   fit_ica().  They must remain in channels.standard_19 and must NOT be
+#   moved to channels.passthrough (passthrough channels are not decomposed).
+#
+# artifact_corr_threshold: components whose |Pearson r| with the mean FP1/FP2
+#   proxy exceeds this value are removed.  Lower → more aggressive removal.
+#   Typical range: 0.6–0.9.  At 0.8, roughly 1–3 components are removed per
+#   subject in the TUEP dataset.
 ica:
-  n_components: 19
-  method: "fastica"
-  artifact_corr_threshold: 0.8
+  n_components: 19            # must be ≤ len(standard_19); 19 = use all channels
+  method: "fastica"           # categorical: "fastica" | "infomax" | "picard"
+                              #   (all are valid MNE ICA methods)
+  artifact_corr_threshold: 0.8  # |Pearson r| with FP1/FP2 proxy above which a
+                                #   component is classified as artifact
   random_state: 42
 
+# -----------------------------------------------------------------------------
+# Verification thresholds  (no cache impact — reporting only)
+# -----------------------------------------------------------------------------
+# These thresholds determine pass/fail flags in the V2/V3 CSV outputs from
+# script 04.  They do not affect any cache, model, or decomposition output.
+# Adjust freely without re-running any upstream scripts.
+#
+# v2_transitivity_phase_threshold: in radians.  0.392 rad ≈ 22.5°.
 verification:
-  v2_transitivity_amp_threshold: 0.1
-  v2_transitivity_phase_threshold: 0.392
-  v3_freq_variation_threshold: 0.20
+  v2_transitivity_amp_threshold: 0.1    # amplitude deviation |1 - |h_bc/h_ac||
+  v2_transitivity_phase_threshold: 0.392 # phase deviation (rad); ≈ 22.5°
+  v3_freq_variation_threshold: 0.20     # max allowed peak-to-peak variation
+                                        #   of |h(f)| normalised to mean across
+                                        #   the target frequency band
 
+# -----------------------------------------------------------------------------
+# Visualisation  (no cache impact)
+# -----------------------------------------------------------------------------
+# psd_target_channels: must be a subset of channels.standard_19.
+#   These channels are highlighted in the PSD overlay plot (script 05).
+#   FP1/FP2 are the primary artifact sites, so they are the most informative
+#   channels for evaluating decomposition quality.
 visualization:
   psd_target_channels: ["FP1", "FP2"]
 
+# -----------------------------------------------------------------------------
+# Machine learning  [Tier 4 — re-run 06+]
+# -----------------------------------------------------------------------------
+# param_grid: scikit-learn GridSearchCV search space (Phase 1 of training).
+#   All keys must be valid XGBClassifier constructor parameters.
+#
+#   SPECIAL CASE — n_estimators:
+#     The value here is IGNORED during Phase 1.  xgb_pipeline.py excludes
+#     n_estimators from the grid and fixes it at 500 for the search.  In
+#     Phase 2, the final tree count is determined by early_stopping_rounds
+#     on the validation set.  The entry is kept here for documentation only.
+#
+# fixed: parameters applied to every model instance in both phases.
+#
+#   PAIRED: device ↔ n_jobs (GridSearchCV parallelism)
+#     device: categorical: "cpu" | "cuda"
+#     When device="cuda", xgb_pipeline.py automatically sets gs_n_jobs=1
+#     because parallel sklearn workers would compete for the same CUDA
+#     context.  n_jobs=-1 is therefore only effective when device="cpu".
+#     You do not need to change n_jobs manually — the code handles it.
+#
+#   objective: "binary:logistic" encodes the binary epilepsy/control task.
+#     Do not change unless reformulating as a regression or multi-class task.
+#
+#   eval_metric: used for both GridSearchCV scoring ("roc_auc") and Phase 2
+#     early stopping.  Must match the scoring function in train_xgboost().
+#
+# early_stopping_rounds: Phase 2 halts if validation AUC does not improve
+#   for this many consecutive boosting rounds.  Larger values → more trees
+#   and longer training; smaller values → faster but potentially underfit.
+#
+# cv_folds: number of StratifiedKFold folds for Phase 1 grid search.
+#   More folds → more stable estimates but proportionally longer Phase 1.
 ml:
   xgboost:
     param_grid:
       max_depth: [3, 4, 5, 6]
       learning_rate: [0.05, 0.1, 0.3]
-      n_estimators: [100, 200, 500]
+      n_estimators: [100, 200, 500]   # ignored in Phase 1 (overridden to 500);
+                                      #   Phase 2 uses early stopping instead
       subsample: [0.8, 1.0]
       colsample_bytree: [0.8, 1.0]
       reg_alpha: [0.0, 0.1]
       reg_lambda: [1.0, 5.0]
     fixed:
-      objective: "binary:logistic"
+      objective: "binary:logistic"    # do not change for binary classification
       eval_metric: "auc"
       random_state: 42
-      n_jobs: -1
-      device: "cuda"
-    early_stopping_rounds: 30
-    cv_folds: 5
+      n_jobs: -1                      # CPU parallelism; automatically overridden
+                                      #   to 1 by xgb_pipeline.py when device="cuda"
+      device: "cuda"                  # categorical: "cpu" | "cuda"
+                                      #   PAIRED with n_jobs (see above)
+    early_stopping_rounds: 30         # Phase 2 patience (boosting rounds)
+    cv_folds: 5                       # Phase 1 StratifiedKFold folds
   shap:
-    max_display: 20
-    dpi: 150
+    max_display: 20   # top-N features shown in the beeswarm summary plot
+    dpi: 150          # resolution for saved SHAP figures (PNG)
