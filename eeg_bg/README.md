@@ -34,7 +34,7 @@ cfg = load_config(Path("configs/custom.yaml"))
 
 # Access values
 sfreq  = cfg["preprocessing"]["target_sfreq"]   # 125.0
-pairs  = cfg["channels"]["bilateral_pairs"]      # list of [ch_a, ch_b] pairs
+groups = cfg["channels"]["channel_groups"]        # list of channel groups (G1–G6)
 cache  = cfg["paths"]["cache_dir"]               # absolute path string
 ```
 
@@ -100,11 +100,13 @@ Loads a single EDF file using MNE, selects the 19 standard channels from `cfg["c
 from eeg_bg.io.annotation import extract_bckg_intervals
 ```
 
-#### `extract_bckg_intervals(csv_bi_path: Path, cfg: dict) -> list[tuple[float, float]]`
+#### `extract_bckg_intervals(csv_bi_path: Path, cfg: dict, recording_duration: float | None = None) -> list[tuple[float, float]]`
 
-Parses a `.csv_bi` annotation file (TUEP binary term format) and returns the time intervals labeled as `bckg`, with seizure exclusion zones removed.
+Parses a `.csv_bi` annotation file (TUEP binary term format) and returns clean background time intervals, with seizure exclusion zones removed.
 
-**Exclusion logic:** Any `bckg` segment that overlaps a `seiz` label ± `seizure_buffer_sec` (default 30 s) is clipped or removed entirely.
+**When `recording_duration` is provided (recommended):** Background is defined as the full recording `(0, recording_duration)` minus any `seiz`-annotated segments ± `seizure_buffer_sec`. This is the correct semantics for TUEP v3.1.0, whose csv_bi files annotate only a short representative sample as `bckg` even when the rest of the recording is also background.
+
+**When `recording_duration` is None (legacy):** Background is derived solely from the explicit `bckg` rows in the csv_bi file — any `bckg` segment overlapping a `seiz` label ± `seizure_buffer_sec` (default 30 s) is clipped or removed entirely.
 
 **Returns:** List of `(start_sec, stop_sec)` tuples suitable for passing to `slice_epochs`.
 
@@ -293,15 +295,15 @@ specific, coherent = apply_wiener_filter(group_data, h, target_idx=0, n_times=10
 
 #### `decompose_epoch(epoch, ch_names, cfg, subject_id="", epoch_idx=0) -> WienerResult`
 
-Top-level function for decomposing a single epoch. Processes each bilateral pair from `cfg["channels"]["bilateral_pairs"]` in sequence:
+Top-level function for decomposing a single epoch. Processes each channel group from `cfg["channels"]["channel_groups"]` (G1–G6) in sequence:
 
-1. **Channel lookup** — skip pair if any channel is missing from `ch_names`
-2. **Coherence gate** — skip pair if `max coherence in freq_band < coherence_threshold`
+1. **Channel lookup** — skip group if any channel is missing from `ch_names`
+2. **Coherence gate** — skip group if `max pairwise coherence in freq_band < coherence_threshold`
 3. **Cross-PSD estimation** — call `estimate_cross_psd`
-4. **Filter computation** — call `compute_wiener_filter` for each channel in the pair
+4. **Filter computation** — call `compute_wiener_filter` for each channel in the group
 5. **Filter application** — call `apply_wiener_filter`, write back to `specific` and `coherent` arrays
 
-Midline channels (`Fz`, `Cz`, `Pz`) have no bilateral partner and are not modified: their `specific = raw`, `coherent = 0`.
+Passthrough channels (`F3`, `F4`, `C3`, `C4`, `P3`, `P4`, `Fz`, `Cz`, `Pz`) belong to no group and are not modified: their `specific = raw`, `coherent = 0`.
 
 ```python
 result = decompose_epoch(epoch, ch_names, cfg, subject_id="aaaaabhz", epoch_idx=3)
@@ -509,7 +511,7 @@ Two-panel histogram of `eps_amp` and `eps_phase` across all triplets and epochs,
 
 #### `plot_v3_frequency_variation(v3_df) -> plt.Figure`
 
-Bar chart of mean ± std `freq_variation` per bilateral pair, with a red dashed 20% threshold line.
+Bar chart of mean ± std `freq_variation` per channel group, with a red dashed 20% threshold line.
 
 #### `plot_ica_vs_wiener_coherence(raw_pre, ica_post, wiener_post, ch_names) -> plt.Figure`
 
@@ -526,17 +528,180 @@ fig = plot_ica_vs_wiener_coherence(
 
 ---
 
+### `eeg_bg.visualization.psd_plots`
+
+```python
+from eeg_bg.visualization.psd_plots import plot_psd_comparison
+```
+
+#### `plot_psd_comparison(raw, ch_names, sfreq, channels, wiener_specific=None, ica_specific=None, nperseg=250, freq_band=(0.5, 40.0), title="") -> plt.Figure`
+
+Grid figure with one row per target channel and three columns (Raw | Wiener Specific | ICA Cleaned). PSD is estimated with a boxcar Welch window consistent with the decomposition. Missing channels are shown as greyed-out placeholder panels; `None` inputs for optional arrays also render as "not available".
+
+```python
+fig = plot_psd_comparison(
+    raw, ch_names, sfreq=125.0,
+    channels=cfg["visualization"]["psd_target_channels"],  # e.g. ["FP1", "FP2"]
+    wiener_specific=wiener_specific,
+    ica_specific=ica_specific,
+    title="Subject aaaaabhz — Epoch 0",
+)
+fig.savefig("results/figures/aaaaabhz/psd_comparison.png", dpi=150, bbox_inches="tight")
+```
+
+---
+
+### `eeg_bg.visualization.waveform_plots`
+
+```python
+from eeg_bg.visualization.waveform_plots import plot_multichannel_comparison
+```
+
+#### `plot_multichannel_comparison(raw, wiener_specific, ica_specific, ch_names, sfreq=125.0, offset_uv=150.0, title="") -> plt.Figure`
+
+Stacked 19-channel EEG waveform figure with 1–3 side-by-side panels (Raw always shown; Wiener-specific and ICA-cleaned panels added when not `None`). Channels are offset vertically by `offset_uv` µV for visual separation.
+
+```python
+fig = plot_multichannel_comparison(
+    raw, wiener_specific, ica_specific,
+    ch_names, sfreq=125.0, title="aaaaabhz  epoch 0",
+)
+fig.savefig("results/figures/aaaaabhz/waveform_comparison.png", dpi=150, bbox_inches="tight")
+```
+
+---
+
+## `features`
+
+### `eeg_bg.features.extraction`
+
+```python
+from eeg_bg.features.extraction import extract_epoch_features, build_dataset, FEATURE_NAMES
+```
+
+#### `FEATURE_NAMES: list[str]`
+
+Stable ordered list of 171 feature names, built at import time. Each name has the form `"{channel}_{feature}"`, e.g. `"FP1_delta_power"`, `"T3_hjorth_activity"`. Channels iterate in the canonical 19-channel order from `configs/default.yaml`; features iterate in the order `delta_power, theta_power, alpha_power, beta_power, gamma_power, hjorth_activity, hjorth_mobility, hjorth_complexity, spectral_entropy`.
+
+#### `extract_epoch_features(epoch, ch_names, sfreq, nperseg=250, freq_band=(0.5, 40.0)) -> np.ndarray`
+
+Converts a single `(n_ch, n_times)` epoch into a fixed-length `(171,)` feature vector.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `epoch` | `np.ndarray (n_ch, n_times)` | Signal in µV |
+| `ch_names` | `list[str]` | Channel names for axis 0 |
+| `sfreq` | `float` | Sampling frequency in Hz |
+| `nperseg` | `int` | Welch window length (default 250) |
+| `freq_band` | `tuple[float, float]` | Analysis band in Hz |
+
+Missing channels (not in `ch_names`) fill with zeros so the output length is always 171.
+
+```python
+feat = extract_epoch_features(epoch, ch_names, sfreq=125.0)
+# feat.shape → (171,)
+```
+
+#### `build_dataset(cache_root, condition, split, sfreq, nperseg, freq_band) -> tuple[np.ndarray, np.ndarray, list[str]]`
+
+Iterates all `.npz` files in the appropriate cache subdirectory, filters by split, and calls `extract_epoch_features` on every epoch.
+
+| Condition | Cache subdirectory | Array key |
+|-----------|-------------------|-----------|
+| `"raw"` | `cache/epochs/` | `"epochs"` |
+| `"wiener"` | `cache/wiener_frequency/` | `"specific"` |
+| `"ica"` | `cache/ica/` | `"specific"` |
+
+**Returns:** `(X, y, subject_ids)` where `X` is `(n_epochs, 171)`, `y` is `(n_epochs,)` int (0=epilepsy, 1=control), and `subject_ids` is a list of one subject ID per epoch row.
+
+---
+
+## `ml`
+
+### `eeg_bg.ml.xgb_pipeline`
+
+```python
+from eeg_bg.ml.xgb_pipeline import train_xgboost, subject_level_predict, evaluate_subject_level
+```
+
+#### `train_xgboost(X_train, y_train, X_val, y_val, cfg) -> xgb.XGBClassifier`
+
+Two-phase training pipeline:
+1. **Phase 1 — GridSearchCV:** `StratifiedKFold` (5-fold, `scoring="roc_auc"`) over `cfg["ml"]["xgboost"]["param_grid"]`. `n_estimators` is fixed at 500 during the search.
+2. **Phase 2 — Early-stopping refit:** Fresh estimator built from best params, fitted on full training set with `eval_set=[(X_val, y_val)]` and `early_stopping_rounds=30`. Val set is used **only** for early stopping, never for hyperparameter selection.
+
+Returns the Phase 2 model (final number of trees determined by early stopping).
+
+#### `subject_level_predict(model, X, subject_ids, labels) -> pd.DataFrame`
+
+Averages epoch-level `predict_proba` outputs per subject.
+
+**Returns DataFrame columns:** `subject_id`, `pred_proba` (mean across epochs), `true_label`.
+
+#### `evaluate_subject_level(subject_df) -> dict[str, float]`
+
+Computes metrics from the output of `subject_level_predict`.
+
+**Returns:** `{"auroc": float, "f1": float, "accuracy": float}`
+
+---
+
+### `eeg_bg.ml.shap_analysis`
+
+```python
+from eeg_bg.ml.shap_analysis import (
+    compute_shap_values,
+    aggregate_shap_by_band,
+    aggregate_shap_by_channel,
+    plot_shap_summary,
+    plot_shap_comparison,
+)
+```
+
+#### `compute_shap_values(model, X, feature_names) -> np.ndarray`
+
+Computes SHAP values using `shap.TreeExplainer`. Returns `(n_samples, n_features)` array for the positive class (control / label=1).
+
+#### `aggregate_shap_by_band(shap_values, feature_names) -> dict[str, float]`
+
+Mean `|SHAP|` grouped by feature type. Keys: `"delta"`, `"theta"`, `"alpha"`, `"beta"`, `"gamma"`, `"hjorth"`, `"spectral_entropy"`.
+
+#### `aggregate_shap_by_channel(shap_values, feature_names) -> dict[str, float]`
+
+Mean `|SHAP|` grouped by EEG channel. Keys are the 19 channel names.
+
+#### `plot_shap_summary(shap_values, X, feature_names, save_path, max_display=20) -> None`
+
+Beeswarm SHAP summary plot (top `max_display` features). Saves to `save_path` and does not return a figure.
+
+#### `plot_shap_comparison(results_dir, save_path) -> None`
+
+2 × 3 publication-quality figure comparing SHAP band and channel importance across the three conditions (Raw | ICA | Wiener). Saves to `save_path`.
+
+---
+
 ## Internal Design Notes
 
-### Why Bilateral Pairs Only?
+### Why Channel Groups (G1–G6)?
 
-The Wiener decomposition is applied **only** to the 8 bilateral electrode pairs (e.g., FP1/FP2). The physical hypothesis is that contralateral homologous sites — equidistant from the midline and at the same cortical region — share a common signal from a physical point source (volume-conducted subcortical activity, reference contamination). Channel pairs that are not bilateral homologs are not expected to satisfy the single-source model, so fitting a Wiener filter to them would remove genuinely independent cortical signals.
+The Wiener decomposition is applied **only** to six anatomically motivated channel groups (G1–G6), not all possible pairs. Each group models a specific **movement-artifact conduction pathway**:
 
-### Why `nperseg = 1000` in Production?
+| Group | Channels | Pathway |
+|-------|----------|---------|
+| G1 | `[FP1, FP2]` | Symmetric frontalis muscle |
+| G2 | `[F7, T3]` | Left sternocleidomastoid (SCM) |
+| G3 | `[T3, T5, O1]` | Left posterior neck (3-channel chain) |
+| G4 | `[O1, O2]` | Bilateral occipitalis |
+| G5 | `[F8, T4]` | Right SCM |
+| G6 | `[T4, T6, O2]` | Right posterior neck (3-channel chain) |
 
-At 125 Hz with 8-second epochs, `n_times = 1000`. Setting `nperseg = 1000` makes the Welch estimator use a single segment, which is equivalent to computing the periodogram directly. Combined with the rectangular window, this means the Wiener filter frequency grid `(501 bins)` exactly matches the `rfft` grid used in `apply_wiener_filter` — no interpolation is needed. This gives an exact decomposition identity.
+Groups G3 and G6 are 3-channel chains, handled uniformly by `decompose_epoch` via pairwise coherence gating across all channel combinations in the group. Channels outside these groups (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are designated as `passthrough` — they carry independent cortical signals and are left unmodified.
 
-The test fixtures use `nperseg = 500` (two segments) to allow meaningful coherence estimation with variance reduction in tests that check coherence reduction.
+### Why `nperseg = 250` in Production?
+
+At 125 Hz with 8-second epochs, `n_times = 1000`. Setting `nperseg = 250` gives four Welch segments per epoch, providing variance reduction in the cross-PSD estimate while still resolving individual frequency bins at 0.5 Hz resolution. Because `nperseg (250) < n_times (1000)`, the Wiener filter's frequency grid has 126 bins while the `rfft` grid has 501 bins; `apply_wiener_filter` linearly interpolates `h(f)` to the full rfft grid before applying it. The `specific + coherent = raw` identity is guaranteed algebraically regardless of this interpolation.
+
+The test fixtures use `nperseg = 500` (two segments) to allow meaningful multi-segment coherence estimation in tests that check coherence reduction.
 
 ### `specific + coherent = raw` Guarantee
 

@@ -52,7 +52,7 @@ pip install -e .
 
 | Package | Version | Role |
 |---------|---------|------|
-| numpy | 1.26.4 | Array operations |
+| numpy | ≥2.0 | Array operations |
 | scipy | 1.17.1 | Welch PSD, CSD, coherence |
 | mne | 1.11.0 | EDF I/O, ICA |
 | scikit-learn | 1.8.0 | Dataset splits |
@@ -169,7 +169,7 @@ D:\EEGdata\TUEP\v3.1.0\
           ▼  Script 01
     [io] build_subject_index  →  filter AR montages  →  assign train/val/test
     [io] load_edf             →  bandpass filter  →  resample to 125 Hz
-    [io] extract_bckg_intervals  →  exclude seizure ±30 s buffers
+    [io] extract_bckg_intervals  →  full recording minus seizure ±30 s buffers
     [preprocessing] slice_epochs  →  reject artifacts > 200 µV
           │
           ▼  cache/epochs/{subject_id}/{cache_key}.npz
@@ -256,20 +256,19 @@ preprocessing:
   seizure_buffer_sec:   30.0       # exclusion zone around annotated seizures
 
 channels:
-  bilateral_pairs:                 # 8 pairs processed by Wiener
-    - [FP1, FP2]
-    - [F3,  F4]
-    - [F7,  F8]
-    - [C3,  C4]
-    - [T3,  T4]
-    - [T5,  T6]
-    - [P3,  P4]
-    - [O1,  O2]
-  midline: [Fz, Cz, Pz]           # pass-through (no bilateral partner)
+  channel_groups:                  # G1–G6 movement-artifact conduction paths
+    - [FP1, FP2]                   # G1 – symmetric facial (frontalis)
+    - [F7,  T3]                    # G2 – left SCM
+    - [T3,  T5, O1]                # G3 – left posterior neck (3-ch chain)
+    - [O1,  O2]                    # G4 – bilateral occipitalis
+    - [F8,  T4]                    # G5 – right SCM
+    - [T4,  T6, O2]                # G6 – right posterior neck (3-ch chain)
+  passthrough: [F3, F4, C3, C4, P3, P4, Fz, Cz, Pz]  # never filtered
 
 wiener:
-  nperseg:             1000        # Welch segment length (= epoch length → exact FFT match)
-  coherence_threshold: 0.15        # skip pair if max coherence < this
+  nperseg:             250         # Welch segment length → 4 segments/epoch, 0.5 Hz resolution
+  freq_resolution_hz:  0.5         # used by V1 coherence estimation
+  coherence_threshold: 0.15        # skip group if max pairwise coherence < this
   freq_band:           [0.5, 40.0] # coherence gate + filter estimation band
 
 ica:
@@ -287,10 +286,10 @@ verification:
 
 | Decision | Value | Rationale |
 |----------|-------|-----------|
-| `nperseg = 1000` | = epoch length (8 s × 125 Hz) | Single-segment Welch → exact rectangular-window FFT; `h(f)` applied without interpolation |
-| Coherence gate `0.15` | Skip pairs with low coherence | Avoids fitting noise; pairs without a true shared source are skipped |
+| `nperseg = 250` | = epoch / 4 (0.5 Hz resolution) | Four-segment Welch → variance reduction in cross-PSD; filter interpolated to full rfft grid; `specific + coherent = raw` guaranteed algebraically |
+| Coherence gate `0.15` | Skip groups with low coherence | Avoids fitting noise; groups without a true shared source are skipped |
 | Rectangular window | `window='boxcar'` | Matches the FFT applied during filter application; no spectral leakage mismatch |
-| Bilateral pairs only | 8 pairs, not all 171 channel pairs | Physically motivated: only contralateral homologous sites share a common source hypothesis |
+| Channel groups G1–G6 | 6 groups (2- and 3-channel), not all pairs | Physically motivated: each group models a specific movement-artifact conduction pathway |
 
 ---
 
@@ -561,12 +560,12 @@ conda run -n eeg_pipeline pytest tests/test_decomposition/ -v
 conda run -n eeg_pipeline pytest tests/ -m "not integration" -q
 ```
 
-**Current status:** ~92 tests, all passing.
+**Current status:** ~96 tests, all passing.
 
 | Test module | Count | What is verified |
 |-------------|-------|-----------------|
 | `test_config.py` | 5 | YAML loading, path resolution |
-| `test_io/` | 19 | Dataset traversal, EDF channel normalisation, annotation parsing, cache read/write |
+| `test_io/` | 23 | Dataset traversal, EDF channel normalisation, annotation parsing (incl. full-recording semantics), cache read/write |
 | `test_preprocessing/` | 7 | Epoch slicing, artifact rejection, bandpass filter, reference detection |
 | `test_decomposition/` | 8 | Wiener decomposition identity (`specific + coherent = raw`), scalar ablation, ICA shape |
 | `test_verification/` | 4 | V1 coherence reduction, V2/V3 DataFrame structure |
@@ -582,10 +581,10 @@ conda run -n eeg_pipeline pytest tests/ -m "not integration" -q
 x_i(t) = gain_i · source(t) + noise_i(t)
 ```
 
-- `source(t)`: 10 Hz sinusoid, amplitude 50 µV
+- `source(t)`: broadband Gaussian noise, σ = 50 µV
 - `gains`: uniform random in [0.5, 1.0], seed-controlled
-- `noise`: Gaussian, σ = 1 µV (SNR ≈ 50 dB)
-- `nperseg = 500` (half epoch length) to ensure multi-segment Welch estimation
+- `noise`: independent Gaussian per channel, σ = 1 µV (SNR ≈ 50 dB)
+- `nperseg = 500` in `BASE_CFG` (2 segments per epoch) to ensure multi-segment Welch estimation for coherence tests
 
 At this SNR, the Wiener filter should recover `gain_i / gain_j ≈ h_ij` and reduce cross-channel coherence of the specific component to near zero.
 
