@@ -26,7 +26,14 @@ def fit_ica(
         n_components=n_components, method="fastica",
         random_state=random_state, verbose=False
     )
-    ica.fit(raw, verbose=False)
+    # MNE recommends ≥1 Hz high-pass for ICA convergence. Create a filtered copy
+    # used only for fitting; apply_ica runs on the original 0.5 Hz bandpass data.
+    raw_for_ica = raw.copy().filter(
+        l_freq=1.0, h_freq=None,
+        method="iir", iir_params=dict(order=5, ftype="butter"),
+        verbose=False,
+    )
+    ica.fit(raw_for_ica, verbose=False)
 
     # Artifact detection: correlate each component with frontal proxy (EOG)
     sources = ica.get_sources(raw).get_data()  # (n_components, n_samples)
