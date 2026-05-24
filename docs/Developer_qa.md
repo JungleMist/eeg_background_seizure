@@ -309,3 +309,189 @@ SHAP value arrays (shape `(n_test_epochs, 171)`) are indexed positionally agains
 | `eeg_bg/features/hjorth.py` | `hjorth_parameters()` |
 | `eeg_bg/features/spectral_entropy.py` | `spectral_entropy()` |
 | `scripts/06_train_xgboost.py` | Orchestration: feature loading, scaling, training, SHAP |
+
+---
+
+## Q: What preprocessing is applied to raw EDF data?
+
+### Overview
+
+Raw EDF data passes through two sequential stages before features are extracted:
+
+1. **Stage 1 — EDF loading and epoch caching** (`scripts/01_extract_epochs.py`): signal-level steps applied to the continuous recording.
+2. **Stage 2 — Condition-specific decomposition** (`scripts/02_run_wiener.py`, `scripts/03_run_ica.py`): optional artefact removal applied to cached epochs for the `wiener` and `ica` conditions.
+
+The `raw` condition uses Stage 1 output directly; `wiener` and `ica` add Stage 2 on top.
+
+---
+
+### Stage 1: EDF loading and epoch caching
+
+Steps are executed in this order inside `scripts/01_extract_epochs.py`:
+
+#### 1. Reference-scheme filtering (`preprocessing/reference.py`)
+
+Before any signal is loaded, the subject index is filtered to keep only recordings stored under the `01_tcp_ar` montage directory (average reference).  Linked-ears (`tcp_le`) recordings are excluded.
+
+Config key: `dataset.reference_scheme` (default `"ar"`).
+
+#### 2. Subject-level train/val/test split (`io/dataset.py → assign_splits`)
+
+Splits are assigned **before** any signal is loaded and **by subject** (all EDF files for a subject land in the same partition).  The split is stratified per class so both `epilepsy` and `control` appear in every partition:
+
+- Epilepsy and control subjects are shuffled independently with `numpy.random.default_rng(seed=42)`.
+- Each class contributes proportionally: 70 % train / 10 % val / 20 % test.
+- At least 1 val subject per class is guaranteed (`max(1, int(n * 0.10))`).
+- The `split` label is stored in every `.npz` cache file and used unchanged by all downstream scripts.
+
+#### 3. Channel selection and name normalisation (`io/edf_reader.py → load_edf`)
+
+The EDF is read with `mne.io.read_raw_edf(..., preload=True)`.  Each raw channel name is normalised:
+
+```
+"EEG FP1-REF"  →  strip "EEG " prefix  →  split on "-"  →  uppercase  →  "FP1"
+```
+
+Only channels whose normalised name matches one of the 19 standard names in `configs/default.yaml` are retained (`raw.pick()`).  The channel is then renamed to the canonical config name (e.g. `"FZ"` → `"Fz"`).  EDFs with no matching channels raise `ValueError` and are skipped.
+
+#### 4. Bandpass filtering (`io/edf_reader.py → load_edf`)
+
+MNE's `raw.filter(low=0.5, high=40.0, method="iir")` is applied to the continuous signal **before** resampling using a 5th-order zero-phase Butterworth IIR filter.  This removes slow drift (< 0.5 Hz) and high-frequency noise (> 40 Hz).  IIR is used rather than MNE's default FIR because the FIR tap count for a 0.5 Hz lower cutoff (≈ 1691 taps at 256 Hz) exceeds the length of short EDF recordings, producing filter-distortion warnings with no benefit to output quality.
+
+Config keys: `preprocessing.bandpass` (default `[0.5, 40.0]`).
+
+> **Note:** `eeg_bg/preprocessing/epoch.py` also defines a `bandpass_filter()` function (5th-order Butterworth, `sosfiltfilt`) that is imported by `scripts/01_extract_epochs.py` but is **not called** in the main pipeline — filtering is handled entirely by MNE inside `load_edf`.  The function is available for ad-hoc use only.
+
+#### 5. Resampling (`io/edf_reader.py → load_edf`)
+
+If the recording's native sample rate differs from 125 Hz, `raw.resample(125)` is called.  TUEP recordings are typically already at 250 Hz, so resampling occurs for most files.
+
+Config key: `preprocessing.target_sfreq` (default `125`).
+
+#### 6. Unit conversion (`io/edf_reader.py → load_edf`)
+
+`raw.get_data()` returns signals in volts.  The array is multiplied by `1e6` to convert to **µV**.  All subsequent processing (artifact thresholds, feature values, Wiener filter coefficients) operates in µV.
+
+#### 7. Background interval extraction (`io/annotation.py → extract_bckg_intervals`)
+
+The continuous signal is not stored wholesale; only segments labelled as background are eligible for epoch slicing:
+
+| Situation | Base intervals |
+|-----------|----------------|
+| `.csv_bi` file exists alongside EDF | Full recording `(0, duration)` minus seizure exclusion zones |
+| No `.csv_bi` file | `[(0.0, duration)]` — entire recording treated as background |
+
+Seizure exclusion zones are computed as:
+```
+excluded = [max(0, seiz_start − buffer),  seiz_end + buffer]
+```
+Each zone is subtracted from the base intervals via exact interval arithmetic, potentially splitting one interval into two.
+
+Config key: `preprocessing.seizure_buffer_sec` (default `30.0` s).
+
+#### 8. Epoch slicing (`preprocessing/epoch.py → slice_epochs`)
+
+Each background interval is tiled with **non-overlapping** fixed-length windows:
+
+```
+epoch_len = 8 s × 125 Hz = 1000 samples
+stride    = epoch_len  (no overlap)
+partial tail windows → discarded
+```
+
+#### 9. Amplitude artifact rejection (`preprocessing/epoch.py → slice_epochs`)
+
+Each candidate epoch is tested with a single scalar check:
+
+```python
+if np.max(np.abs(epoch)) <= 200.0:   # µV, all channels and samples
+    keep epoch
+```
+
+Epochs containing electrode pops, saturation, or gross movement artefacts are silently discarded.  If zero epochs survive for an EDF file, the file is skipped entirely (no `.npz` written).
+
+Config key: `preprocessing.artifact_threshold_uv` (default `200.0`).
+
+#### 10. Cache write
+
+Surviving epochs are saved as `cache/epochs/{label_prefix}_{subject_id}/{cache_key}.npz` with keys `epochs (n_epochs, 19, 1000) float64`, `ch_names`, `label`, `subject_id`, `split`.  The cache key is a 16-character SHA-256 prefix of `"{edf_path}|0.0000|125|[0.5, 40.0]"`.
+
+---
+
+### Stage 2: Condition-specific decomposition (applied to cached epochs)
+
+Scripts 02 and 03 operate **on cached epochs only** — they never re-read the EDF.
+
+#### Wiener condition (`scripts/02_run_wiener.py`)
+
+For each epoch, the vector Wiener filter (`eeg_bg/decomposition/wiener.py`) separates each channel group (G1–G6) into:
+- `coherent` — the cross-electrode shared-source component.
+- `specific` — the residual after subtracting the coherent component.
+
+Only the `specific` array is used as the signal for feature extraction.  Groups below the coherence threshold (default 0.15) are skipped; their `specific` equals `raw` unchanged.
+
+#### ICA condition (`scripts/03_run_ica.py`)
+
+FastICA with 19 components is fit on each epoch.  Components whose absolute correlation with the FP1 or FP2 reference channels exceeds `artifact_corr_threshold` (default 0.8) are zeroed out in component space before reconstruction.  The cleaned signal is stored as `specific`.
+
+---
+
+### Stage 3: Feature scaling (per XGBoost condition, `scripts/06_train_xgboost.py`)
+
+After epoch-level features are extracted, a `StandardScaler` is fit on the **training set only** and applied to val and test sets (zero-mean, unit-variance per feature).  Scaling is applied to the 171-dimensional feature matrix, not to the raw signal.
+
+---
+
+### End-to-end summary
+
+```
+EDF file
+  │
+  ├─ reference-scheme filter (keep tcp_ar only)
+  │
+  ▼
+load_edf()
+  ├─ channel selection + name normalisation
+  ├─ MNE bandpass FIR filter  [0.5 – 40 Hz]
+  ├─ resample to 125 Hz
+  └─ V → µV
+  │
+  ▼
+extract_bckg_intervals()
+  └─ full recording minus (seiz ± 30 s) exclusion zones
+  │
+  ▼
+slice_epochs()
+  ├─ non-overlapping 8 s windows (1000 samples, no overlap)
+  └─ reject peak |amplitude| > 200 µV
+  │
+  ▼
+cache/epochs/  ←─── raw condition reads here
+  │
+  ├─ [wiener] Wiener decomposition → specific component
+  │     cache/wiener_frequency/  ←─── wiener condition reads here
+  │
+  └─ [ica]    FastICA artefact removal → specific component
+              cache/ica/           ←─── ica condition reads here
+  │
+  ▼
+extract_epoch_features()  →  171-dim vector per epoch
+  │
+  ▼
+StandardScaler (fit on train)  →  XGBoost input
+```
+
+### Relevant source files
+
+| File | Role |
+|------|------|
+| `scripts/01_extract_epochs.py` | Orchestrates Stage 1 |
+| `eeg_bg/io/edf_reader.py` | Steps 3–6: channel normalisation, filter, resample, unit convert |
+| `eeg_bg/io/annotation.py` | Step 7: background interval extraction |
+| `eeg_bg/preprocessing/epoch.py` | Steps 8–9: epoch slicing and amplitude rejection |
+| `eeg_bg/preprocessing/reference.py` | Step 1: reference-scheme filtering |
+| `eeg_bg/io/dataset.py` | Step 2: subject-level stratified split |
+| `eeg_bg/io/cache.py` | Step 10: cache key and load-or-compute helper |
+| `eeg_bg/decomposition/wiener.py` | Stage 2 (wiener): vector Wiener filter |
+| `eeg_bg/decomposition/ica.py` | Stage 2 (ica): FastICA artefact removal |
+| `scripts/06_train_xgboost.py` | Stage 3: StandardScaler fit and application |

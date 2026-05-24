@@ -57,9 +57,11 @@ def load_edf(
             f"Available: {raw.ch_names}"
         )
 
-    raw.pick_channels(list(name_map.keys()))
+    raw.pick(list(name_map.keys()))
     raw.rename_channels(name_map)   # raw.ch_names now uses canonical names
-    raw.filter(low, high, verbose=False)
+    raw.filter(low, high, method="iir",
+               iir_params=dict(order=5, ftype="butter"),
+               verbose=False)
 
     if raw.info["sfreq"] != target_sfreq:
         raw.resample(target_sfreq, verbose=False)
