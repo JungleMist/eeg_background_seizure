@@ -41,10 +41,10 @@ def main(config_path: str, force: bool = False) -> None:
             print(f"  SKIP {edf_path.name}: {e}")
             continue
 
+        duration = data.shape[1] / sfreq
         if csv_bi_path.exists():
-            intervals = extract_bckg_intervals(csv_bi_path, cfg)
+            intervals = extract_bckg_intervals(csv_bi_path, cfg, recording_duration=duration)
         else:
-            duration = data.shape[1] / sfreq
             intervals = [(0.0, duration)]
 
         epochs = slice_epochs(

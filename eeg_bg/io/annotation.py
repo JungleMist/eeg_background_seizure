@@ -3,8 +3,19 @@ from pathlib import Path
 
 
 def extract_bckg_intervals(
-    csv_bi_path: Path, cfg: dict
+    csv_bi_path: Path, cfg: dict, recording_duration: float | None = None
 ) -> list[tuple[float, float]]:
+    """Return background intervals from a TUEP csv_bi annotation file.
+
+    When *recording_duration* is provided (recommended), background is defined
+    as the full recording minus any seizure-annotated segments ± buffer.  This
+    is the correct semantics for TUEP v3.1.0, whose csv_bi files only annotate
+    a short representative sample as "bckg" even when the rest of the recording
+    is also background.
+
+    When *recording_duration* is None (legacy), background is derived solely
+    from the explicit "bckg" rows in the file.
+    """
     buffer = cfg["preprocessing"]["seizure_buffer_sec"]
     bckg_intervals: list[tuple[float, float]] = []
     seiz_intervals: list[tuple[float, float]] = []
@@ -23,8 +34,11 @@ def extract_bckg_intervals(
 
     excluded = [(max(0.0, s - buffer), e + buffer) for s, e in seiz_intervals]
 
+    # Base intervals: full recording (new) or explicit bckg rows (legacy).
+    base = [(0.0, recording_duration)] if recording_duration is not None else bckg_intervals
+
     result: list[tuple[float, float]] = []
-    for b_start, b_end in bckg_intervals:
+    for b_start, b_end in base:
         segments = [(b_start, b_end)]
         for ex_start, ex_end in excluded:
             new_segs: list[tuple[float, float]] = []
