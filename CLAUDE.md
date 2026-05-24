@@ -91,6 +91,12 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(171,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
 | `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. |
 | `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×3 cross-condition publication figure). |
+| `eeg_bg/visualization/coherence_plots.py` | `plot_coherence_matrix` (pre/post heatmap side-by-side), `plot_coherence_reduction` (boxplot by pair or subject), `plot_signal_decomposition` (raw / coherent / specific waveform panels for one channel). |
+| `eeg_bg/visualization/filter_plots.py` | `plot_wiener_filter_response` (amplitude + phase for one pair), `plot_all_pairs_response` (grid across all pairs in a `WienerResult`). |
+| `eeg_bg/visualization/verification_plots.py` | `plot_v2_transitivity`, `plot_v3_frequency_variation`, `plot_ica_vs_wiener_coherence` (3-panel raw/ICA/Wiener coherence matrix). |
+| `eeg_bg/features/band_power.py` | `relative_band_power(signal, sfreq, band)` → scalar; `BANDS` dict mapping name→(low, high) Hz for delta/theta/alpha/beta/gamma. |
+| `eeg_bg/features/hjorth.py` | `hjorth_parameters(signal)` → `(activity, mobility, complexity)` triple. |
+| `eeg_bg/features/spectral_entropy.py` | `spectral_entropy(signal, sfreq)` → scalar normalised Shannon entropy of PSD. |
 
 ### Channel groups (G1–G6)
 
@@ -170,3 +176,5 @@ All tests run without real EDF data. `tests/conftest.py` provides:
 - `tmp_cache_dir`: temporary directory for cache tests.
 
 Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark.integration`.
+
+`check_fixtures.py` (project root) is a standalone debug script that reconstructs fixture arrays and prints their shapes — useful for verifying conftest parity outside pytest.

@@ -175,41 +175,36 @@ D:\EEGdata\TUEP\v3.1.0\
           ▼  cache/epochs/{subject_id}/{cache_key}.npz
           │     arrays: epochs (n, 19, 1000)  ch_names  label  subject_id  split
           │
-     ┌────┴────┐
-     ▼         ▼
-  Script 02  Script 03
-  Wiener      ICA
-  decompose   fit + apply
-     │         │
-     ▼         ▼
-cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/
-  arrays: specific  coherent  label  subject_id  split
-          │
-          ▼  Script 04
-    [verification] V1 coherence reduction
-    [verification] V2 transitivity constraint
-    [verification] V3 frequency variation
-          │
-          ▼  results/
-    v1_coherence.csv   v2_transitivity.csv   v3_frequency_variation.csv
-          │
-          ▼  Script 05
-    [visualization] load epoch + wiener_frequency + ica caches
-    [visualization] plot_multichannel_comparison  (19-ch stacked waveforms)
-    [visualization] plot_psd_comparison           (PSD overlay for target channels)
-          │
-          ▼  results/figures/{subject_id}/{waveform,psd}_comparison.png
-          │
-          ▼  Script 06
-    [features] extract_epoch_features × 3 conditions (171 features/epoch)
-               19 channels × (5 band powers + 3 Hjorth + spectral entropy)
-    [ml] train_xgboost: GridSearchCV(5-fold) + early stopping on val
-    [ml] subject_level_predict → evaluate_subject_level (AUROC / F1 / Acc)
-    [ml] compute_shap_values → aggregate_shap_by_band / _by_channel
-          │
-          ▼  results/xgboost/
-    {condition}/model.joblib  test_metrics.json  shap_summary.png
-    comparison_summary.csv    shap_comparison.png
+     ┌────┴──────────────────────────────┬─────────────────────────────────────┐
+     ▼                                   ▼                                     ▼
+  Script 02                          Script 03                             Script 04
+  Wiener                                ICA                        [verification] V1/V2/V3
+  decompose                         fit + apply                    (re-runs decompose_epoch
+     │                                   │                         inline; reads only epochs)
+     ▼                                   ▼                                     │
+cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/                    ▼
+  arrays: specific  coherent  label  subject_id  split               results/verification/
+          │                                          │               v1_coherence.csv
+          └────────────────────┬─────────────────────┘               v2_transitivity.csv
+                               │                                     v3_frequency_variation.csv
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+           Script 05                       Script 06
+    [visualization] load epoch       [features] extract_epoch_features
+      + wiener_frequency + ica          × 3 conditions (171 features/epoch)
+    plot_multichannel_comparison       [ml] train_xgboost (GridSearchCV
+    plot_psd_comparison                     + early stopping on val)
+               │                       subject_level_predict
+               ▼                       evaluate_subject_level (AUROC/F1/Acc)
+    results/figures/                   compute_shap_values
+      {subject_id}/                             │
+        waveform_comparison.png                 ▼
+        psd_comparison.png             results/xgboost/
+                                         {condition}/model.joblib
+                                         test_metrics.json
+                                         shap_summary.png
+                                         comparison_summary.csv
+                                         shap_comparison.png
 ```
 
 ### Cache File Schema
@@ -427,7 +422,43 @@ conditions (Raw C | ICA B | Wiener A).
 
 ---
 
-### Complete Pipeline (one command chain)
+### Pipeline Dependency Graph
+
+Script 01 is the only strict prerequisite. Everything downstream of it has no mutual dependency and can run in parallel.
+
+```
+EDF files
+    │
+    ▼
+  01_extract_epochs              →  cache/epochs/
+    │
+    ├──────────────────────────────────┬──────────────────────────────────┐
+    ▼                                  ▼                                  ▼
+  02_run_wiener                     03_run_ica                  04_run_verification
+  cache/wiener_frequency|scalar/    cache/ica/                  results/verification/
+    │                                  │                        [independent of 02/03;
+    └──────────────┬───────────────────┘                        re-runs decompose_epoch
+                   │                                             inline from cache/epochs/]
+          ┌────────┴────────┐
+          ▼                 ▼
+  05_run_visualization   06_train_xgboost
+  results/figures/       results/xgboost/
+```
+
+**Script 06 per-condition dependencies:**
+
+| `--condition` | Requires |
+|---------------|----------|
+| `raw` | 01 only |
+| `wiener` | 01 + 02 |
+| `ica` | 01 + 03 |
+| `all` (default) | 01 + 02 + 03 |
+
+**Script 05** reads `cache/wiener_frequency/` and `cache/ica/` optionally — panels are omitted if those caches are absent, so it can be run after 01 alone for raw-only figures.
+
+---
+
+### Complete Pipeline (sequential)
 
 ```bash
 conda activate eeg_pipeline
@@ -438,6 +469,25 @@ python scripts/03_run_ica.py
 python scripts/04_run_verification.py
 python scripts/05_run_visualization.py
 python scripts/06_train_xgboost.py
+```
+
+### Complete Pipeline (parallel)
+
+```bash
+conda activate eeg_pipeline
+python scripts/01_extract_epochs.py
+
+# Steps 2–4: all read only from cache/epochs/ — run concurrently
+python scripts/02_run_wiener.py --mode frequency &
+python scripts/02_run_wiener.py --mode scalar    &
+python scripts/03_run_ica.py                     &
+python scripts/04_run_verification.py            &
+wait
+
+# Steps 5–6: no dependency on each other — run concurrently
+python scripts/05_run_visualization.py &
+python scripts/06_train_xgboost.py     &
+wait
 ```
 
 ---
