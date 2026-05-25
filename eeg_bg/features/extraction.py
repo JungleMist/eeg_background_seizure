@@ -18,6 +18,8 @@ For each channel (in ``ch_names`` order), 9 scalars in this order:
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -118,6 +120,29 @@ def extract_epoch_features(
     return np.asarray(features, dtype=np.float64)
 
 
+def _extract_one_file(args: tuple) -> tuple[list, list, list]:
+    """Worker: load one subject npz and extract features for the target split."""
+    npz_path_str, array_key, target_split, sfreq, nperseg, freq_band = args
+    data = np.load(npz_path_str, allow_pickle=True)
+    if str(data["split"]) != target_split:
+        return [], [], []
+
+    epochs_arr = data[array_key]
+    ch_names   = (list(data["ch_names"])
+                  if "ch_names" in data.files
+                  else list(_STANDARD_19))
+    label      = int(data["label"])
+    subject_id = str(data["subject_id"])
+
+    rows = [
+        extract_epoch_features(ep, ch_names, sfreq=sfreq,
+                                nperseg=nperseg, freq_band=freq_band)
+        for ep in epochs_arr
+    ]
+    n = len(rows)
+    return rows, [label] * n, [subject_id] * n
+
+
 def build_dataset(
     cache_root: Path,
     condition: str,
@@ -125,6 +150,7 @@ def build_dataset(
     sfreq: float,
     nperseg: int,
     freq_band: tuple[float, float],
+    max_workers: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Load all cached epochs for *condition* / *split* and extract features.
 
@@ -142,6 +168,9 @@ def build_dataset(
         Welch segment length.
     freq_band : tuple[float, float]
         Analysis band in Hz.
+    max_workers : int | None
+        Worker processes for parallel file processing.  ``None`` uses
+        ``os.cpu_count()``.
 
     Returns
     -------
@@ -173,37 +202,27 @@ def build_dataset(
     array_key = _CONDITION_TO_KEY[condition]
     npz_files = sorted(subdir.rglob("*.npz"))
 
+    args_list = [
+        (str(p), array_key, split, sfreq, nperseg, freq_band)
+        for p in npz_files
+    ]
+
     X_list: list[np.ndarray] = []
     y_list: list[int] = []
     sid_list: list[str] = []
 
-    for npz_path in tqdm(npz_files, desc=f"Features [{condition}/{split}]",
-                          leave=False):
-        data = np.load(npz_path, allow_pickle=True)
-
-        # Skip files that don't belong to the requested split
-        file_split = str(data["split"])
-        if file_split != split:
-            continue
-
-        epochs_arr = data[array_key]          # (n_epochs, n_ch, n_times)
-        # ch_names is only stored in the raw-epoch cache; wiener/ica caches
-        # omit it — fall back to the canonical 19-channel order.
-        ch_names   = (list(data["ch_names"])
-                      if "ch_names" in data.files
-                      else list(_STANDARD_19))
-        label      = int(data["label"])
-        subject_id = str(data["subject_id"])
-
-        for ep in epochs_arr:
-            feat = extract_epoch_features(ep, ch_names, sfreq=sfreq,
-                                           nperseg=nperseg, freq_band=freq_band)
-            X_list.append(feat)
-            y_list.append(label)
-            sid_list.append(subject_id)
+    n_workers = max_workers or os.cpu_count()
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_extract_one_file, args): args
+                   for args in args_list}
+        for future in tqdm(as_completed(futures), total=len(futures),
+                           desc=f"Features [{condition}/{split}]", leave=False):
+            rows, ys, sids = future.result()
+            X_list.extend(rows)
+            y_list.extend(ys)
+            sid_list.extend(sids)
 
     if not X_list:
-        # Return empty arrays with correct shapes
         return (np.empty((0, 171), dtype=np.float64),
                 np.empty((0,), dtype=np.int64),
                 [])
