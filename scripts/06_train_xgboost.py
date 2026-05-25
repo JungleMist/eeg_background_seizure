@@ -44,7 +44,6 @@ import argparse
 import json
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import matplotlib
@@ -137,7 +136,11 @@ def run_condition(
     print(f"  Condition: {condition.upper()}")
     print(f"{'='*60}")
 
-    # ── Feature extraction (train/val/test loaded in parallel) ────────────────
+    # ── Feature extraction (train/val/test loaded sequentially) ──────────────
+    # NOTE: build_dataset already uses ProcessPoolExecutor internally.
+    # A wrapping ThreadPoolExecutor causes a nested-parallelism explosion
+    # (3 × os.cpu_count() processes) that hammers NFS storage and appears
+    # to hang with 0% CPU.  Sequential split loading is safe and correct.
     print("Loading features...")
 
     def _fetch(split_name: str) -> tuple:
@@ -146,13 +149,9 @@ def run_condition(
             sfreq, nperseg, freq_band, force, max_workers=max_workers,
         )
 
-    with ThreadPoolExecutor(max_workers=3) as tex:
-        fut_train = tex.submit(_fetch, "train")
-        fut_val   = tex.submit(_fetch, "val")
-        fut_test  = tex.submit(_fetch, "test")
-        X_train, y_train, sids_train = fut_train.result()
-        X_val,   y_val,   sids_val   = fut_val.result()
-        X_test,  y_test,  sids_test  = fut_test.result()
+    X_train, y_train, sids_train = _fetch("train")
+    X_val,   y_val,   sids_val   = _fetch("val")
+    X_test,  y_test,  sids_test  = _fetch("test")
 
     if len(X_train) == 0:
         print(f"  [WARNING] No training data found for condition '{condition}'. "
