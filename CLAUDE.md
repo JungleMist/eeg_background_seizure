@@ -34,13 +34,13 @@ All scripts accept `--config configs/default.yaml` (default) and `--force` to re
 
 ```bash
 # 01 — Extract background epochs from EDF files → cache/epochs/
-conda run -n eeg_pipeline python scripts/01_extract_epochs.py [--force]
+conda run -n eeg_pipeline python scripts/01_extract_epochs.py [--force] [--workers N]
 
 # 02 — Wiener decomposition on cached epochs → cache/wiener_frequency/
-conda run -n eeg_pipeline python scripts/02_run_wiener.py [--mode frequency|scalar] [--force]
+conda run -n eeg_pipeline python scripts/02_run_wiener.py [--mode frequency|scalar] [--force] [--workers N]
 
 # 03 — ICA ablation → cache/ica/
-conda run -n eeg_pipeline python scripts/03_run_ica.py [--force]
+conda run -n eeg_pipeline python scripts/03_run_ica.py [--force] [--workers N]
 
 # 04 — Verification experiments V1/V2/V3 → results/verification/*.csv
 conda run -n eeg_pipeline python scripts/04_run_verification.py
@@ -51,7 +51,7 @@ conda run -n eeg_pipeline python scripts/04_run_verification.py
 conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N] [--epoch-idx I] [--channels "FP1,FP2,T3"]
 
 # 06 — XGBoost + SHAP for all three conditions → results/xgboost/
-conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force]
+conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force] [--workers N]
 ```
 
 ### Cache invalidation tiers
@@ -223,6 +223,7 @@ Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark
 - **ICA fits on a 1 Hz high-pass copy but applies to 0.5 Hz data**: `fit_ica()` creates a temporary high-pass-filtered copy for FastICA convergence (MNE best practice), then applies the fitted mixing matrix to the original 0.5 Hz bandpass epochs. The `specific` output in the ICA cache is in the original 0.5 Hz bandpass domain.
 - **`FEATURE_NAMES` must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 171)` are indexed by position against `FEATURE_NAMES`. Any reordering or insertion of channels in `configs/default.yaml` `standard_19` invalidates saved SHAP arrays.
 - **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
+- **Scripts 01–03 and 06 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition.
 
 ## Reference Documentation
 

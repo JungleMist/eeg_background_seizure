@@ -604,3 +604,106 @@ Both are relative to the project root when not absolute.  You can also re-run wi
 | Run one script with it | `python scripts/01_extract_epochs.py --config configs/local.yaml` |
 | Force-recompute cache | add `--force` to any script |
 | Check which config a run used | the `index.csv` written to `cache/epochs/` records the split seed; config values are not logged separately |
+
+---
+
+## Q: What is the logic of the `--force` flag?
+
+### Which scripts accept `--force`
+
+| Script | Accepts `--force` |
+|--------|-------------------|
+| `01_extract_epochs.py` | Yes |
+| `02_run_wiener.py` | Yes |
+| `03_run_ica.py` | Yes |
+| `04_run_verification.py` | **No** — always re-runs |
+| `05_run_visualization.py` | **No** — always overwrites figures |
+| `06_train_xgboost.py` | Yes (feature cache only) |
+
+### Per-script cache check
+
+#### `01_extract_epochs.py`
+
+One `.npz` file is written per EDF file.  The cache path is:
+
+```
+cache/epochs/{label_prefix}_{subject_id}/{cache_key}.npz
+```
+
+where `cache_key` is a 16-character SHA-256 prefix of `"{edf_path}|0.0000|{sfreq}|{bandpass}"`.
+
+```python
+if cache_path.exists() and not force:
+    continue   # skip this EDF entirely
+```
+
+Without `--force`: if the `.npz` already exists, the EDF is not re-read and the epochs are not recomputed.  
+With `--force`: every EDF is reprocessed and its `.npz` is overwritten.
+
+#### `02_run_wiener.py` and `03_run_ica.py`
+
+Both scripts mirror the epoch cache directory structure exactly.  Each input `.npz` from `cache/epochs/` maps to an output `.npz` at the same relative path under `cache/wiener_frequency/` or `cache/ica/`.
+
+```python
+out_path = out_root / npz_path.relative_to(epoch_root)
+
+if out_path.exists() and not force:
+    return ("cached", ...)   # skip this file
+```
+
+Without `--force`: if the corresponding output `.npz` already exists, the decomposition is skipped.  
+With `--force`: all epoch files are re-decomposed and outputs are overwritten.
+
+Both scripts run decomposition in parallel with `ProcessPoolExecutor` (defaulting to `os.cpu_count()` workers).
+
+#### `04_run_verification.py`
+
+No `--force` flag and no caching.  Every run recomputes V1/V2/V3 from scratch and overwrites `results/verification/*.csv`.  The script is fast enough that caching is not needed.
+
+#### `05_run_visualization.py`
+
+No `--force` flag.  Every run regenerates all figures and silently overwrites existing `.png` files in `results/figures/`.
+
+#### `06_train_xgboost.py`
+
+This script has two independent layers of work; `--force` only affects the first:
+
+| Layer | Cached? | Bypassed by `--force`? |
+|-------|---------|------------------------|
+| Feature extraction → `cache/features/{condition}_{split}.npz` | Yes | **Yes** |
+| Model training, SHAP, result files | No | N/A — always runs |
+
+```python
+# In _load_or_extract_features():
+if feat_file.exists() and not force:
+    return load from cache   # skip feature extraction
+```
+
+Model training (`train_xgboost`), SHAP computation, and all output files (`model.joblib`, `metrics.json`, `shap_*.png`, etc.) are **always regenerated**, regardless of `--force`.
+
+---
+
+### What `--force` does not do
+
+- **Does not delete stale files.** Old `.npz` files are overwritten only if the script reaches them.  If a config change produces a new cache key (see below), the old file at the old key path is simply orphaned on disk — `--force` does not clean it up.
+- **Does not cascade.** Running `01_extract_epochs.py --force` does not automatically force-rerun scripts 02–06.  Each script must be passed `--force` independently.
+- **Does not affect scripts 04 and 05**, which have no caching mechanism.
+
+---
+
+### When `--force` is and is not needed
+
+The cache key for script 01 is derived from `edf_path`, `target_sfreq`, and `bandpass`.  Changing those config values produces a **new key**, so a new `.npz` is written and the old one is orphaned — `--force` is not required.
+
+Config values that affect epoch content but are **not** in the cache key will cause silent reuse of stale cache unless `--force` is passed:
+
+| Config key | In cache key? | Requires `--force` to recompute? |
+|------------|---------------|----------------------------------|
+| `preprocessing.target_sfreq` | Yes | No — new key generated |
+| `preprocessing.bandpass` | Yes | No — new key generated |
+| `preprocessing.epoch_length_sec` | **No** | **Yes** |
+| `preprocessing.artifact_threshold_uv` | **No** | **Yes** |
+| `preprocessing.seizure_buffer_sec` | **No** | **Yes** |
+| `wiener.*` (any key) | No | Yes — for script 02 |
+| `ica.*` (any key) | No | Yes — for script 03 |
+| `ml.*` (any key) | No | Yes — for script 06 feature cache |

@@ -21,8 +21,11 @@ def _process_wiener_file(args):
     from eeg_bg.decomposition import wiener as wiener_freq, wiener_scalar
     decompose = wiener_freq.decompose_epoch if mode == "frequency" else wiener_scalar.decompose_epoch
 
-    data = np.load(npz_path, allow_pickle=True)
-    epochs = data["epochs"]
+    try:
+        data = np.load(npz_path, allow_pickle=True)
+        epochs = data["epochs"]
+    except Exception as e:
+        return (npz_path.name, "skip", f"corrupt cache file: {e}")
     ch_names = list(data["ch_names"])
     subject_id = str(data["subject_id"])
 

@@ -24,8 +24,11 @@ def _process_ica_file(args):
     if out_path.exists() and not force:
         return (npz_path.name, "cached", None)
 
-    data = np.load(npz_path, allow_pickle=True)
-    epochs = data["epochs"]
+    try:
+        data = np.load(npz_path, allow_pickle=True)
+        epochs = data["epochs"]
+    except Exception as e:
+        return (npz_path.name, "skip", f"corrupt cache file: {e}")
     ch_names = list(data["ch_names"])
 
     try:
