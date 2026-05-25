@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Python via **conda env `eeg_pipeline`** (`C:\ProgramData\anaconda3\envs\eeg_pipeline`). Use `conda run -n eeg_pipeline` or activate it before running commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib.
 - Install the package in development mode: `pip install -e .`
-- Core dependencies: numpy (2.x), scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, xgboost≥2.0, shap≥0.45, pandas, matplotlib, pyyaml, pytest, tqdm.
+- Core dependencies: numpy 2.4.6, scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, joblib 1.5.3, pandas 2.3.3, matplotlib 3.10.8, pyyaml 6.0.3, pytest 9.0.2, tqdm 4.67.3, xgboost 3.2.0, shap 0.51.0.
 - **Note**: `np.trapezoid` is used (not `np.trapz`, removed in NumPy 2.0).
 
 ## Common Commands

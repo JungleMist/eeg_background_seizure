@@ -52,14 +52,16 @@ pip install -e .
 
 | Package | Version | Role |
 |---------|---------|------|
-| numpy | ≥2.0 | Array operations |
+| numpy | 2.4.6 | Array operations |
 | scipy | 1.17.1 | Welch PSD, CSD, coherence |
 | mne | 1.11.0 | EDF I/O, ICA |
-| scikit-learn | 1.8.0 | Dataset splits |
-| pandas | ≥2.0 | Result DataFrames, CSV output |
-| matplotlib | ≥3.7 | All visualization |
-| pyyaml | ≥6.0 | Configuration loading |
-| tqdm | ≥4.0 | Pipeline progress bars |
+| scikit-learn | 1.8.0 | GridSearchCV, StandardScaler, metrics |
+| joblib | 1.5.3 | Model and scaler serialisation |
+| pandas | 2.3.3 | Result DataFrames, CSV output |
+| matplotlib | 3.10.8 | All visualization |
+| pyyaml | 6.0.3 | Configuration loading |
+| pytest | 9.0.2 | Test suite |
+| tqdm | 4.67.3 | Pipeline progress bars |
 | xgboost | 3.2.0 | XGBoost classifier, GridSearchCV, early stopping |
 | shap | 0.51.0 | TreeExplainer SHAP values, beeswarm summary plots |
 
