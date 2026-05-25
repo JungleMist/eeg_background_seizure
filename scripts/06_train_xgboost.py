@@ -42,7 +42,6 @@ results/xgboost/
 """
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -85,7 +84,6 @@ def _load_or_extract_features(
     nperseg: int,
     freq_band: tuple[float, float],
     force: bool,
-    max_workers: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return (X, y, subject_ids), using a feature-level NPZ cache."""
     feat_file = feature_cache_dir / f"{condition}_{split}.npz"
@@ -99,7 +97,6 @@ def _load_or_extract_features(
     X, y, sids = build_dataset(
         cache_root, condition, split,
         sfreq=sfreq, nperseg=nperseg, freq_band=freq_band,
-        max_workers=max_workers,
     )
     if len(X):
         feat_file.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +119,6 @@ def run_condition(
     feature_cache_dir: Path,
     out_root: Path,
     force: bool,
-    max_workers: int | None = None,
 ) -> dict:
     """Full pipeline for one condition.  Returns metrics + SHAP aggregates."""
     sfreq      = float(cfg["preprocessing"]["target_sfreq"])
@@ -136,22 +132,20 @@ def run_condition(
     print(f"  Condition: {condition.upper()}")
     print(f"{'='*60}")
 
-    # ── Feature extraction (train/val/test loaded sequentially) ──────────────
-    # NOTE: build_dataset already uses ProcessPoolExecutor internally.
-    # A wrapping ThreadPoolExecutor causes a nested-parallelism explosion
-    # (3 × os.cpu_count() processes) that hammers NFS storage and appears
-    # to hang with 0% CPU.  Sequential split loading is safe and correct.
+    # ── Feature extraction ────────────────────────────────────────────────────
     print("Loading features...")
-
-    def _fetch(split_name: str) -> tuple:
-        return _load_or_extract_features(
-            cache_root, feature_cache_dir, condition, split_name,
-            sfreq, nperseg, freq_band, force, max_workers=max_workers,
-        )
-
-    X_train, y_train, sids_train = _fetch("train")
-    X_val,   y_val,   sids_val   = _fetch("val")
-    X_test,  y_test,  sids_test  = _fetch("test")
+    X_train, y_train, sids_train = _load_or_extract_features(
+        cache_root, feature_cache_dir, condition, "train",
+        sfreq, nperseg, freq_band, force,
+    )
+    X_val,   y_val,   sids_val   = _load_or_extract_features(
+        cache_root, feature_cache_dir, condition, "val",
+        sfreq, nperseg, freq_band, force,
+    )
+    X_test,  y_test,  sids_test  = _load_or_extract_features(
+        cache_root, feature_cache_dir, condition, "test",
+        sfreq, nperseg, freq_band, force,
+    )
 
     if len(X_train) == 0:
         print(f"  [WARNING] No training data found for condition '{condition}'. "
@@ -234,8 +228,7 @@ def run_condition(
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def main(config_path: str, condition: str, force: bool,
-         max_workers: int | None = None) -> None:
+def main(config_path: str, condition: str, force: bool) -> None:
     cfg         = load_config(config_path)
     cache_root  = Path(cfg["paths"]["cache_dir"])
     results_dir = Path(cfg["paths"]["results_dir"])
@@ -248,7 +241,6 @@ def main(config_path: str, condition: str, force: bool,
     for cond in conditions:
         result = run_condition(
             cond, cfg, cache_root, feat_cache, out_root, force,
-            max_workers=max_workers,
         )
         if result:
             all_results[cond] = result
@@ -306,9 +298,5 @@ if __name__ == "__main__":
         "--force", action="store_true",
         help="Re-extract features even if feature cache exists",
     )
-    parser.add_argument(
-        "--workers", type=int, default=None,
-        help="Worker processes for feature extraction (default: os.cpu_count())",
-    )
     args = parser.parse_args()
-    main(args.config, args.condition, args.force, args.workers)
+    main(args.config, args.condition, args.force)
