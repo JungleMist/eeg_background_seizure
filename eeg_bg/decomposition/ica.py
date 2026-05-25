@@ -14,6 +14,7 @@ def fit_ica(
     n_components = cfg["ica"]["n_components"]
     threshold = cfg["ica"]["artifact_corr_threshold"]
     random_state = cfg["ica"].get("random_state", 42)
+    max_iter = cfg["ica"].get("max_iter", 1000)
 
     # Concatenate epochs: (n_ch, n_epochs * n_times)
     data_2d = epochs.transpose(1, 0, 2).reshape(n_ch, -1) / 1e6  # uV -> V
@@ -24,7 +25,7 @@ def fit_ica(
 
     ica = mne.preprocessing.ICA(
         n_components=n_components, method="fastica",
-        random_state=random_state, verbose=False
+        max_iter=max_iter, random_state=random_state, verbose=False
     )
     # MNE recommends ≥1 Hz high-pass for ICA convergence. Create a filtered copy
     # used only for fitting; apply_ica runs on the original 0.5 Hz bandpass data.

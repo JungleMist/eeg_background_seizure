@@ -237,6 +237,9 @@ ica:
   artifact_corr_threshold: 0.8  # |Pearson r| with FP1/FP2 proxy above which a
                                 #   component is classified as artifact
   random_state: 42
+  max_iter: 1000              # maximum FastICA iterations; sklearn default (200)
+                              #   is too low for 19-channel EEG and triggers
+                              #   ConvergenceWarning on noisy epochs
 
 # -----------------------------------------------------------------------------
 # Verification thresholds  (no cache impact — reporting only)

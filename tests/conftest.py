@@ -21,6 +21,7 @@ BASE_CFG = {
         "method": "fastica",
         "artifact_corr_threshold": 0.8,
         "random_state": 42,
+        "max_iter": 1000,
     },
     "channels": {
         "standard_19": CH_NAMES_19,
