@@ -60,8 +60,8 @@ pip install -e .
 | matplotlib | ≥3.7 | All visualization |
 | pyyaml | ≥6.0 | Configuration loading |
 | tqdm | ≥4.0 | Pipeline progress bars |
-| xgboost | ≥2.0 | XGBoost classifier, GridSearchCV, early stopping |
-| shap | ≥0.45 | TreeExplainer SHAP values, beeswarm summary plots |
+| xgboost | 3.2.0 | XGBoost classifier, GridSearchCV, early stopping |
+| shap | 0.51.0 | TreeExplainer SHAP values, beeswarm summary plots |
 
 ---
 
