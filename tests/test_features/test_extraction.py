@@ -14,7 +14,7 @@ from eeg_bg.features.band_power import BANDS
 # ── FEATURE_NAMES sanity checks ───────────────────────────────────────────────
 
 def test_feature_names_length():
-    assert len(FEATURE_NAMES) == 171
+    assert len(FEATURE_NAMES) == 211
 
 
 def test_feature_names_unique():
@@ -38,7 +38,7 @@ def test_feature_names_per_channel():
 
 def test_extract_epoch_features_shape(synthetic_epoch, ch_names_19, sfreq):
     feat = extract_epoch_features(synthetic_epoch, ch_names_19, sfreq=sfreq)
-    assert feat.shape == (171,)
+    assert feat.shape == (211,)
 
 
 def test_extract_epoch_features_dtype(synthetic_epoch, ch_names_19, sfreq):
@@ -56,10 +56,12 @@ def test_extract_epoch_features_missing_channel(sfreq):
     rng    = np.random.default_rng(7)
     epoch  = rng.standard_normal((1, 1000)).astype(np.float64) * 10.0
     feat   = extract_epoch_features(epoch, ch_names=["FP1"], sfreq=sfreq)
-    assert feat.shape == (171,)
-    # Channels other than FP1 should be zero-padded
+    assert feat.shape == (211,)
+    # Per-channel features for channels other than FP1, and all asymmetry
+    # features (asym_* prefix), should be zero-padded because FP2 and all
+    # other symmetric-pair partners are absent.
     fp1_indices = [i for i, n in enumerate(FEATURE_NAMES) if n.startswith("FP1_")]
-    other_indices = [i for i in range(171) if i not in fp1_indices]
+    other_indices = [i for i in range(211) if i not in fp1_indices]
     assert np.all(feat[other_indices] == 0.0)
 
 
@@ -90,7 +92,7 @@ def test_build_dataset_shapes(tmp_path):
     X, y, sids = build_dataset(tmp_path, "raw", "train",
                                 sfreq=125.0, nperseg=250,
                                 freq_band=(0.5, 40.0))
-    assert X.shape == (3, 171)
+    assert X.shape == (3, 211)
     assert y.shape == (3,)
     assert len(sids) == 3
 
@@ -134,7 +136,7 @@ def test_build_dataset_empty_split(tmp_path):
     X, y, sids = build_dataset(tmp_path, "raw", "train",
                                 sfreq=125.0, nperseg=250,
                                 freq_band=(0.5, 40.0))
-    assert X.shape == (0, 171)
+    assert X.shape == (0, 211)
     assert y.shape == (0,)
     assert sids == []
 

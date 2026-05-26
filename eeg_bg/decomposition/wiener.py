@@ -49,7 +49,27 @@ def estimate_cross_psd(
 def compute_wiener_filter(
     S: np.ndarray,   # (n_ch, n_ch, n_freqs)
     target_idx: int,
+    reg_factor: float = 1e-4,
 ) -> np.ndarray:
+    """Estimate per-frequency Wiener filter coefficients.
+
+    Uses Tikhonov (diagonal loading) regularisation proportional to the mean
+    diagonal of S_ref to stabilise the solve for near-singular cross-PSD
+    matrices.  This is essential for 3-electrode chains (2×2 S_ref) where the
+    two reference channels (e.g. T5 and O1) may be highly correlated.
+
+    Parameters
+    ----------
+    S : np.ndarray, shape ``(n_ch, n_ch, n_freqs)``
+    target_idx : int
+    reg_factor : float
+        Diagonal loading as a fraction of the mean real diagonal of S_ref
+        (default 1e-4).
+
+    Returns
+    -------
+    h : np.ndarray, shape ``(n_ref, n_freqs)``, complex
+    """
     n_ch = S.shape[0]
     n_freqs = S.shape[2]
     ref_indices = [i for i in range(n_ch) if i != target_idx]
@@ -59,8 +79,12 @@ def compute_wiener_filter(
     for f in range(n_freqs):
         S_ref = S[np.ix_(ref_indices, ref_indices)][:, :, f]
         s_cross = S[target_idx, ref_indices, f]
+        # Diagonal loading: eps = reg_factor × mean(diag(S_ref)), floored at
+        # 1e-30 to avoid zero-regularisation on silent channels.
+        eps = reg_factor * max(float(np.real(np.diag(S_ref)).mean()), 1e-30)
+        S_ref_reg = S_ref + eps * np.eye(n_ref, dtype=complex)
         try:
-            h[:, f] = np.linalg.solve(S_ref, s_cross)
+            h[:, f] = np.linalg.solve(S_ref_reg, s_cross)
         except np.linalg.LinAlgError:
             pass
     return h
@@ -112,6 +136,7 @@ def decompose_epoch(
     sfreq = float(cfg["preprocessing"]["target_sfreq"])
     nperseg = cfg["wiener"]["nperseg"]
     coh_threshold = cfg["wiener"]["coherence_threshold"]
+    mag_threshold = float(cfg["wiener"].get("filter_magnitude_threshold", 50.0))
     channel_groups = cfg["channels"]["channel_groups"]
     freq_band = cfg["wiener"]["freq_band"]
     n_times = epoch.shape[1]
@@ -146,10 +171,27 @@ def decompose_epoch(
 
         _, S = estimate_cross_psd(group_data, sfreq, nperseg)
         pair_key = "-".join(pair)
-        filters[pair_key] = {}
 
-        for local_idx, (ch, global_idx) in enumerate(zip(pair, indices)):
+        # Pre-compute all filters and validate magnitudes before applying any.
+        # If any channel's filter blows up (near-singular S_ref after
+        # regularisation), skip the entire group — same behaviour as the
+        # coherence gate above.
+        group_filters: dict[str, np.ndarray] = {}
+        group_unstable = False
+        for local_idx, ch in enumerate(pair):
             h = compute_wiener_filter(S, target_idx=local_idx)
+            if np.max(np.abs(h)) > mag_threshold:
+                group_unstable = True
+                break
+            group_filters[ch] = h
+
+        if group_unstable:
+            skipped.append(pair_key)
+            continue
+
+        filters[pair_key] = {}
+        for local_idx, (ch, global_idx) in enumerate(zip(pair, indices)):
+            h = group_filters[ch]
             sp, co = apply_wiener_filter(group_data, h, local_idx, n_times)
             specific[global_idx] = sp
             coherent[global_idx] = co

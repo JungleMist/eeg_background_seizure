@@ -9,7 +9,42 @@ import numpy as np
 import pandas as pd
 
 
+def _build_pairwise_lookup(
+    filters: dict,
+    mask: np.ndarray,
+) -> dict[tuple[str, str], np.ndarray]:
+    """Build a ``(target, ref) → h(f)[mask]`` lookup from a filter dict.
+
+    For a group ``[A, B, C]`` the stored filters are multi-reference
+    (``h_A`` uses both B and C simultaneously).  We extract each individual
+    reference coefficient as an approximation of the pairwise single-reference
+    Wiener filter — this is exact under the point-source model and
+    approximately correct otherwise.
+
+    Reference order for a group of channels ``[c0, c1, ..., ck]`` with target
+    at local index ``t`` is ``[c0, ..., c_{t-1}, c_{t+1}, ..., ck]``, so
+    ``h[r_idx]`` corresponds to the ``r_idx``-th element of that list.
+    """
+    lookup: dict[tuple[str, str], np.ndarray] = {}
+    for _pair_key, ch_dict in filters.items():
+        group = list(ch_dict.keys())       # ordered channel list for this group
+        for t_idx, target_ch in enumerate(group):
+            h = ch_dict[target_ch]         # shape (n_ref, n_freqs)
+            refs = [c for c in group if c != target_ch]
+            for r_idx, ref_ch in enumerate(refs):
+                if h.shape[0] > r_idx:
+                    lookup[(target_ch, ref_ch)] = h[r_idx][mask]
+    return lookup
+
+
 def run_v2(results: list, cfg: dict) -> pd.DataFrame:
+    """V2: transitivity constraint — h_ij * h_jk ≈ h_ik for a single source.
+
+    Handles both 2-channel and 3-channel groups.  For 3-channel groups each
+    individual reference coefficient is used as a proxy for the corresponding
+    pairwise single-reference Wiener filter.  Only triplets where all three
+    pairwise filters are simultaneously available are tested.
+    """
     freq_band = cfg["wiener"]["freq_band"]
     rows = []
     for result in results:
@@ -17,46 +52,33 @@ def run_v2(results: list, cfg: dict) -> pd.DataFrame:
         mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
         filters = result.filters
 
-        # Collect all channels that appear in filters
-        all_chs: dict[str, tuple[str, str, np.ndarray]] = {}
-        for pair_key, ch_dict in filters.items():
-            for ch_name, h in ch_dict.items():
-                all_chs[ch_name] = (pair_key, ch_name, h[0])  # h[0] = (n_freqs,)
+        # Build (target, ref) → h(f) lookup across all groups
+        lookup = _build_pairwise_lookup(filters, mask)
+        chs = sorted({ch for (ch, _) in lookup})
 
-        chs = list(all_chs.keys())
         for ch_i, ch_j, ch_k in combinations(chs, 3):
-            # Try to find h_ij, h_jk, h_ik from the filters dict
-            # We look for pairs where ch_i uses ch_j as reference, etc.
-            h_ij = h_jk = h_ik = None
-            for pair_key, ch_dict in filters.items():
-                chs_in_pair = list(ch_dict.keys())
-                if ch_i in ch_dict and len(chs_in_pair) == 2:
-                    # The reference for ch_i in this pair is the other channel
-                    other = [c for c in chs_in_pair if c != ch_i][0]
-                    if other == ch_j:
-                        h_ij = ch_dict[ch_i][0, mask] if ch_dict[ch_i].shape[0] >= 1 else None
-                if ch_j in ch_dict and len(chs_in_pair) == 2:
-                    other = [c for c in chs_in_pair if c != ch_j][0]
-                    if other == ch_k:
-                        h_jk = ch_dict[ch_j][0, mask] if ch_dict[ch_j].shape[0] >= 1 else None
-                if ch_i in ch_dict and len(chs_in_pair) == 2:
-                    other = [c for c in chs_in_pair if c != ch_i][0]
-                    if other == ch_k:
-                        h_ik = ch_dict[ch_i][0, mask] if ch_dict[ch_i].shape[0] >= 1 else None
+            h_ij = lookup.get((ch_i, ch_j))
+            h_jk = lookup.get((ch_j, ch_k))
+            h_ik = lookup.get((ch_i, ch_k))
 
             if h_ij is None or h_jk is None or h_ik is None:
                 continue
 
-            eps_amp = float(np.mean(np.abs(np.abs(h_ij) * np.abs(h_jk) - np.abs(h_ik))))
+            eps_amp = float(
+                np.mean(np.abs(np.abs(h_ij) * np.abs(h_jk) - np.abs(h_ik)))
+            )
             phase_sum = np.angle(h_ij) + np.angle(h_jk) - np.angle(h_ik)
-            eps_phase = float(np.mean(np.abs(np.angle(np.exp(1j * phase_sum)))))
+            eps_phase = float(
+                np.mean(np.abs(np.angle(np.exp(1j * phase_sum))))
+            )
             rows.append({
                 "subject_id": result.subject_id,
-                "epoch_idx": result.epoch_idx,
-                "triplet": f"{ch_i}-{ch_j}-{ch_k}",
-                "eps_amp": eps_amp,
-                "eps_phase": eps_phase,
+                "epoch_idx":  result.epoch_idx,
+                "triplet":    f"{ch_i}-{ch_j}-{ch_k}",
+                "eps_amp":    eps_amp,
+                "eps_phase":  eps_phase,
             })
+
     cols = ["subject_id", "epoch_idx", "triplet", "eps_amp", "eps_phase"]
     return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 

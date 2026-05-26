@@ -1,20 +1,24 @@
 """Epoch-level feature extraction and dataset builder.
 
 ``extract_epoch_features`` converts a single ``(n_ch, n_times)`` epoch into a
-fixed-length 171-dimensional feature vector.
+fixed-length 211-dimensional feature vector.
 
 ``build_dataset`` iterates over an NPZ cache directory, applies the extractor
 to every epoch that belongs to the requested split, and returns a feature
 matrix together with labels and subject IDs.
 
-Feature vector layout (171 = 19 channels × 9 features each)
-------------------------------------------------------------
-For each channel (in ``ch_names`` order), 9 scalars in this order:
+Feature vector layout (211 = 171 per-channel + 40 hemispheric asymmetry)
+-------------------------------------------------------------------------
+First 171 features — 19 channels × 9 features each (in ``_STANDARD_19`` order):
 
     FP1_delta_power, FP1_theta_power, FP1_alpha_power, FP1_beta_power,
     FP1_gamma_power, FP1_hjorth_activity, FP1_hjorth_mobility,
     FP1_hjorth_complexity, FP1_spectral_entropy,
-    FP2_delta_power, ...
+    FP2_delta_power, ...  (continues for all 19 channels)
+
+Last 40 features — 8 symmetric pairs × 5 bands hemispheric asymmetry:
+
+    asym_FP1_FP2_delta, asym_FP1_FP2_theta, ..., asym_O1_O2_gamma
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ from tqdm import tqdm
 from eeg_bg.features.band_power import relative_band_power, BANDS
 from eeg_bg.features.hjorth import hjorth_parameters
 from eeg_bg.features.spectral_entropy import spectral_entropy as _spectral_entropy
+from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES
 
 # Standard 19 channels in canonical order (matches configs/default.yaml)
 _STANDARD_19 = [
@@ -44,11 +49,15 @@ _FEAT_SUFFIXES: list[str] = (
 )  # total 9 per channel
 
 # FEATURE_NAMES is built at import time and must remain stable.
-FEATURE_NAMES: list[str] = [
-    f"{ch}_{suffix}"
-    for ch in _STANDARD_19
-    for suffix in _FEAT_SUFFIXES
-]  # length == 171
+# First 171: per-channel statistics; last 40: hemispheric asymmetry.
+FEATURE_NAMES: list[str] = (
+    [
+        f"{ch}_{suffix}"
+        for ch in _STANDARD_19
+        for suffix in _FEAT_SUFFIXES
+    ]
+    + ASYMMETRY_NAMES
+)  # length == 211
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -90,7 +99,9 @@ def extract_epoch_features(
     Returns
     -------
     np.ndarray
-        Shape ``(171,)``, ordered according to :data:`FEATURE_NAMES`.
+        Shape ``(211,)``, ordered according to :data:`FEATURE_NAMES`.
+        First 171 entries are per-channel statistics; last 40 are hemispheric
+        asymmetry features.
     """
     features: list[float] = []
     for ch in _STANDARD_19:
@@ -117,7 +128,12 @@ def extract_epoch_features(
         features.append(_spectral_entropy(sig, sfreq=sfreq, nperseg=nperseg,
                                            freq_band=freq_band))
 
-    return np.asarray(features, dtype=np.float64)
+    # 40 hemispheric asymmetry features (appended after per-channel block)
+    asym = hemispheric_asymmetry(epoch, ch_names, sfreq=sfreq,
+                                  nperseg=nperseg, freq_band=freq_band)
+    return np.concatenate(
+        [np.asarray(features, dtype=np.float64), asym]
+    ).astype(np.float64)
 
 
 def _extract_one_file(args: tuple) -> tuple[list, list, list]:
@@ -223,7 +239,7 @@ def build_dataset(
             sid_list.extend(sids)
 
     if not X_list:
-        return (np.empty((0, 171), dtype=np.float64),
+        return (np.empty((0, 211), dtype=np.float64),
                 np.empty((0,), dtype=np.int64),
                 [])
 

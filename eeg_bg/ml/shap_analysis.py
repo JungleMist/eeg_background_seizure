@@ -81,6 +81,8 @@ def aggregate_shap_by_band(
                                                      "_hjorth_")
     result["spectral_entropy"] = _mean_abs_shap_for(shap_values, feature_names,
                                                      "_spectral_entropy")
+    result["asymmetry"]        = _mean_abs_shap_for(shap_values, feature_names,
+                                                     "asym_")
     return result
 
 
@@ -95,10 +97,14 @@ def aggregate_shap_by_channel(
     dict[str, float]
         Keys are channel names (e.g. ``"FP1"``, ``"T3"``, …).
     """
-    # Extract unique channel prefixes in original order
+    # Extract unique channel prefixes in original order.
+    # Skip asymmetry features (prefix "asym_") — they are aggregated
+    # separately by aggregate_shap_by_band under the "asymmetry" key.
     seen: dict[str, float] = {}
     pattern = re.compile(r"^([A-Za-z0-9]+)_")
     for i, name in enumerate(feature_names):
+        if name.startswith("asym_"):
+            continue
         m = pattern.match(name)
         if m:
             ch = m.group(1)
@@ -184,7 +190,7 @@ def plot_shap_comparison(
     condition_labels = ["Raw (C)", "ICA (B)", "Wiener (A)"]
     col_colors       = ["#888888", "#E07B54", "#4C8BBE"]
 
-    band_keys = list(BANDS.keys()) + ["hjorth", "spectral_entropy"]
+    band_keys = list(BANDS.keys()) + ["hjorth", "spectral_entropy", "asymmetry"]
 
     fig, axes = plt.subplots(
         2, 3,

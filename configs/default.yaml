@@ -208,6 +208,13 @@ wiener:
   coherence_threshold: 0.15   # groups whose max pairwise coherence (over
                               #   freq_band) falls below this value are skipped
                               #   — no filtering applied to that group
+  filter_magnitude_threshold: 50.0  # max allowed |h(f)| across all frequency
+                                    #   bins and reference channels.  Groups
+                                    #   whose regularised filter still exceeds
+                                    #   this value are treated as unstable and
+                                    #   skipped (passthrough).  Guards against
+                                    #   near-singular cross-PSD matrices in
+                                    #   3-electrode chains.
   freq_band: [0.5, 40.0]      # [low_hz, high_hz]; coherence gate and V1/V2/V3
                               #   verification band.  PAIRED: must be ⊆ bandpass.
 
@@ -303,7 +310,7 @@ ml:
   xgboost:
     param_grid:
       max_depth: [3, 4, 5, 6]
-      learning_rate: [0.05, 0.1, 0.3]
+      learning_rate: [0.01, 0.05, 0.1, 0.3]
       n_estimators: [100, 200, 500]   # ignored in Phase 1 (overridden to 500);
                                       #   Phase 2 uses early stopping instead
       subsample: [0.8, 1.0]

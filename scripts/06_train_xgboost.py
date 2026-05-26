@@ -63,6 +63,7 @@ from eeg_bg.ml.xgb_pipeline import (
     train_xgboost,
     subject_level_predict,
     evaluate_subject_level,
+    find_optimal_threshold,
 )
 from eeg_bg.ml.shap_analysis import (
     compute_shap_values,
@@ -174,25 +175,30 @@ def run_condition(
 
     # ── Validation evaluation ─────────────────────────────────────────────────
     val_metrics: dict[str, float] = {}
+    opt_threshold = 0.5
     if len(X_val):
         val_df = subject_level_predict(model, X_val_sc, sids_val, y_val)
         val_df.to_csv(out_dir / "val_predictions.csv", index=False)
-        val_metrics = evaluate_subject_level(val_df)
+        # Find F1-optimal threshold on validation set; apply to both val+test.
+        opt_threshold = find_optimal_threshold(val_df)
+        val_metrics = evaluate_subject_level(val_df, threshold=opt_threshold)
         _save_json(val_metrics, out_dir / "val_metrics.json")
         print(f"  Val  → AUROC {val_metrics['auroc']:.3f}  "
               f"F1 {val_metrics['f1']:.3f}  "
-              f"Acc {val_metrics['accuracy']:.3f}")
+              f"Acc {val_metrics['accuracy']:.3f}  "
+              f"(threshold={opt_threshold:.3f})")
 
     # ── Test evaluation ───────────────────────────────────────────────────────
     test_metrics: dict[str, float] = {}
     if len(X_test):
         test_df = subject_level_predict(model, X_test_sc, sids_test, y_test)
         test_df.to_csv(out_dir / "test_predictions.csv", index=False)
-        test_metrics = evaluate_subject_level(test_df)
+        test_metrics = evaluate_subject_level(test_df, threshold=opt_threshold)
         _save_json(test_metrics, out_dir / "test_metrics.json")
         print(f"  Test → AUROC {test_metrics['auroc']:.3f}  "
               f"F1 {test_metrics['f1']:.3f}  "
-              f"Acc {test_metrics['accuracy']:.3f}")
+              f"Acc {test_metrics['accuracy']:.3f}  "
+              f"(threshold={opt_threshold:.3f})")
 
     # ── SHAP analysis ─────────────────────────────────────────────────────────
     if len(X_test):

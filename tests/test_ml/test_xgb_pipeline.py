@@ -53,7 +53,7 @@ def test_evaluate_subject_level_keys():
         "true_label":  [1,   1,   0,   0],
     })
     metrics = evaluate_subject_level(df)
-    assert set(metrics.keys()) == {"auroc", "f1", "accuracy"}
+    assert set(metrics.keys()) == {"auroc", "f1", "accuracy", "threshold"}
 
 
 def test_evaluate_subject_level_perfect():
