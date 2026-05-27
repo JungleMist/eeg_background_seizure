@@ -13,6 +13,7 @@ def spectral_entropy(
     sfreq: float,
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
+    freqs_psd: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> float:
     """Shannon entropy of the normalised PSD within *freq_band*.
 
@@ -26,6 +27,10 @@ def spectral_entropy(
         Welch segment length (default 250, consistent with pipeline).
     freq_band : tuple[float, float]
         Analysis band in Hz.
+    freqs_psd : tuple[np.ndarray, np.ndarray] or None
+        Pre-computed ``(freqs, psd)`` from a prior ``welch()`` call on the same
+        signal.  When provided, the internal ``welch()`` call is skipped.
+        If ``None`` (default), ``welch()`` is called as normal.
 
     Returns
     -------
@@ -33,7 +38,10 @@ def spectral_entropy(
         Spectral entropy ≥ 0.  A flat (white-noise) spectrum maximises the
         entropy; a pure sinusoid approaches zero.
     """
-    freqs, psd = welch(signal, fs=sfreq, nperseg=nperseg, window="boxcar")
+    if freqs_psd is not None:
+        freqs, psd = freqs_psd
+    else:
+        freqs, psd = welch(signal, fs=sfreq, nperseg=nperseg, window="boxcar")
 
     mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
     psd_band = psd[mask]

@@ -1,7 +1,7 @@
 """Train XGBoost classifiers and generate SHAP analysis for three preprocessing conditions.
 
 For each condition (raw / ica / wiener), the script:
-  1. Loads or extracts 171-dimensional handcrafted features from the NPZ caches.
+  1. Loads or extracts 211-dimensional handcrafted features from the NPZ caches.
   2. Scales features with ``StandardScaler`` (fit on train, applied to val/test).
   3. Trains an ``XGBClassifier`` via 5-fold GridSearchCV + early-stopping refit.
   4. Evaluates at subject level (mean of per-epoch ``predict_proba``).
@@ -31,7 +31,7 @@ results/xgboost/{condition}/
     test_metrics.json      — {auroc, f1, accuracy} on test set
     val_predictions.csv    — subject_id, pred_proba, true_label
     test_predictions.csv   — subject_id, pred_proba, true_label
-    shap_values_test.npy   — (n_test_epochs, 171) raw SHAP values
+    shap_values_test.npy   — (n_test_epochs, 211) raw SHAP values
     shap_summary.png       — SHAP beeswarm plot (top 20 features)
     shap_by_band.json      — mean |SHAP| per feature-type group
     shap_by_channel.json   — mean |SHAP| per EEG channel

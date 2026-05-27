@@ -23,6 +23,7 @@ def relative_band_power(
     sfreq: float,
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
+    freqs_psd: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict[str, float]:
     """Compute relative power in each EEG frequency band.
 
@@ -38,6 +39,12 @@ def relative_band_power(
     freq_band : tuple[float, float]
         Total analysis band ``(f_low, f_high)`` in Hz.  Only power within this
         range is counted in the denominator.
+    freqs_psd : tuple[np.ndarray, np.ndarray] or None
+        Pre-computed ``(freqs, psd)`` from a prior ``welch()`` call on the same
+        signal.  When provided, the internal ``welch()`` call is skipped, which
+        allows callers that compute multiple features from the same channel to
+        avoid redundant FFT work.  If ``None`` (default), ``welch()`` is called
+        as normal.
 
     Returns
     -------
@@ -47,7 +54,10 @@ def relative_band_power(
         approximately 1 (small discrepancies due to trapezoidal integration
         at band boundaries are possible).
     """
-    freqs, psd = welch(signal, fs=sfreq, nperseg=nperseg, window="boxcar")
+    if freqs_psd is not None:
+        freqs, psd = freqs_psd
+    else:
+        freqs, psd = welch(signal, fs=sfreq, nperseg=nperseg, window="boxcar")
 
     total_mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
     total_power = float(np.trapezoid(psd[total_mask], freqs[total_mask]))

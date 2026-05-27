@@ -6,7 +6,6 @@ The matplotlib ``Agg`` backend must be set before importing this module
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -97,24 +96,20 @@ def aggregate_shap_by_channel(
     dict[str, float]
         Keys are channel names (e.g. ``"FP1"``, ``"T3"``, …).
     """
-    # Extract unique channel prefixes in original order.
-    # Skip asymmetry features (prefix "asym_") — they are aggregated
-    # separately by aggregate_shap_by_band under the "asymmetry" key.
-    seen: dict[str, float] = {}
-    pattern = re.compile(r"^([A-Za-z0-9]+)_")
+    # Single pass: build {channel: [feature_indices]} index, then compute
+    # mean |SHAP| per channel.  Asymmetry features ("asym_" prefix) are
+    # excluded — they are reported under aggregate_shap_by_band("asymmetry").
+    ch_indices: dict[str, list[int]] = {}
     for i, name in enumerate(feature_names):
         if name.startswith("asym_"):
             continue
-        m = pattern.match(name)
-        if m:
-            ch = m.group(1)
-            if ch not in seen:
-                seen[ch] = 0.0
+        ch = name.split("_")[0]   # "FP1_delta_power" → "FP1"
+        ch_indices.setdefault(ch, []).append(i)
 
-    for ch in seen:
-        seen[ch] = _mean_abs_shap_for(shap_values, feature_names, f"{ch}_")
-
-    return seen
+    return {
+        ch: float(np.mean(np.abs(shap_values[:, idxs])))
+        for ch, idxs in ch_indices.items()
+    }
 
 
 def plot_shap_summary(
@@ -192,6 +187,12 @@ def plot_shap_comparison(
 
     band_keys = list(BANDS.keys()) + ["hjorth", "spectral_entropy", "asymmetry"]
 
+    # Determine channel sort order from Wiener importance (fallback: raw).
+    # Computed once here so all three columns share the same y-axis ordering.
+    ref_ch = (results.get("wiener", results.get("raw", {}))
+              .get("shap_by_channel", {}))
+    ch_order = sorted(ref_ch, key=lambda c: ref_ch.get(c, 0), reverse=True)
+
     fig, axes = plt.subplots(
         2, 3,
         figsize=(14, 9),
@@ -219,22 +220,12 @@ def plot_shap_comparison(
         # ── Row 1: channel-level horizontal bar chart ─────────────────────────
         ax1 = axes[1, col_idx]
         ch_data  = data.get("shap_by_channel", {})
-        # Sort channels by wiener importance on the first pass; use that fixed
-        # order for all columns so comparison is consistent.
-        if col_idx == 0:
-            # determine sort order from Wiener (or first available condition)
-            ref_ch = results.get("wiener", results.get("raw", {})) \
-                            .get("shap_by_channel", ch_data)
-            _ch_order = sorted(ref_ch, key=lambda c: ref_ch.get(c, 0),
-                                reverse=True)
-            # store for subsequent columns
-            _ch_order_ref = _ch_order  # noqa: F841  (used via closure below)
-        ch_vals = [ch_data.get(ch, 0.0) for ch in _ch_order]
-        y_pos   = range(len(_ch_order))
+        ch_vals = [ch_data.get(ch, 0.0) for ch in ch_order]
+        y_pos   = range(len(ch_order))
         ax1.barh(list(y_pos), ch_vals, color=color, alpha=0.85,
                  edgecolor="white", linewidth=0.5)
         ax1.set_yticks(list(y_pos))
-        ax1.set_yticklabels(_ch_order, fontsize=7)
+        ax1.set_yticklabels(ch_order, fontsize=7)
         ax1.invert_yaxis()
         if col_idx == 0:
             ax1.set_ylabel("Channel", fontsize=9)

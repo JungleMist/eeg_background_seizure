@@ -22,11 +22,11 @@ Last 40 features — 8 symmetric pairs × 5 bands hemispheric asymmetry:
 """
 from __future__ import annotations
 
-import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+from scipy.signal import welch
 from tqdm import tqdm
 
 from eeg_bg.features.band_power import relative_band_power, BANDS
@@ -81,7 +81,7 @@ def extract_epoch_features(
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
 ) -> np.ndarray:
-    """Extract a 171-dimensional feature vector from one epoch.
+    """Extract a 211-dimensional feature vector from one epoch.
 
     Parameters
     ----------
@@ -103,34 +103,47 @@ def extract_epoch_features(
         First 171 entries are per-channel statistics; last 40 are hemispheric
         asymmetry features.
     """
+    # O(1) channel lookup — avoids O(n) list.index() inside the loop.
+    ch_map = {name: i for i, name in enumerate(ch_names)}
+
     features: list[float] = []
+    # psd_cache[ch] = (freqs, psd) computed once per channel; reused by
+    # relative_band_power, spectral_entropy, and hemispheric_asymmetry so that
+    # welch() is called at most once per unique channel per epoch.
+    psd_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
     for ch in _STANDARD_19:
-        try:
-            idx = ch_names.index(ch)
-        except ValueError:
-            # Channel absent — fill with zeros so vector length is always 171
+        idx = ch_map.get(ch)
+        if idx is None:
+            # Channel absent — fill with zeros so vector length is always 211
             features.extend([0.0] * 9)
             continue
 
         sig = epoch[idx].astype(np.float64)
 
+        # Compute PSD once; share with all spectral feature functions below.
+        fp = welch(sig, fs=sfreq, nperseg=nperseg, window="boxcar")
+        psd_cache[ch] = fp
+
         # 5 relative band powers
         bp = relative_band_power(sig, sfreq=sfreq, nperseg=nperseg,
-                                  freq_band=freq_band)
+                                  freq_band=freq_band, freqs_psd=fp)
         for band in BANDS:
             features.append(bp[band])
 
-        # 3 Hjorth parameters
+        # 3 Hjorth parameters (time-domain only — no PSD needed)
         act, mob, cplx = hjorth_parameters(sig)
         features.extend([act, mob, cplx])
 
-        # 1 spectral entropy
+        # 1 spectral entropy — reuses the already-computed PSD
         features.append(_spectral_entropy(sig, sfreq=sfreq, nperseg=nperseg,
-                                           freq_band=freq_band))
+                                           freq_band=freq_band, freqs_psd=fp))
 
-    # 40 hemispheric asymmetry features (appended after per-channel block)
+    # 40 hemispheric asymmetry features — pass psd_cache so asymmetry pairs
+    # use the PSDs already computed above instead of calling welch() again.
     asym = hemispheric_asymmetry(epoch, ch_names, sfreq=sfreq,
-                                  nperseg=nperseg, freq_band=freq_band)
+                                  nperseg=nperseg, freq_band=freq_band,
+                                  psd_cache=psd_cache)
     return np.concatenate(
         [np.asarray(features, dtype=np.float64), asym]
     ).astype(np.float64)
@@ -190,7 +203,7 @@ def build_dataset(
 
     Returns
     -------
-    X : np.ndarray, shape ``(n_epochs, 171)``
+    X : np.ndarray, shape ``(n_epochs, 211)``
     y : np.ndarray, shape ``(n_epochs,)``, dtype int  (0=epilepsy, 1=control)
     subject_ids : list[str], length ``n_epochs``
         One entry per epoch; used for subject-level aggregation downstream.
@@ -227,8 +240,7 @@ def build_dataset(
     y_list: list[int] = []
     sid_list: list[str] = []
 
-    n_workers = max_workers or os.cpu_count()
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_extract_one_file, args): args
                    for args in args_list}
         for future in tqdm(as_completed(futures), total=len(futures),
