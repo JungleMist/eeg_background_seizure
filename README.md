@@ -250,7 +250,8 @@ D:\eeg_background_seizure\
 │   ├── 03_run_ica.py                ← Step 3: cached epochs → ICA decomposition
 │   ├── 04_run_verification.py       ← Step 4: V1/V2/V3 verification → CSV reports
 │   ├── 05_run_visualization.py      ← Step 5: cached results → waveform + PSD figures
-│   └── 06_train_xgboost.py         ← Step 6: feature extraction + XGBoost × 3 conditions + SHAP
+│   ├── 06_train_xgboost.py         ← Step 6: feature extraction + XGBoost × 3 conditions + SHAP
+│   └── 07_organize_experiment.py   ← Step 7: archive config + results → experiments/<timestamp>/
 │
 ├── configs/
 │   └── default.yaml                 ← All tunable parameters (including ml: section)
@@ -270,6 +271,15 @@ D:\eeg_background_seizure\
 │   ├── 02_wiener_demo.ipynb
 │   ├── 03_ica_comparison.ipynb
 │   └── 04_verification_results.ipynb
+│
+├── experiments/                     ← Auto-generated, git-ignored
+│   └── YYYY-MM-DD_HHMMSS[_<name>]/ ← One folder per archived run (script 07)
+│       ├── config.yaml              ← Copy of config used
+│       ├── experiment.json          ← Config snapshot + all metrics (machine-readable)
+│       ├── report.md                ← Human-readable summary with results table
+│       ├── comparison_summary.csv   ← Re-derived from present conditions
+│       ├── shap_comparison.png      ← Re-generated from per-condition SHAP data
+│       └── {raw,ica,wiener}/        ← Per-condition metrics JSONs + SHAP plots
 │
 ├── cache/                           ← Auto-generated, git-ignored
 │   ├── epochs/                      ← Per-subject .npz epoch files + index.csv
@@ -564,6 +574,40 @@ conditions (Raw C | ICA B | Wiener A).
 
 ---
 
+### Step 7 — Organize Experiment Archive
+
+Captures a consistent snapshot of whatever condition results currently exist in
+`results/xgboost/` and writes them into a timestamped folder under `experiments/`.
+Unlike the top-level `comparison_summary.csv` and `shap_comparison.png` produced by
+script 06 (which reflect only the last `--condition` run), script 07 **re-derives**
+the summary CSV and **re-generates** the SHAP comparison figure from whichever
+conditions are actually present at archive time — so a partial re-run never
+produces a stale summary.
+
+```bash
+# Archive with an optional human label
+python scripts/07_organize_experiment.py --name wiener-test
+
+# Archive using a non-default config
+python scripts/07_organize_experiment.py --config configs/local.yaml --name ablation
+```
+
+**Output:** `experiments/YYYY-MM-DD_HHMMSS[_<name>]/`
+
+| File | Description |
+|------|-------------|
+| `config.yaml` | Copy of the config used for reproducibility |
+| `experiment.json` | Config snapshot + all found metrics (machine-readable) |
+| `report.md` | Human-readable table of key parameters and AUROC / F1 / Acc results |
+| `comparison_summary.csv` | Re-derived from the conditions that are present |
+| `shap_comparison.png` | Re-generated via `plot_shap_comparison()` |
+| `{raw,ica,wiener}/` | Per-condition metrics JSONs + SHAP summary plots |
+
+Safe to run after a partial condition re-run (e.g. `--condition wiener` in step 6)
+— the archive will contain only the conditions that have complete results.
+
+---
+
 ### Pipeline Dependency Graph
 
 Script 01 is the only strict prerequisite. Everything downstream of it has no mutual dependency and can run in parallel.
@@ -585,6 +629,10 @@ EDF files
           ▼                 ▼
   05_run_visualization   06_train_xgboost
   results/figures/       results/xgboost/
+                                 │
+                                 ▼
+                         07_organize_experiment    (run after any subset of 02/03/06)
+                         experiments/<timestamp>/
 ```
 
 **Script 06 per-condition dependencies:**
@@ -595,6 +643,8 @@ EDF files
 | `wiener` | 01 + 02 |
 | `ica` | 01 + 03 |
 | `all` (default) | 01 + 02 + 03 |
+
+**Script 07** can be run after any subset of conditions from script 06 have completed. It discovers whichever of `{raw, ica, wiener}` have results and archives only those.
 
 **Script 05** reads `cache/wiener_frequency/` and `cache/ica/` optionally — panels are omitted if those caches are absent, so it can be run after 01 alone for raw-only figures.
 
@@ -611,6 +661,7 @@ python scripts/03_run_ica.py
 python scripts/04_run_verification.py
 python scripts/05_run_visualization.py
 python scripts/06_train_xgboost.py
+python scripts/07_organize_experiment.py --name full-run
 ```
 
 ### Complete Pipeline (parallel)
@@ -630,6 +681,9 @@ wait
 python scripts/05_run_visualization.py &
 python scripts/06_train_xgboost.py     &
 wait
+
+# Step 7: archive results after step 6 completes
+python scripts/07_organize_experiment.py --name full-run
 ```
 
 ---
