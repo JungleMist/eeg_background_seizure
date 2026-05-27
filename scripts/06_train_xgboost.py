@@ -35,6 +35,7 @@ results/xgboost/{condition}/
     shap_summary.png       — SHAP beeswarm plot (top 20 features)
     shap_by_band.json      — mean |SHAP| per feature-type group
     shap_by_channel.json   — mean |SHAP| per EEG channel
+    data_stats.json        — {train,val,test} subject + epoch counts
 
 results/xgboost/
     comparison_summary.csv — 3 conditions × {val_auroc, test_auroc, f1, acc}
@@ -111,6 +112,36 @@ def _save_json(obj: dict, path: Path) -> None:
         json.dump(obj, f, indent=2)
 
 
+def _split_stats(
+    X: np.ndarray,
+    y: np.ndarray,
+    sids: list[str],
+) -> dict:
+    """Compute subject / epoch counts for one data split.
+
+    Returns
+    -------
+    dict with keys:
+        n_epochs, n_subjects,
+        n_epochs_epilepsy, n_epochs_control,
+        n_subjects_epilepsy, n_subjects_control
+    """
+    if len(X) == 0:
+        return {
+            "n_epochs": 0, "n_subjects": 0,
+            "n_epochs_epilepsy": 0, "n_epochs_control": 0,
+            "n_subjects_epilepsy": 0, "n_subjects_control": 0,
+        }
+    return {
+        "n_epochs":            int(len(X)),
+        "n_subjects":          int(len(set(sids))),
+        "n_epochs_epilepsy":   int(np.sum(y == 0)),
+        "n_epochs_control":    int(np.sum(y == 1)),
+        "n_subjects_epilepsy": int(len({s for s, l in zip(sids, y) if l == 0})),
+        "n_subjects_control":  int(len({s for s, l in zip(sids, y) if l == 1})),
+    }
+
+
 # ── Per-condition pipeline ────────────────────────────────────────────────────
 
 def run_condition(
@@ -153,9 +184,18 @@ def run_condition(
               "Run scripts 01-03 first.")
         return {}
 
-    print(f"  Train: {len(X_train)} epochs | "
-          f"Val: {len(X_val)} epochs | "
-          f"Test: {len(X_test)} epochs")
+    # ── Data statistics ───────────────────────────────────────────────────────
+    data_stats = {
+        "train": _split_stats(X_train, y_train, sids_train),
+        "val":   _split_stats(X_val,   y_val,   sids_val),
+        "test":  _split_stats(X_test,  y_test,  sids_test),
+    }
+    _save_json(data_stats, out_dir / "data_stats.json")
+
+    for split, s in data_stats.items():
+        print(f"  {split.capitalize():5}: {s['n_subjects']:4d} subjects / "
+              f"{s['n_epochs']:5d} epochs  "
+              f"({s['n_subjects_epilepsy']}E + {s['n_subjects_control']}C subjects)")
 
     # ── Feature scaling ───────────────────────────────────────────────────────
     scaler    = StandardScaler()
@@ -229,6 +269,7 @@ def run_condition(
         "test_metrics":    test_metrics,
         "shap_by_band":    band_agg,
         "shap_by_channel": ch_agg,
+        "data_stats":      data_stats,
     }
 
 
@@ -260,6 +301,11 @@ def main(config_path: str, condition: str, force: bool) -> None:
                                      ("test", res.get("test_metrics", {}))]:
                 for k, v in metrics.items():
                     row[f"{prefix}_{k}"] = v
+            stats = res.get("data_stats", {})
+            for split in ("train", "val", "test"):
+                s = stats.get(split, {})
+                row[f"{split}_n_subjects"] = s.get("n_subjects", "")
+                row[f"{split}_n_epochs"]   = s.get("n_epochs", "")
             rows.append(row)
         summary_df = pd.DataFrame(rows)
         summary_path = out_root / "comparison_summary.csv"

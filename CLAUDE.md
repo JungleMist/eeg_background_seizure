@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
-- Python via **conda env `eeg_pipeline`** (`C:\ProgramData\anaconda3\envs\eeg_pipeline`). Use `conda run -n eeg_pipeline` or activate it before running commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib.
+- Python via **conda env `eeg_pipeline`** (`C:\ProgramData\anaconda3\envs\eeg_pipeline`), Python 3.11. Use `conda run -n eeg_pipeline` or activate it before running commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib. To recreate the environment: `conda env create -f environment.yaml`.
 - Install the package in development mode: `pip install -e .`
 - Core dependencies: numpy 2.4.6, scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, joblib 1.5.3, pandas 2.3.3, matplotlib 3.10.8, pyyaml 6.0.3, pytest 9.0.2, tqdm 4.67.3, xgboost 3.2.0, shap 0.51.0.
 - **Note**: `np.trapezoid` is used (not `np.trapz`, removed in NumPy 2.0).
@@ -43,7 +43,7 @@ conda run -n eeg_pipeline python scripts/02_run_wiener.py [--mode frequency|scal
 conda run -n eeg_pipeline python scripts/03_run_ica.py [--force] [--workers N]
 
 # 04 — Verification experiments V1/V2/V3 → results/verification/*.csv
-conda run -n eeg_pipeline python scripts/04_run_verification.py
+conda run -n eeg_pipeline python scripts/04_run_verification.py [--workers N]
 
 # Scripts 02, 03, and 04 all read only from cache/epochs/ — they can run in parallel after 01.
 
@@ -204,6 +204,20 @@ results/
     └── shap_comparison.png           — 2×3 publication comparison figure
 ```
 
+### Experiment archive layout (script 07)
+
+Script 07 snapshots the current config and `results/xgboost/` into a timestamped directory:
+
+```
+experiments/<timestamp>_<name>/
+├── config.yaml              — copy of the config used
+├── experiment.json          — metadata + full metrics for all conditions
+├── report.md                — human-readable summary table
+├── comparison_summary.csv   — same as results/xgboost/comparison_summary.csv
+├── shap_comparison.png      — same as results/xgboost/shap_comparison.png
+└── {raw,ica,wiener}/        — per-condition JSON files (metrics, SHAP by band/channel, best_params)
+```
+
 ### Matplotlib backend
 
 Any script that saves figures must call `matplotlib.use("Agg")` **before** any `import matplotlib.pyplot`. Scripts 05 and 06 already do this. Visualization functions in `eeg_bg/visualization/` return `plt.Figure` objects and never call `plt.show()`.
@@ -231,7 +245,7 @@ Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark
 - **ICA fits on a 1 Hz high-pass copy but applies to 0.5 Hz data**: `fit_ica()` creates a temporary high-pass-filtered copy for FastICA convergence (MNE best practice), then applies the fitted mixing matrix to the original 0.5 Hz bandpass epochs. The `specific` output in the ICA cache is in the original 0.5 Hz bandpass domain. `max_iter` (default 1000) is read from `ica.max_iter` in the config and passed directly to the MNE ICA constructor — the scikit-learn default of 200 is too low for 19-channel EEG and causes frequent `ConvergenceWarning`.
 - **`FEATURE_NAMES` and `ASYMMETRY_NAMES` must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 211)` are indexed by position against `FEATURE_NAMES`. Any reordering of channels in `configs/default.yaml` `standard_19` or of pairs in `asymmetry.SYMMETRIC_PAIRS` invalidates saved SHAP arrays.
 - **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
-- **Scripts 01–03 and 06 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition.
+- **Scripts 01–04 and 06 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 04 additionally runs V1/V2/V3 concurrently via `ThreadPoolExecutor` in Phase 2 after decomposition. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition.
 - **Cache key composition for script 01**: the SHA-256 key is derived from `edf_path`, `target_sfreq`, and `bandpass` only. Changing `epoch_length_sec`, `artifact_threshold_uv`, or `seizure_buffer_sec` does NOT generate a new key — the existing `.npz` is silently reused unless you pass `--force`. Scripts 02 and 03 have no key-based invalidation at all; any config change to `wiener.*` or `ica.*` requires `--force` for those scripts.
 - **`--force` does not cascade and does not clean up orphaned files**: running `01_extract_epochs.py --force` does not force-rerun scripts 02–06; each script must be passed `--force` independently. Old `.npz` files at old key paths are orphaned on disk (not deleted). For script 06, `--force` only bypasses the feature-extraction cache (`cache/features/`); model training, SHAP computation, and all output files always regenerate regardless.
 

@@ -33,6 +33,7 @@ experiments/YYYY-MM-DD_HHMMSS[_<name>]/
         shap_by_band.json
         shap_by_channel.json
         shap_summary.png
+        data_stats.json         — subject + epoch counts per split
 """
 import argparse
 import json
@@ -62,6 +63,7 @@ _CONDITION_FILES = [
     "shap_by_band.json",      # needed to regenerate comparison figure
     "shap_by_channel.json",   # needed to regenerate comparison figure
     "shap_summary.png",
+    "data_stats.json",        # subject + epoch counts per split
 ]
 
 # Config keys extracted into the snapshot (flat display name → nested path).
@@ -139,6 +141,13 @@ def _derive_comparison_csv(exp_dir: Path, found: list[str]) -> None:
                 metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
                 for k, v in metrics.items():
                     row[f"{prefix}_{k}"] = v
+        stats_file = exp_dir / cond / "data_stats.json"
+        if stats_file.exists():
+            stats = json.loads(stats_file.read_text(encoding="utf-8"))
+            for split in ("train", "val", "test"):
+                s = stats.get(split, {})
+                row[f"{split}_n_subjects"] = s.get("n_subjects", "")
+                row[f"{split}_n_epochs"]   = s.get("n_epochs", "")
         rows.append(row)
     if rows:
         pd.DataFrame(rows).to_csv(
@@ -184,7 +193,7 @@ def _write_experiment_json(
     results: dict[str, dict] = {}
     for cond in found:
         entry: dict = {}
-        for key in ("val_metrics", "test_metrics", "best_params"):
+        for key in ("val_metrics", "test_metrics", "best_params", "data_stats"):
             fpath = exp_dir / cond / f"{key}.json"
             if fpath.exists():
                 entry[key] = json.loads(fpath.read_text(encoding="utf-8"))
@@ -262,6 +271,35 @@ def _write_report_md(
                 f"| {_m('test', 'auroc')} "
                 f"| {_m('test', 'f1')} "
                 f"| {_m('test', 'accuracy')} |"
+            )
+        lines.append("")
+
+    # Dataset statistics (read from first available condition — splits are shared)
+    first_stats_cond = next(
+        (c for c in found if (exp_dir / c / "data_stats.json").exists()), None
+    )
+    if first_stats_cond:
+        stats = json.loads(
+            (exp_dir / first_stats_cond / "data_stats.json")
+            .read_text(encoding="utf-8")
+        )
+        lines += [
+            "## Dataset Statistics",
+            "",
+            "| Split | Subjects | Epochs | Epilepsy Subj | Control Subj |"
+            " Epilepsy Ep | Control Ep |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for split in ("train", "val", "test"):
+            s = stats.get(split, {})
+            lines.append(
+                f"| {split} "
+                f"| {s.get('n_subjects', '—')} "
+                f"| {s.get('n_epochs', '—')} "
+                f"| {s.get('n_subjects_epilepsy', '—')} "
+                f"| {s.get('n_subjects_control', '—')} "
+                f"| {s.get('n_epochs_epilepsy', '—')} "
+                f"| {s.get('n_epochs_control', '—')} |"
             )
         lines.append("")
 
