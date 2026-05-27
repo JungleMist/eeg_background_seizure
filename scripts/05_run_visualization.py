@@ -40,9 +40,11 @@ def _save(fig: plt.Figure, path: Path) -> None:
     plt.close(fig)
 
 
-def main(config_path: str, n_subjects: int, epoch_idx: int, channels: list[str] | None) -> None:
+def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channels: list[str] | None) -> None:
     cfg         = load_config(config_path)
-    channels    = channels or cfg["visualization"]["psd_target_channels"]
+    channels    = channels    if channels    is not None else cfg["visualization"]["psd_target_channels"]
+    n_subjects  = n_subjects  if n_subjects  is not None else cfg["visualization"]["n_subjects"]
+    epoch_idx   = epoch_idx   if epoch_idx   is not None else cfg["visualization"]["epoch_idx"]
     epoch_root  = Path(cfg["paths"]["cache_dir"]) / "epochs"
     wiener_root = Path(cfg["paths"]["cache_dir"]) / "wiener_frequency"
     ica_root    = Path(cfg["paths"]["cache_dir"]) / "ica"
@@ -117,10 +119,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--config",     default="configs/default.yaml",
                         help="Path to YAML config file")
-    parser.add_argument("--n-subjects", type=int, default=0,
-                        help="Max number of subjects to process (0 = all)")
-    parser.add_argument("--epoch-idx",  type=int, default=0,
-                        help="Which epoch index to visualize per subject")
+    parser.add_argument("--n-subjects", type=int, default=None,
+                        help="Max number of subjects to process (0 = all); "
+                             "default: visualization.n_subjects from config")
+    parser.add_argument("--epoch-idx",  type=int, default=None,
+                        help="Which epoch index to visualize per subject; "
+                             "default: visualization.epoch_idx from config")
     parser.add_argument("--channels",   default=None,
                         help="Comma-separated channel names for PSD plot "
                              "(default: visualization.psd_target_channels from config)")

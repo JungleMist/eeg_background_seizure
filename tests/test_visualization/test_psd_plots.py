@@ -50,7 +50,9 @@ def test_psd_comparison_channel_subset(epoch):
 
 
 def test_psd_comparison_default_channels_from_config():
-    """Verify that cfg['visualization']['psd_target_channels'] == ['FP1', 'FP2']."""
+    """Verify visualization config keys exist with correct types."""
     from eeg_bg.config.settings import load_config
     cfg = load_config("configs/default.yaml")
     assert cfg["visualization"]["psd_target_channels"] == ["FP1", "FP2"]
+    assert isinstance(cfg["visualization"]["n_subjects"], int)
+    assert isinstance(cfg["visualization"]["epoch_idx"], int)

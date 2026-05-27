@@ -7,15 +7,16 @@ A research framework for studying **physical point-source Wiener decomposition**
 ## Table of Contents
 
 1. [Research Hypothesis](#research-hypothesis)
-2. [Environment Setup](#environment-setup)
-3. [Project Structure](#project-structure)
-4. [Data Flow](#data-flow)
-5. [Configuration](#configuration)
-6. [Running the Pipeline](#running-the-pipeline)
-7. [Physical Verification Experiments](#physical-verification-experiments)
-8. [Visualization](#visualization)
-9. [Testing](#testing)
-10. [Package API](#package-api)
+2. [Core Methodology](#core-methodology)
+3. [Environment Setup](#environment-setup)
+4. [Project Structure](#project-structure)
+5. [Data Flow](#data-flow)
+6. [Configuration](#configuration)
+7. [Running the Pipeline](#running-the-pipeline)
+8. [Physical Verification Experiments](#physical-verification-experiments)
+9. [Visualization](#visualization)
+10. [Testing](#testing)
+11. [Package API](#package-api)
 
 ---
 
@@ -33,6 +34,145 @@ specific_i(t) = x_i(t) - coherent_i(t)
 ```
 
 where `h_ij(f)` is the optimal Wiener filter coefficient estimated from the cross-power spectral density matrix of each bilateral electrode pair.
+
+---
+
+## Core Methodology
+
+### Signal Model
+
+The observed EEG at electrode $i$ within a muscle-artifact conduction group is modelled as a linear mixture of a locally generated signal and attenuated copies from neighbouring electrodes:
+
+$$x_i(t) = s_i(t) + \sum_{j \neq i} h_{ij}(t) * x_j(t)$$
+
+where $s_i(t)$ is the **specific** (cortical) component and $h_{ij}(t)$ is the impulse response of the physical conduction path from electrode $j$ to electrode $i$. The goal is to recover $s_i(t)$ for every electrode in each group.
+
+---
+
+### Channel Groups
+
+The filter is applied independently to six anatomically motivated **conduction groups**, each corresponding to a known muscle-artifact pathway. Channels not in any group (`passthrough`) are left unchanged.
+
+| Group | Channels | Pathway |
+|-------|----------|---------|
+| G1 | FP1, FP2 | Symmetric frontalis (facial) |
+| G2 | F7, T3 | Left sternocleidomastoid (SCM) |
+| G3 | T3, T5, O1 | Left posterior neck (3-channel chain) |
+| G4 | O1, O2 | Bilateral occipitalis |
+| G5 | F8, T4 | Right SCM |
+| G6 | T4, T6, O2 | Right posterior neck (3-channel chain) |
+| — | F3, F4, C3, C4, P3, P4, Fz, Cz, Pz | Passthrough (never filtered) |
+
+3-channel chains (G3, G6) model the fact that the middle electrode (T5 or T6) receives artifact from both its neighbours; each channel in the group is processed using all remaining channels in that group as references.
+
+---
+
+### Step 1 — Cross-PSD Estimation
+
+For each group of $K$ channels, the full $K \times K$ **cross-power spectral density matrix** is estimated using Welch's method with a boxcar (rectangular) window:
+
+$$S_{ij}(f) = \frac{1}{L} \sum_{l=1}^{L} X_i^{(l)}(f) \cdot \overline{X_j^{(l)}(f)}$$
+
+where $L$ is the number of non-overlapping segments and $X_i^{(l)}(f)$ is the DFT of segment $l$ of channel $i$.
+
+**Implementation parameters** (default config):
+
+| Parameter | Value | Derivation |
+|-----------|-------|-----------|
+| `nperseg` | 250 samples | $f_s \times 2\,\text{s} = 125 \times 2$ |
+| Segments per epoch | 4 | $1000\,\text{samples} / 250$ |
+| Frequency resolution | 0.5 Hz | $f_s / \text{nperseg} = 125 / 250$ |
+| Window | boxcar | Matches the rfft applied during filter application |
+
+The boxcar window is essential: using any other window would introduce a mismatch between the estimated filter grid and the full-epoch rfft used in Step 3, violating the exact decomposition identity.
+
+**Code:** `eeg_bg/decomposition/wiener.py` → `estimate_cross_psd()`
+
+---
+
+### Step 2 — Coherence Gate
+
+Before estimating a filter, the maximum pairwise coherence across all channel pairs in the group is computed over the target frequency band:
+
+$$\gamma^2_{ij}(f) = \frac{|S_{ij}(f)|^2}{S_{ii}(f) \cdot S_{jj}(f)}, \qquad \gamma^2_{ij} \in [0, 1]$$
+
+$$C_\text{max} = \max_{\substack{i,j \in \text{group} \\ i \neq j}} \max_{f \in [f_\text{lo},\, f_\text{hi}]} \gamma^2_{ij}(f)$$
+
+If $C_\text{max} < \theta_\text{coh}$ (default 0.15), the group is **skipped** — no filtering is applied and those channels pass through unchanged. This avoids fitting noise in groups where no shared artifact source is detectable.
+
+---
+
+### Step 3 — Wiener Filter Estimation
+
+For each channel $i$ in the group (treated as the target), the remaining $K-1$ channels form the reference set. The optimal **minimum mean-squared-error (MMSE) Wiener filter** solves the Wiener–Hopf equation at each frequency bin $f$:
+
+$$\mathbf{h}_i(f) = \mathbf{S}_\text{ref}(f)^{-1}\, \mathbf{s}_{i,\text{ref}}(f)$$
+
+where:
+- $\mathbf{S}_\text{ref}(f) \in \mathbb{C}^{(K-1)\times(K-1)}$ — cross-PSD sub-matrix of the reference channels
+- $\mathbf{s}_{i,\text{ref}}(f) \in \mathbb{C}^{K-1}$ — cross-PSD vector between target $i$ and the references
+- $\mathbf{h}_i(f) \in \mathbb{C}^{K-1}$ — filter coefficients (one per reference channel, per frequency bin)
+
+**Tikhonov regularisation** is applied to stabilise the solve for near-singular matrices (common in 3-channel chains where reference channels are highly correlated):
+
+$$\mathbf{S}_\text{ref,reg}(f) = \mathbf{S}_\text{ref}(f) + \varepsilon(f)\,\mathbf{I}$$
+
+$$\varepsilon(f) = \lambda \cdot \max\!\left(\overline{\operatorname{diag}\bigl(\operatorname{Re}[\mathbf{S}_\text{ref}(f)]\bigr)},\; 10^{-30}\right), \qquad \lambda = 10^{-4}$$
+
+The regularisation is relative (proportional to the mean diagonal power), so it scales correctly across subjects with very different signal amplitudes.
+
+**Stability gate:** After solving, if $\max_{j,f} |h_{ij}(f)| > 50$ for any channel in the group, the entire group is treated as unstable and skipped — even after regularisation the matrix was effectively singular.
+
+**Code:** `eeg_bg/decomposition/wiener.py` → `compute_wiener_filter()`
+
+---
+
+### Step 4 — Filter Application
+
+The coherent component is computed in the frequency domain by summing the filtered reference channels:
+
+$$\hat{X}_i^\text{coherent}(f) = \sum_{j \neq i} h_{ij}(f) \cdot X_j(f)$$
+
+$$x_i^\text{coherent}(t) = \operatorname{IFFT}\!\left[\hat{X}_i^\text{coherent}(f)\right]$$
+
+$$x_i^\text{specific}(t) = x_i(t) - x_i^\text{coherent}(t)$$
+
+When `nperseg < n_times` (the Welch window is shorter than the epoch), the filter coefficients are **linearly interpolated** from the Welch frequency grid (size $\lfloor\text{nperseg}/2\rfloor + 1$) to the full rfft grid (size $\lfloor n_\text{times}/2\rfloor + 1$) before application. The interpolation is on real and imaginary parts separately.
+
+Because the coherent component is defined as $x_i - x_i^\text{specific}$ by construction, the **decomposition identity holds exactly regardless of interpolation accuracy**:
+
+$$x_i^\text{specific}(t) + x_i^\text{coherent}(t) \equiv x_i(t)$$
+
+**Code:** `eeg_bg/decomposition/wiener.py` → `apply_wiener_filter()`
+
+---
+
+### Scalar Ablation Baseline
+
+The `--mode scalar` variant collapses the frequency-dependent filter to a single **real scalar** per reference channel by averaging $h_{ij}(f)$ over the target band:
+
+$$\bar{h}_{ij} = \frac{1}{|F|} \sum_{f \in F} \operatorname{Re}[h_{ij}(f)], \qquad F = \{f : f_\text{lo} \le f \le f_\text{hi}\}$$
+
+The coherent signal is then computed entirely in the time domain:
+
+$$x_i^\text{coherent}(t) = \sum_{j \neq i} \bar{h}_{ij} \cdot x_j(t)$$
+
+This is otherwise identical to the frequency mode (same coherence gate, same PSD estimation, same regularisation). It serves as the ablation baseline for V3: if $|h_{ij}(f)|$ varies significantly across frequency (V3 passes), the frequency-dependent model should outperform the scalar one on the downstream classification task.
+
+**Code:** `eeg_bg/decomposition/wiener_scalar.py`
+
+---
+
+### Summary of Filter Parameters
+
+| Symbol | Config key | Default | Role |
+|--------|-----------|---------|------|
+| $f_s$ | `preprocessing.target_sfreq` | 125 Hz | Sampling rate after resampling |
+| $\text{nperseg}$ | `wiener.nperseg` | 250 | Welch window length (samples) |
+| $[f_\text{lo}, f_\text{hi}]$ | `wiener.freq_band` | [0.5, 40.0] Hz | Filter estimation and coherence gate band |
+| $\theta_\text{coh}$ | `wiener.coherence_threshold` | 0.15 | Coherence gate threshold |
+| $M_\text{max}$ | `wiener.filter_magnitude_threshold` | 50.0 | Stability gate: max allowed $\|h_{ij}(f)\|$ |
+| $\lambda$ | — (hardcoded) | $10^{-4}$ | Tikhonov regularisation factor |
 
 ---
 

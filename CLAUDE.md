@@ -95,7 +95,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
   → cache/wiener_frequency|ica/ — checkpoint 2
   → verification/           — V1 coherence, V2 transitivity, V3 frequency variation
   → visualization/          — matplotlib figures returned as plt.Figure (never call plt.show())
-  → features/extraction.py  — extract_epoch_features() → 171-dim vector per epoch
+  → features/extraction.py  — extract_epoch_features() → 211-dim vector per epoch (171 per-channel + 40 asymmetry)
   → ml/xgb_pipeline.py      — GridSearchCV + early stopping; subject-level aggregation
   → ml/shap_analysis.py     — TreeExplainer SHAP; band/channel aggregation; comparison plot
   → results/xgboost/        — model.joblib, metrics JSON, SHAP plots
@@ -119,7 +119,8 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/preprocessing/reference.py` | `detect_reference` infers AR/LE from montage dir name; `filter_by_reference` subsets the subject index to one scheme. |
 | `eeg_bg/io/dataset.py` | Traverses TUEP directory tree → subject index DataFrame; `assign_splits` splits by subject (not recording). |
 | `eeg_bg/io/cache.py` | `load_or_compute` wraps any `compute_fn` with `.npz` on-disk caching; cache key = SHA-256 of `edf_path|start_sec|sfreq|bandpass`. |
-| `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(171,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
+| `eeg_bg/features/asymmetry.py` | `hemispheric_asymmetry(epoch, ch_names, sfreq)` → `(40,)` vector; `ASYMMETRY_NAMES` — 40 strings (`"asym_{left}_{right}_{band}"`). Order is fixed; reordering invalidates saved SHAP `.npy` arrays. 8 symmetric pairs × 5 bands, formula: `(P_left − P_right) / (P_left + P_right + ε)`. |
+| `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(211,)` vector (171 per-channel + 40 asymmetry); `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
 | `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. |
 | `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×3 cross-condition publication figure). |
 | `eeg_bg/visualization/coherence_plots.py` | `plot_coherence_matrix` (pre/post heatmap side-by-side), `plot_coherence_reduction` (boxplot by pair or subject), `plot_signal_decomposition` (raw / coherent / specific waveform panels for one channel). |
@@ -128,7 +129,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/features/band_power.py` | `relative_band_power(signal, sfreq, band)` → scalar; `BANDS` dict mapping name→(low, high) Hz for delta/theta/alpha/beta/gamma. |
 | `eeg_bg/features/hjorth.py` | `hjorth_parameters(signal)` → `(activity, mobility, complexity)` triple. |
 | `eeg_bg/features/spectral_entropy.py` | `spectral_entropy(signal, sfreq)` → scalar normalised Shannon entropy of PSD. |
-| `eeg_bg/features/extraction.py` (constants) | `FEATURE_NAMES` — public list of 171 strings (`"{ch}_{suffix}"`) built at import time; must stay stable since downstream `.npy` SHAP arrays are indexed by position. `_CONDITION_TO_SUBDIR` maps `"wiener"→"wiener_frequency"` etc. |
+| `eeg_bg/features/extraction.py` (constants) | `FEATURE_NAMES` — public list of 211 strings built at import time; first 171 are `"{ch}_{suffix}"` per-channel, last 40 are `ASYMMETRY_NAMES`. Must stay positionally stable since SHAP `.npy` arrays are indexed by position. `_CONDITION_TO_SUBDIR` maps `"wiener"→"wiener_frequency"` etc. |
 
 ### Channel groups (G1–G6)
 
@@ -151,9 +152,12 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 
 ### Feature vector layout
 
-`extract_epoch_features` produces a 171-dim vector: **19 channels × 9 features** each.  
-Inner order per channel: `delta_power, theta_power, alpha_power, beta_power, gamma_power, hjorth_activity, hjorth_mobility, hjorth_complexity, spectral_entropy`.  
-Channels iterate in the canonical 19-channel order from `configs/default.yaml`. Missing channels fill with zeros so the vector length is always 171.
+`extract_epoch_features` produces a **211-dim vector**: first 171 are per-channel stats, last 40 are hemispheric asymmetry.
+
+- **Per-channel block (171 = 19 channels × 9 features each)**: inner order per channel: `delta_power, theta_power, alpha_power, beta_power, gamma_power, hjorth_activity, hjorth_mobility, hjorth_complexity, spectral_entropy`. Channels iterate in canonical `_STANDARD_19` order. Missing channels zero-padded.
+- **Asymmetry block (40 = 8 pairs × 5 bands)**: `asym_{left}_{right}_{band}`, pairs in `SYMMETRIC_PAIRS` order (`FP1/FP2`, `F3/F4`, `F7/F8`, `C3/C4`, `T3/T4`, `T5/T6`, `P3/P4`, `O1/O2`). Missing electrode pairs zero-padded.
+
+Both `FEATURE_NAMES` (211 strings) and `ASYMMETRY_NAMES` (40 strings) must stay positionally stable — saved SHAP `.npy` arrays are indexed by position.
 
 ### Label encoding
 
@@ -165,6 +169,7 @@ Channels iterate in the canonical 19-channel order from `configs/default.yaml`. 
 cache/
 ├── epochs/{label_prefix}_{subject_id}/{sha256_key}.npz   — keys: epochs, ch_names, label, subject_id, split
 ├── wiener_frequency/ (same tree)                          — keys: specific, coherent, label, subject_id, split
+├── wiener_scalar/ (same tree)                             — keys: specific, coherent, label, subject_id, split (--mode scalar output)
 ├── ica/ (same tree)                                       — keys: specific, n_artifacts_removed, label, subject_id, split
 └── features/{condition}_{split}.npz                       — keys: X, y, subject_ids
 ```
@@ -188,7 +193,7 @@ results/
     │   ├── best_params.json          — GridSearchCV best hyperparameters
     │   ├── val_metrics.json / test_metrics.json  — {auroc, f1, accuracy}
     │   ├── val_predictions.csv / test_predictions.csv  — subject_id, pred_proba, true_label
-    │   ├── shap_values_test.npy      — (n_test_epochs, 171) raw SHAP values
+    │   ├── shap_values_test.npy      — (n_test_epochs, 211) raw SHAP values
     │   ├── shap_summary.png          — beeswarm plot (top 20 features)
     │   ├── shap_by_band.json         — mean |SHAP| per feature-type group
     │   └── shap_by_channel.json      — mean |SHAP| per EEG channel
@@ -221,7 +226,7 @@ Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark
 - **XGBoost `n_estimators` in `param_grid` is ignored during Phase 1**: `xgb_pipeline.py` overrides it to 500 for the grid search and uses early stopping in Phase 2 to find the final tree count. The entry in `configs/default.yaml` is documentation only.
 - **`device="cuda"` automatically sets `n_jobs=1`**: `xgb_pipeline.py` detects the CUDA device setting and overrides GridSearchCV's `n_jobs` to avoid CUDA context conflicts across parallel workers. No manual change needed.
 - **ICA fits on a 1 Hz high-pass copy but applies to 0.5 Hz data**: `fit_ica()` creates a temporary high-pass-filtered copy for FastICA convergence (MNE best practice), then applies the fitted mixing matrix to the original 0.5 Hz bandpass epochs. The `specific` output in the ICA cache is in the original 0.5 Hz bandpass domain. `max_iter` (default 1000) is read from `ica.max_iter` in the config and passed directly to the MNE ICA constructor — the scikit-learn default of 200 is too low for 19-channel EEG and causes frequent `ConvergenceWarning`.
-- **`FEATURE_NAMES` must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 171)` are indexed by position against `FEATURE_NAMES`. Any reordering or insertion of channels in `configs/default.yaml` `standard_19` invalidates saved SHAP arrays.
+- **`FEATURE_NAMES` and `ASYMMETRY_NAMES` must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 211)` are indexed by position against `FEATURE_NAMES`. Any reordering of channels in `configs/default.yaml` `standard_19` or of pairs in `asymmetry.SYMMETRIC_PAIRS` invalidates saved SHAP arrays.
 - **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
 - **Scripts 01–03 and 06 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition.
 - **Cache key composition for script 01**: the SHA-256 key is derived from `edf_path`, `target_sfreq`, and `bandpass` only. Changing `epoch_length_sec`, `artifact_threshold_uv`, or `seizure_buffer_sec` does NOT generate a new key — the existing `.npz` is silently reused unless you pass `--force`. Scripts 02 and 03 have no key-based invalidation at all; any config change to `wiener.*` or `ica.*` requires `--force` for those scripts.
@@ -230,4 +235,5 @@ Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark
 ## Reference Documentation
 
 - **`docs/Developer_qa.md`** — Detailed Q&A: epoch validity criteria (4 criteria with decision flow), `.npz` cache file schemas (exact keys/shapes/dtypes per cache family), feature extraction internals (band definitions, Hjorth formulae, spectral entropy formula, per-condition signal mapping).
+- **`docs/preprocessing.md`** — Every transformation applied to raw TUEP EDF recordings before epochs are written to `cache/epochs/`: dataset discovery, reference filtering, split assignment, EDF loading, channel normalisation, bandpass filtering, resampling, unit conversion, epoch slicing, and artifact rejection.
 - **`eeg_bg/README.md`** — Full package API reference: every public function signature, return type, parameter table, and usage example.

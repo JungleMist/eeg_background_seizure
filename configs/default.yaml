@@ -272,6 +272,8 @@ verification:
 #   channels for evaluating decomposition quality.
 visualization:
   psd_target_channels: ["FP1", "FP2"]
+  n_subjects: 4   # number of subjects to visualise; 0 = all subjects
+  epoch_idx: 1    # which epoch index to visualise per subject
 
 # -----------------------------------------------------------------------------
 # Machine learning  [Tier 4 — re-run 06+]
