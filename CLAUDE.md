@@ -52,6 +52,9 @@ conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N
 
 # 06 — XGBoost + SHAP for all three conditions → results/xgboost/
 conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force] [--workers N]
+
+# 07 — Archive experiment config + results → experiments/<timestamp>/
+conda run -n eeg_pipeline python scripts/07_organize_experiment.py [--name LABEL] [--config PATH]
 ```
 
 ### Cache invalidation tiers
