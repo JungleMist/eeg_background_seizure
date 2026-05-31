@@ -142,9 +142,13 @@ def train_cnn(
                               shuffle=False, num_workers=num_workers)
 
     # ── Model ───────────────────────────────────────────────────────────────
+    # Derive n_times from the actual data shape so the model adapts to any
+    # epoch_length_sec value without requiring hardcoded assumptions.
+    # train_ds loads eagerly so [0] is already in memory.
+    n_times = train_ds[0][0].shape[-1]  # epoch_tensor: (1, n_channels, n_times)
     model = EEGNet(
         n_channels=19,
-        n_times=1000,
+        n_times=n_times,
         F1=int(cnn_cfg.get("F1", 8)),
         D=int(cnn_cfg.get("D", 2)),
         dropout=float(cnn_cfg.get("dropout", 0.25)),
