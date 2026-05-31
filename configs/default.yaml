@@ -332,3 +332,18 @@ ml:
   shap:
     max_display: 20   # top-N features shown in the beeswarm summary plot
     dpi: 150          # resolution for saved SHAP figures (PNG)
+  cnn:
+    # EEGNet architecture hyperparameters
+    F1: 8                 # number of temporal filters in Block 1
+    D: 2                  # depth multiplier; F2 = F1 * D = 16
+    dropout: 0.25         # dropout probability applied after Blocks 2 and 3
+    # Training hyperparameters
+    lr: 0.001             # Adam learning rate
+    weight_decay: 0.0001  # Adam L2 regularisation
+    batch_size: 64        # DataLoader batch size
+    max_epochs: 200       # hard ceiling on training epochs
+    patience: 20          # early-stopping patience (val AUROC epochs)
+    lr_patience: 10       # ReduceLROnPlateau patience
+    lr_factor: 0.5        # ReduceLROnPlateau reduction factor
+    device: "cpu"         # "cpu" or "cuda"
+    num_workers: 0        # DataLoader num_workers (0 = main process, Windows-safe)
