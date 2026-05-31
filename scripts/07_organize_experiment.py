@@ -66,6 +66,16 @@ _CONDITION_FILES = [
     "data_stats.json",        # subject + epoch counts per split
 ]
 
+# Files to copy from results/cnn/{condition}/ into the experiment archive.
+# best_model.pt is intentionally omitted — too large for archiving.
+_CNN_CONDITION_FILES = [
+    "val_metrics.json",
+    "test_metrics.json",
+    "best_params.json",
+    "val_predictions.csv",
+    "test_predictions.csv",
+]
+
 # Config keys extracted into the snapshot (flat display name → nested path).
 _SNAPSHOT_KEYS: list[tuple[str, list[str]]] = [
     ("target_sfreq",            ["preprocessing", "target_sfreq"]),
@@ -110,21 +120,42 @@ def _extract_config_snapshot(cfg: dict) -> dict:
 
 
 def _discover_conditions(xgb_root: Path) -> list[str]:
-    """Return conditions that have a test_metrics.json (i.e. are complete)."""
+    """Return XGBoost conditions that have a test_metrics.json (i.e. are complete)."""
     return [
         c for c in CONDITIONS
         if (xgb_root / c / "test_metrics.json").exists()
     ]
 
 
+def _discover_cnn_conditions(cnn_root: Path) -> list[str]:
+    """Return CNN conditions that have a test_metrics.json (i.e. are complete)."""
+    return [
+        c for c in CONDITIONS
+        if (cnn_root / c / "test_metrics.json").exists()
+    ]
+
+
 def _copy_condition_files(
     xgb_root: Path, exp_dir: Path, condition: str
 ) -> None:
-    """Copy per-condition result files into the experiment archive."""
+    """Copy per-condition XGBoost result files into the experiment archive."""
     src_dir = xgb_root / condition
     dst_dir = exp_dir / condition
     dst_dir.mkdir(parents=True, exist_ok=True)
     for fname in _CONDITION_FILES:
+        src = src_dir / fname
+        if src.exists():
+            shutil.copy2(src, dst_dir / fname)
+
+
+def _copy_cnn_condition_files(
+    cnn_root: Path, exp_dir: Path, condition: str
+) -> None:
+    """Copy per-condition CNN result files into the experiment archive."""
+    src_dir = cnn_root / condition
+    dst_dir = exp_dir / "cnn" / condition
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for fname in _CNN_CONDITION_FILES:
         src = src_dir / fname
         if src.exists():
             shutil.copy2(src, dst_dir / fname)
@@ -187,6 +218,7 @@ def _write_experiment_json(
     timestamp: str,
     config_path: str,
     found: list[str],
+    found_cnn: list[str],
     snapshot: dict,
 ) -> None:
     """Write experiment.json."""
@@ -199,13 +231,24 @@ def _write_experiment_json(
                 entry[key] = json.loads(fpath.read_text(encoding="utf-8"))
         results[cond] = entry
 
+    results_cnn: dict[str, dict] = {}
+    for cond in found_cnn:
+        entry = {}
+        for key in ("val_metrics", "test_metrics", "best_params"):
+            fpath = exp_dir / "cnn" / cond / f"{key}.json"
+            if fpath.exists():
+                entry[key] = json.loads(fpath.read_text(encoding="utf-8"))
+        results_cnn[cond] = entry
+
     payload = {
-        "name":             folder_name,
-        "timestamp":        timestamp,
-        "config_path":      config_path,
-        "conditions_found": found,
-        "config_snapshot":  snapshot,
-        "results":          results,
+        "name":                 folder_name,
+        "timestamp":            timestamp,
+        "config_path":          config_path,
+        "conditions_found":     found,
+        "cnn_conditions_found": found_cnn,
+        "config_snapshot":      snapshot,
+        "results":              results,
+        "results_cnn":          results_cnn,
     }
     (exp_dir / "experiment.json").write_text(
         json.dumps(payload, indent=2), encoding="utf-8"
@@ -218,6 +261,7 @@ def _write_report_md(
     timestamp: str,
     config_path: str,
     found: list[str],
+    found_cnn: list[str],
     snapshot: dict,
     has_shap_comparison: bool,
 ) -> None:
@@ -246,31 +290,52 @@ def _write_report_md(
         lines.append(f"| `{key}` | {val_str} |")
     lines.append("")
 
-    # Results summary table
+    def _read_metric(base: Path, cond: str, prefix: str, key: str) -> str:
+        fpath = base / cond / f"{prefix}_metrics.json"
+        if not fpath.exists():
+            return "—"
+        d = json.loads(fpath.read_text(encoding="utf-8"))
+        v = d.get(key)
+        return f"{v:.3f}" if isinstance(v, float) else str(v)
+
+    # XGBoost results summary table
     if found:
         lines += [
-            "## Results Summary",
+            "## XGBoost Results Summary",
             "",
             "| Condition | Val AUROC | Val F1 | Val Acc | Test AUROC | Test F1 | Test Acc |",
             "|---|---|---|---|---|---|---|",
         ]
         for cond in found:
-            def _m(prefix: str, key: str) -> str:
-                fpath = exp_dir / cond / f"{prefix}_metrics.json"
-                if not fpath.exists():
-                    return "—"
-                d = json.loads(fpath.read_text(encoding="utf-8"))
-                v = d.get(key)
-                return f"{v:.3f}" if isinstance(v, float) else str(v)
-
             lines.append(
                 f"| {cond} "
-                f"| {_m('val', 'auroc')} "
-                f"| {_m('val', 'f1')} "
-                f"| {_m('val', 'accuracy')} "
-                f"| {_m('test', 'auroc')} "
-                f"| {_m('test', 'f1')} "
-                f"| {_m('test', 'accuracy')} |"
+                f"| {_read_metric(exp_dir, cond, 'val', 'auroc')} "
+                f"| {_read_metric(exp_dir, cond, 'val', 'f1')} "
+                f"| {_read_metric(exp_dir, cond, 'val', 'accuracy')} "
+                f"| {_read_metric(exp_dir, cond, 'test', 'auroc')} "
+                f"| {_read_metric(exp_dir, cond, 'test', 'f1')} "
+                f"| {_read_metric(exp_dir, cond, 'test', 'accuracy')} |"
+            )
+        lines.append("")
+
+    # CNN results summary table
+    if found_cnn:
+        cnn_base = exp_dir / "cnn"
+        lines += [
+            "## CNN Results Summary",
+            "",
+            "| Condition | Val AUROC | Val F1 | Val Acc | Test AUROC | Test F1 | Test Acc |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for cond in found_cnn:
+            lines.append(
+                f"| {cond} "
+                f"| {_read_metric(cnn_base, cond, 'val', 'auroc')} "
+                f"| {_read_metric(cnn_base, cond, 'val', 'f1')} "
+                f"| {_read_metric(cnn_base, cond, 'val', 'accuracy')} "
+                f"| {_read_metric(cnn_base, cond, 'test', 'auroc')} "
+                f"| {_read_metric(cnn_base, cond, 'test', 'f1')} "
+                f"| {_read_metric(cnn_base, cond, 'test', 'accuracy')} |"
             )
         lines.append("")
 
@@ -360,15 +425,27 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     now          = datetime.now()
     ts_fs        = now.strftime("%Y-%m-%d_%H%M%S")      # filesystem-safe
     ts_iso       = now.strftime("%Y-%m-%dT%H:%M:%S")    # ISO 8601 for JSON
-    folder_name  = f"{ts_fs}_{name}" if name else ts_fs
+    config_stem  = Path(config_path).stem               # e.g. "default", "local"
+    folder_name  = f"{ts_fs}_{config_stem}_{name}" if name else f"{ts_fs}_{config_stem}"
     exp_dir      = exp_root / folder_name
     exp_dir.mkdir(parents=True, exist_ok=True)
     print(f"Creating experiment archive: {exp_dir}")
 
-    # ── Copy per-condition files ──────────────────────────────────────────────
+    # ── Copy XGBoost per-condition files ─────────────────────────────────────
     for cond in found:
         print(f"  Copying {cond}/...")
         _copy_condition_files(xgb_root, exp_dir, cond)
+
+    # ── Copy CNN per-condition files ──────────────────────────────────────────
+    cnn_root  = results_dir / "cnn"
+    found_cnn = _discover_cnn_conditions(cnn_root)
+    if found_cnn:
+        print(f"CNN conditions found: {', '.join(found_cnn)}")
+        for cond in found_cnn:
+            print(f"  Copying cnn/{cond}/...")
+            _copy_cnn_condition_files(cnn_root, exp_dir, cond)
+    else:
+        print("[INFO] No CNN results found — skipping CNN archiving.")
 
     # ── Re-derive cross-condition summary CSV ─────────────────────────────────
     print("Re-deriving comparison_summary.csv...")
@@ -388,13 +465,13 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     # ── Write experiment.json ─────────────────────────────────────────────────
     print("Writing experiment.json...")
     _write_experiment_json(
-        exp_dir, folder_name, ts_iso, config_path, found, snapshot,
+        exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot,
     )
 
     # ── Write report.md ───────────────────────────────────────────────────────
     print("Writing report.md...")
     _write_report_md(
-        exp_dir, folder_name, ts_iso, config_path, found, snapshot, has_shap,
+        exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot, has_shap,
     )
 
     # ── Copy config ───────────────────────────────────────────────────────────
