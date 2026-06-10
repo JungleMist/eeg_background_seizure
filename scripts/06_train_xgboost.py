@@ -94,6 +94,11 @@ def _load_or_extract_features(
         X    = data["X"].astype(np.float64)
         y    = data["y"].astype(np.int64)
         sids = list(data["subject_ids"])
+        if X.shape[1] != len(FEATURE_NAMES):
+            raise ValueError(
+                f"Feature cache has {X.shape[1]} dims but FEATURE_NAMES has "
+                f"{len(FEATURE_NAMES)}. Re-run script 06 with --force."
+            )
         return X, y, sids
 
     X, y, sids = build_dataset(
