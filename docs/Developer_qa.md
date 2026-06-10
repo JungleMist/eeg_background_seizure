@@ -222,25 +222,37 @@ split    = str(data["split"])       # 'train'
 
 ### Short answer
 
-Each epoch is converted to a **171-dimensional vector** by `extract_epoch_features()` in `eeg_bg/features/extraction.py`.  The vector is built as **19 channels × 9 features** in a fixed channel-major order; names are in the public constant `FEATURE_NAMES`.
+Each epoch is converted to a **2415-dimensional vector** by `extract_epoch_features()` in `eeg_bg/features/extraction.py`.  Names are in the public constant `FEATURE_NAMES` (2415 strings).  The first 211 positions are positionally stable; reordering them invalidates saved SHAP `.npy` arrays.
 
-### Feature types (9 per channel)
+### Feature vector layout
 
-#### 1–5: Relative band powers (`eeg_bg/features/band_power.py`)
+| Positions | Block | Dims | Module |
+|-----------|-------|------|--------|
+| 0 – 170   | Per-channel statistics (19 ch × 9 features) | 171 | `band_power`, `hjorth`, `spectral_entropy` |
+| 171 – 210 | Hemispheric asymmetry (8 pairs × 5 bands) | 40 | `asymmetry` |
+| 211 – 438 | Wavelet DWT energy + entropy (19 ch × 6 levels × 2 stats) | 228 | `wavelet` |
+| 439 – 2148 | Functional connectivity — coherence + PLV (171 pairs × 5 bands × 2 metrics) | 1710 | `connectivity` |
+| 2149 – 2186 | Nonlinear complexity — SampEn + LZC (19 ch × 2) | 38 | `complexity` |
+| 2187 – 2414 | Multi-scale temporal stats (19 ch × 3 scales × 4 stats) | 228 | `temporal_stats` |
+| **Total** | | **2415** | |
+
+### Block 1: Per-channel statistics (171 dims)
+
+19 channels × 9 features, in `_STANDARD_19` order (`FP1, FP2, …, Pz`).
+
+#### Features 1–5: Relative band powers (`eeg_bg/features/band_power.py`)
 
 Power is estimated with Welch's method (boxcar window, `nperseg=250` = 2 s at 125 Hz — same parameters used by the Wiener decomposition).  Each value is the fraction of total power within the analysis band (0.5–40 Hz) that falls inside the sub-band, computed with `np.trapezoid`:
 
-| Index | Name | Band (Hz) |
-|-------|------|-----------|
+| Index within channel | Name | Band (Hz) |
+|----------------------|------|-----------|
 | 0 | `delta_power` | 0.5 – 4.0 |
 | 1 | `theta_power` | 4.0 – 8.0 |
 | 2 | `alpha_power` | 8.0 – 13.0 |
 | 3 | `beta_power`  | 13.0 – 30.0 |
 | 4 | `gamma_power` | 30.0 – 40.0 |
 
-The five values sum to approximately 1 (small discrepancies at band boundaries from trapezoidal integration are possible).
-
-#### 6–8: Hjorth parameters (`eeg_bg/features/hjorth.py`)
+#### Features 6–8: Hjorth parameters (`eeg_bg/features/hjorth.py`)
 
 Time-domain complexity descriptors (Hjorth 1970).  Let `x` = signal, `x'` = first difference, `x''` = second difference:
 
@@ -250,9 +262,9 @@ Time-domain complexity descriptors (Hjorth 1970).  Let `x` = signal, `x'` = firs
 | 6 | `hjorth_mobility`   | `sqrt(var(x') / (var(x) + ε))` |
 | 7 | `hjorth_complexity` | `mobility(x') / (mobility(x) + ε)` |
 
-`ε = 1e-30` guards against division by zero for flat signals.  Activity is in µV²; mobility and complexity are dimensionless ratios.
+`ε = 1e-30` guards against division by zero for flat signals.
 
-#### 9: Spectral entropy (`eeg_bg/features/spectral_entropy.py`)
+#### Feature 9: Spectral entropy (`eeg_bg/features/spectral_entropy.py`)
 
 Shannon entropy of the normalised PSD within the analysis band:
 
@@ -261,17 +273,61 @@ p_i = PSD(f_i) / Σ PSD(f_j)   (for f_j in [0.5, 40] Hz)
 H   = -Σ p_i · log(p_i + ε)
 ```
 
-Same Welch parameters as band power (`nperseg=250`, boxcar).  A pure sinusoid → H ≈ 0; white noise → H is maximised.
+Same Welch parameters as band power.  A pure sinusoid → H ≈ 0; white noise → H is maximised.
 
-### Channel order and missing channels
+### Block 2: Hemispheric asymmetry (40 dims)
 
-Features iterate over the canonical 19-channel order from `configs/default.yaml`:
+8 symmetric pairs × 5 bands.  Formula: `(P_left − P_right) / (P_left + P_right + ε)`.  Pairs in `SYMMETRIC_PAIRS` order: `FP1/FP2, F3/F4, F7/F8, C3/C4, T3/T4, T5/T6, P3/P4, O1/O2`.  Names follow `asym_{left}_{right}_{band}`.
 
-```
-FP1, FP2, F3, F4, F7, F8, C3, C4, T3, T4, T5, T6, P3, P4, O1, O2, Fz, Cz, Pz
-```
+### Block 3: Wavelet DWT (228 dims, `eeg_bg/features/wavelet.py`)
 
-If a channel is absent from the epoch's `ch_names`, its 9-element slot is filled with zeros.  The vector length is always 171 regardless.
+Discrete Wavelet Transform using `pywt` with `db4` wavelet and 6 decomposition levels.  Per channel, per level (1 = highest frequency, 6 = lowest):
+
+| Stat | Description |
+|------|-------------|
+| `dwt_l{n}_energy` | Σ c² / len(c) — detail coefficient energy |
+| `dwt_l{n}_entropy` | −Σ p·log(p+ε) — Shannon entropy of the normalised energy distribution |
+
+19 channels × 6 levels × 2 stats = 228.  Names: `{ch}_dwt_l{level}_{energy|entropy}`.  Config keys: `ml.features.wavelet.wavelet` (default `db4`), `ml.features.wavelet.level` (default `6`).
+
+### Block 4: Functional connectivity (1710 dims, `eeg_bg/features/connectivity.py`)
+
+All 171 unique channel pairs (C(19,2)) × 5 frequency bands × 2 metrics:
+
+| Metric | Method | Name prefix |
+|--------|--------|-------------|
+| Magnitude-squared coherence | `scipy.signal.coherence`, band-averaged | `coh_{ch1}_{ch2}_{band}` |
+| Phase-Locking Value (PLV) | Hilbert phase difference, band-filtered | `plv_{ch1}_{ch2}_{band}` |
+
+Pairs iterate in upper-triangle order; bands are `delta, theta, alpha, beta, gamma`.  Config key: `ml.features.connectivity.nperseg` (default `250`).
+
+### Block 5: Nonlinear complexity (38 dims, `eeg_bg/features/complexity.py`)
+
+Per channel × 2 features:
+
+| Feature | Description |
+|---------|-------------|
+| `sample_entropy` | SampEn — negative log ratio of template matches at embedding dims m and m+1.  Uses `cKDTree` Chebyshev distance for O(n log n) matching.  Returns 0.0 for constant signals. |
+| `lempel_ziv` | LZ76 complexity of the median-binarised signal, normalised by n/log₂(n). |
+
+Config keys: `ml.features.complexity.m` (default `2`), `ml.features.complexity.r_factor` (default `0.2`).
+
+### Block 6: Multi-scale temporal statistics (228 dims, `eeg_bg/features/temporal_stats.py`)
+
+Per channel × 3 window scales × 4 statistics.  The signal is split into non-overlapping windows of `scale` samples; statistics are averaged across windows:
+
+| Stat | Formula |
+|------|---------|
+| `mean` | window mean |
+| `var` | window variance |
+| `skew` | `scipy.stats.skew` (excess=False) |
+| `kurtosis` | `scipy.stats.kurtosis` (excess=True, Fisher) |
+
+Default scales: `[125, 375, 750]` samples (1 s, 3 s, 6 s at 125 Hz).  Constant windows produce NaN → replaced with 0.0.  Names: `{ch}_scale{s}_{stat}`.  Config key: `ml.features.temporal.scales`.
+
+### Missing channels
+
+If a channel is absent from the epoch's `ch_names`, its entire slot across all blocks is zero-padded.  The vector length is always 2415.
 
 ### Which signal is used per condition
 
@@ -287,18 +343,15 @@ If a channel is absent from the epoch's `ch_names`, its 9-element slot is filled
 
 Before XGBoost training, a `StandardScaler` is fit on the training feature matrix and applied to val and test sets.  The scaler is saved to `results/xgboost/{condition}/scaler.joblib`.
 
-Extracted features are cached as `cache/features/{condition}_{split}.npz` (`X`, `y`, `subject_ids`) to avoid re-extraction on subsequent runs.  Pass `--force` to bypass this cache.
+Extracted features are cached as `cache/features/{condition}_{split}.npz` (`X`, `y`, `subject_ids`) to avoid re-extraction on subsequent runs.  Pass `--force` to bypass this cache.  If a cached file's feature dimension does not match `len(FEATURE_NAMES)` (2415), a `ValueError` is raised immediately with a `--force` hint.
+
+### SHAP pruning
+
+After SHAP values are computed, `_write_shap_pruning_report()` writes `results/xgboost/{condition}/pruning_report.json` listing features with mean |SHAP| below `ml.shap.pruning_threshold` (default `1e-4`).  Pass `--prune-shap` to also retrain on the surviving features; results land in `results/xgboost/{condition}/pruned/`.
 
 ### Feature name index
 
-`FEATURE_NAMES` (public list, `eeg_bg/features/extraction.py`) contains all 171 names in vector order, e.g.:
-
-```
-FP1_delta_power, FP1_theta_power, ..., FP1_spectral_entropy,
-FP2_delta_power, ..., Pz_spectral_entropy
-```
-
-SHAP value arrays (shape `(n_test_epochs, 171)`) are indexed positionally against this list, so `FEATURE_NAMES` must remain stable between runs.
+`FEATURE_NAMES` (public list, `eeg_bg/features/extraction.py`) contains all 2415 names in vector order.  SHAP value arrays (shape `(n_test_epochs, 2415)`) are indexed positionally against this list.  **Positions 0–210 must never be reordered** — doing so invalidates saved SHAP `.npy` arrays.
 
 ### Relevant source files
 
@@ -308,7 +361,12 @@ SHAP value arrays (shape `(n_test_epochs, 171)`) are indexed positionally agains
 | `eeg_bg/features/band_power.py` | `relative_band_power()`, `BANDS` dict |
 | `eeg_bg/features/hjorth.py` | `hjorth_parameters()` |
 | `eeg_bg/features/spectral_entropy.py` | `spectral_entropy()` |
-| `scripts/06_train_xgboost.py` | Orchestration: feature loading, scaling, training, SHAP |
+| `eeg_bg/features/asymmetry.py` | `hemispheric_asymmetry()`, `ASYMMETRY_NAMES` |
+| `eeg_bg/features/wavelet.py` | `wavelet_features()`, `WAVELET_NAMES` |
+| `eeg_bg/features/connectivity.py` | `connectivity_features()`, `CONNECTIVITY_NAMES`, `ALL_PAIRS` |
+| `eeg_bg/features/complexity.py` | `complexity_features()`, `COMPLEXITY_NAMES` |
+| `eeg_bg/features/temporal_stats.py` | `epoch_temporal_stats()`, `TEMPORAL_NAMES` |
+| `scripts/06_train_xgboost.py` | Orchestration: feature loading, scaling, training, SHAP, pruning report |
 
 ---
 
@@ -438,7 +496,7 @@ FastICA with 19 components is fit on each epoch.  Components whose absolute corr
 
 ### Stage 3: Feature scaling (per XGBoost condition, `scripts/06_train_xgboost.py`)
 
-After epoch-level features are extracted, a `StandardScaler` is fit on the **training set only** and applied to val and test sets (zero-mean, unit-variance per feature).  Scaling is applied to the 171-dimensional feature matrix, not to the raw signal.
+After epoch-level features are extracted, a `StandardScaler` is fit on the **training set only** and applied to val and test sets (zero-mean, unit-variance per feature).  Scaling is applied to the 2415-dimensional feature matrix, not to the raw signal.
 
 ---
 
@@ -475,7 +533,7 @@ cache/epochs/  ←─── raw condition reads here
               cache/ica/           ←─── ica condition reads here
   │
   ▼
-extract_epoch_features()  →  171-dim vector per epoch
+extract_epoch_features()  →  2415-dim vector per epoch
   │
   ▼
 StandardScaler (fit on train)  →  XGBoost input
