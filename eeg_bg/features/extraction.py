@@ -34,6 +34,10 @@ from eeg_bg.features.hjorth import hjorth_parameters
 from eeg_bg.features.spectral_entropy import spectral_entropy as _spectral_entropy
 from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES
 from eeg_bg.features._constants import _STANDARD_19
+from eeg_bg.features.wavelet import wavelet_features, WAVELET_NAMES
+from eeg_bg.features.connectivity import connectivity_features, CONNECTIVITY_NAMES
+from eeg_bg.features.complexity import complexity_features, COMPLEXITY_NAMES
+from eeg_bg.features.temporal_stats import epoch_temporal_stats, TEMPORAL_NAMES
 
 # Feature name suffixes in inner-loop order
 _FEAT_SUFFIXES: list[str] = (
@@ -51,7 +55,11 @@ FEATURE_NAMES: list[str] = (
         for suffix in _FEAT_SUFFIXES
     ]
     + ASYMMETRY_NAMES
-)  # length == 211
+    + WAVELET_NAMES
+    + CONNECTIVITY_NAMES
+    + COMPLEXITY_NAMES
+    + TEMPORAL_NAMES
+)  # 211 + 228 + 1710 + 38 + 228 = 2415
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -138,9 +146,31 @@ def extract_epoch_features(
     asym = hemispheric_asymmetry(epoch, ch_names, sfreq=sfreq,
                                   nperseg=nperseg, freq_band=freq_band,
                                   psd_cache=psd_cache)
-    return np.concatenate(
-        [np.asarray(features, dtype=np.float64), asym]
-    ).astype(np.float64)
+    # ── New feature blocks ────────────────────────────────────────────────────
+    # Wavelet: DWT energy + entropy per channel (228 dims)
+    wavelet_vec = np.concatenate([
+        wavelet_features(epoch[ch_map[ch]] if ch_map.get(ch) is not None
+                         else np.zeros(epoch.shape[1]))
+        for ch in _STANDARD_19
+    ])
+
+    # Connectivity: coherence + PLV all 171 pairs × 5 bands (1710 dims)
+    conn_vec = connectivity_features(epoch, ch_names, sfreq=sfreq, nperseg=nperseg)
+
+    # Complexity: SampEn + LZC per channel (38 dims)
+    compl_vec = complexity_features(epoch, ch_names)
+
+    # Temporal: multi-scale stats per channel (228 dims)
+    temp_vec = epoch_temporal_stats(epoch, ch_names)
+
+    return np.concatenate([
+        np.asarray(features, dtype=np.float64),
+        asym,
+        wavelet_vec,
+        conn_vec,
+        compl_vec,
+        temp_vec,
+    ]).astype(np.float64)
 
 
 def _extract_one_file(args: tuple) -> tuple[list, list, list]:
@@ -245,7 +275,7 @@ def build_dataset(
             sid_list.extend(sids)
 
     if not X_list:
-        return (np.empty((0, 211), dtype=np.float64),
+        return (np.empty((0, len(FEATURE_NAMES)), dtype=np.float64),
                 np.empty((0,), dtype=np.int64),
                 [])
 

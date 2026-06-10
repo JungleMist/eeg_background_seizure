@@ -64,7 +64,11 @@ def wavelet_features(
     for l in range(1, level + 1):
         c = coeffs[level + 1 - l].astype(np.float64)
         sq = c * c
-        tot = float(sq.sum()) + 1e-30
+        raw_energy = float(sq.sum())
+        if raw_energy == 0.0:
+            feats.extend([0.0, 0.0])
+            continue
+        tot = raw_energy + 1e-30
         energy = float(tot / (len(c) + 1e-30))
         p = sq / tot
         entropy = float(-np.sum(p * np.log(p + 1e-30)))
