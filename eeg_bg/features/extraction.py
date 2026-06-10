@@ -33,13 +33,7 @@ from eeg_bg.features.band_power import relative_band_power, BANDS
 from eeg_bg.features.hjorth import hjorth_parameters
 from eeg_bg.features.spectral_entropy import spectral_entropy as _spectral_entropy
 from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES
-
-# Standard 19 channels in canonical order (matches configs/default.yaml)
-_STANDARD_19 = [
-    "FP1", "FP2", "F3", "F4", "F7", "F8", "C3", "C4",
-    "T3", "T4", "T5", "T6", "P3", "P4", "O1", "O2",
-    "Fz", "Cz", "Pz",
-]
+from eeg_bg.features._constants import _STANDARD_19
 
 # Feature name suffixes in inner-loop order
 _FEAT_SUFFIXES: list[str] = (
