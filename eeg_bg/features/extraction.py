@@ -1,24 +1,25 @@
 """Epoch-level feature extraction and dataset builder.
 
 ``extract_epoch_features`` converts a single ``(n_ch, n_times)`` epoch into a
-fixed-length 211-dimensional feature vector.
+fixed-length 2415-dimensional feature vector.
 
 ``build_dataset`` iterates over an NPZ cache directory, applies the extractor
 to every epoch that belongs to the requested split, and returns a feature
 matrix together with labels and subject IDs.
 
-Feature vector layout (211 = 171 per-channel + 40 hemispheric asymmetry)
--------------------------------------------------------------------------
-First 171 features — 19 channels × 9 features each (in ``_STANDARD_19`` order):
+Feature vector layout (2415 dims)
+----------------------------------
+- [0:171]    Per-channel statistics — 19 channels × 9 features each
+             (delta/theta/alpha/beta/gamma power, Hjorth activity/mobility/complexity,
+             spectral entropy) in ``_STANDARD_19`` order.
+- [171:211]  Hemispheric asymmetry — 8 pairs × 5 bands (see ``ASYMMETRY_NAMES``).
+- [211:439]  Wavelet DWT — 19 channels × 6 levels × 2 stats (energy, entropy).
+- [439:2149] Connectivity — 171 pairs × 5 bands × 2 metrics (coherence, PLV).
+- [2149:2187] Complexity — 19 channels × 2 features (SampEn, LZC).
+- [2187:2415] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
 
-    FP1_delta_power, FP1_theta_power, FP1_alpha_power, FP1_beta_power,
-    FP1_gamma_power, FP1_hjorth_activity, FP1_hjorth_mobility,
-    FP1_hjorth_complexity, FP1_spectral_entropy,
-    FP2_delta_power, ...  (continues for all 19 channels)
-
-Last 40 features — 8 symmetric pairs × 5 bands hemispheric asymmetry:
-
-    asym_FP1_FP2_delta, asym_FP1_FP2_theta, ..., asym_O1_O2_gamma
+Positions 0–210 are positionally stable; reordering them invalidates saved
+SHAP ``.npy`` arrays.
 """
 from __future__ import annotations
 
@@ -83,7 +84,7 @@ def extract_epoch_features(
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
 ) -> np.ndarray:
-    """Extract a 211-dimensional feature vector from one epoch.
+    """Extract a 2415-dimensional feature vector from one epoch.
 
     Parameters
     ----------
@@ -101,9 +102,8 @@ def extract_epoch_features(
     Returns
     -------
     np.ndarray
-        Shape ``(211,)``, ordered according to :data:`FEATURE_NAMES`.
-        First 171 entries are per-channel statistics; last 40 are hemispheric
-        asymmetry features.
+        Shape ``(len(FEATURE_NAMES),)`` = ``(2415,)``, ordered according to
+        :data:`FEATURE_NAMES`.  Missing channels are zero-padded.
     """
     # O(1) channel lookup — avoids O(n) list.index() inside the loop.
     ch_map = {name: i for i, name in enumerate(ch_names)}
@@ -117,8 +117,7 @@ def extract_epoch_features(
     for ch in _STANDARD_19:
         idx = ch_map.get(ch)
         if idx is None:
-            # Channel absent — fill with zeros so vector length is always 211
-            features.extend([0.0] * 9)
+            features.extend([0.0] * len(_FEAT_SUFFIXES))
             continue
 
         sig = epoch[idx].astype(np.float64)
@@ -154,7 +153,7 @@ def extract_epoch_features(
         for ch in _STANDARD_19
     ])
 
-    # Connectivity: coherence + PLV all 171 pairs × 5 bands (1710 dims)
+    # Connectivity: coherence + PLV — 171 pairs × 5 bands × 2 metrics = 1710 dims
     conn_vec = connectivity_features(epoch, ch_names, sfreq=sfreq, nperseg=nperseg)
 
     # Complexity: SampEn + LZC per channel (38 dims)
@@ -227,7 +226,7 @@ def build_dataset(
 
     Returns
     -------
-    X : np.ndarray, shape ``(n_epochs, 211)``
+    X : np.ndarray, shape ``(n_epochs, len(FEATURE_NAMES))``
     y : np.ndarray, shape ``(n_epochs,)``, dtype int  (0=epilepsy, 1=control)
     subject_ids : list[str], length ``n_epochs``
         One entry per epoch; used for subject-level aggregation downstream.
