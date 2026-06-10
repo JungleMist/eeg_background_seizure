@@ -52,7 +52,6 @@ def sample_entropy(
         return 0.0
     r = r_factor * std
 
-    n = len(x)
     T_m  = np.lib.stride_tricks.sliding_window_view(x, m)[:-1]
     T_m1 = np.lib.stride_tricks.sliding_window_view(x, m + 1)
 
