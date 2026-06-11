@@ -14,7 +14,7 @@ from eeg_bg.features.band_power import BANDS
 # ── FEATURE_NAMES sanity checks ───────────────────────────────────────────────
 
 def test_feature_names_length():
-    assert len(FEATURE_NAMES) == 2415
+    assert len(FEATURE_NAMES) == 3441
 
 
 def test_feature_names_unique():
@@ -22,23 +22,23 @@ def test_feature_names_unique():
 
 
 def test_feature_names_band_power_count():
-    """Exactly 19 × 5 = 95 names should contain '_power'."""
+    """19 × 5 = 95 band_power names + 19 × 5 = 95 dwt_band_*_power names = 190 total."""
     power_names = [n for n in FEATURE_NAMES if "_power" in n]
-    assert len(power_names) == 95
+    assert len(power_names) == 190
 
 
 def test_feature_names_per_channel():
-    """Each channel should have exactly 9 + 12 + 2 + 12 = 35 feature names."""
+    """Each channel should have exactly 9 + 66 + 2 + 12 = 89 feature names."""
     for ch in _STANDARD_19:
         ch_feats = [n for n in FEATURE_NAMES if n.startswith(f"{ch}_")]
-        assert len(ch_feats) == 35, f"Expected 35 features for {ch}, got {len(ch_feats)}"
+        assert len(ch_feats) == 89, f"Expected 89 features for {ch}, got {len(ch_feats)}"
 
 
 # ── extract_epoch_features ────────────────────────────────────────────────────
 
 def test_extract_epoch_features_shape(synthetic_epoch, ch_names_19, sfreq):
     feat = extract_epoch_features(synthetic_epoch, ch_names_19, sfreq=sfreq)
-    assert feat.shape == (2415,)
+    assert feat.shape == (3441,)
 
 
 def test_extract_epoch_features_dtype(synthetic_epoch, ch_names_19, sfreq):
@@ -56,12 +56,12 @@ def test_extract_epoch_features_missing_channel(sfreq):
     rng    = np.random.default_rng(7)
     epoch  = rng.standard_normal((1, 1000)).astype(np.float64) * 10.0
     feat   = extract_epoch_features(epoch, ch_names=["FP1"], sfreq=sfreq)
-    assert feat.shape == (2415,)
+    assert feat.shape == (3441,)
     # Per-channel features for channels other than FP1, and all asymmetry
     # features (asym_* prefix), should be zero-padded because FP2 and all
     # other symmetric-pair partners are absent.
     fp1_indices = [i for i, n in enumerate(FEATURE_NAMES) if n.startswith("FP1_")]
-    other_indices = [i for i in range(2415) if i not in fp1_indices]
+    other_indices = [i for i in range(3441) if i not in fp1_indices]
     assert np.all(feat[other_indices] == 0.0)
 
 
@@ -92,7 +92,7 @@ def test_build_dataset_shapes(tmp_path):
     X, y, sids = build_dataset(tmp_path, "raw", "train",
                                 sfreq=125.0, nperseg=250,
                                 freq_band=(0.5, 40.0))
-    assert X.shape == (3, 2415)
+    assert X.shape == (3, 3441)
     assert y.shape == (3,)
     assert len(sids) == 3
 
@@ -136,7 +136,7 @@ def test_build_dataset_empty_split(tmp_path):
     X, y, sids = build_dataset(tmp_path, "raw", "train",
                                 sfreq=125.0, nperseg=250,
                                 freq_band=(0.5, 40.0))
-    assert X.shape == (0, 2415)
+    assert X.shape == (0, 3441)
     assert y.shape == (0,)
     assert sids == []
 

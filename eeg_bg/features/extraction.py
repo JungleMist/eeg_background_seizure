@@ -1,22 +1,22 @@
 """Epoch-level feature extraction and dataset builder.
 
 ``extract_epoch_features`` converts a single ``(n_ch, n_times)`` epoch into a
-fixed-length 2415-dimensional feature vector.
+fixed-length 3441-dimensional feature vector.
 
 ``build_dataset`` iterates over an NPZ cache directory, applies the extractor
 to every epoch that belongs to the requested split, and returns a feature
 matrix together with labels and subject IDs.
 
-Feature vector layout (2415 dims)
+Feature vector layout (3441 dims)
 ----------------------------------
 - [0:171]    Per-channel statistics — 19 channels × 9 features each
              (delta/theta/alpha/beta/gamma power, Hjorth activity/mobility/complexity,
              spectral entropy) in ``_STANDARD_19`` order.
 - [171:211]  Hemispheric asymmetry — 8 pairs × 5 bands (see ``ASYMMETRY_NAMES``).
-- [211:439]  Wavelet DWT — 19 channels × 6 levels × 2 stats (energy, entropy).
-- [439:2149] Connectivity — 171 pairs × 5 bands × 2 metrics (coherence, PLV).
-- [2149:2187] Complexity — 19 channels × 2 features (SampEn, LZC).
-- [2187:2415] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
+- [211:1465] Wavelet DWT — 19 channels × 66 features (energy, entropy, coef stats, approx stats, modulus maxima, scale energy ratio, reconstructed signal stats).
+- [1465:3175] Connectivity — 171 pairs × 5 bands × 2 metrics (coherence, PLV).
+- [3175:3213] Complexity — 19 channels × 2 features (SampEn, LZC).
+- [3213:3441] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
 
 Positions 0–210 are positionally stable; reordering them invalidates saved
 SHAP ``.npy`` arrays.
@@ -60,7 +60,7 @@ FEATURE_NAMES: list[str] = (
     + CONNECTIVITY_NAMES
     + COMPLEXITY_NAMES
     + TEMPORAL_NAMES
-)  # 211 + 228 + 1710 + 38 + 228 = 2415
+)  # 211 + 1254 + 1710 + 38 + 228 = 3441
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -102,7 +102,7 @@ def extract_epoch_features(
     Returns
     -------
     np.ndarray
-        Shape ``(len(FEATURE_NAMES),)`` = ``(2415,)``, ordered according to
+        Shape ``(len(FEATURE_NAMES),)`` = ``(3441,)``, ordered according to
         :data:`FEATURE_NAMES`.  Missing channels are zero-padded.
     """
     # O(1) channel lookup — avoids O(n) list.index() inside the loop.
@@ -146,7 +146,7 @@ def extract_epoch_features(
                                   nperseg=nperseg, freq_band=freq_band,
                                   psd_cache=psd_cache)
     # ── New feature blocks ────────────────────────────────────────────────────
-    # Wavelet: DWT energy + entropy per channel (228 dims)
+    # Wavelet: 7 feature groups per channel (66 dims per channel, 1254 total)
     wavelet_vec = np.concatenate([
         wavelet_features(epoch[ch_map[ch]] if ch_map.get(ch) is not None
                          else np.zeros(epoch.shape[1]))

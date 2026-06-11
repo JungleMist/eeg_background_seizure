@@ -222,19 +222,19 @@ split    = str(data["split"])       # 'train'
 
 ### Short answer
 
-Each epoch is converted to a **2415-dimensional vector** by `extract_epoch_features()` in `eeg_bg/features/extraction.py`.  Names are in the public constant `FEATURE_NAMES` (2415 strings).  The first 211 positions are positionally stable; reordering them invalidates saved SHAP `.npy` arrays.
+Each epoch is converted to a **3441-dimensional vector** by `extract_epoch_features()` in `eeg_bg/features/extraction.py`.  Names are in the public constant `FEATURE_NAMES` (3441 strings).  The first 211 positions are positionally stable; reordering them invalidates saved SHAP `.npy` arrays.
 
 ### Feature vector layout
 
-| Positions | Block | Dims | Module |
-|-----------|-------|------|--------|
-| 0 – 170   | Per-channel statistics (19 ch × 9 features) | 171 | `band_power`, `hjorth`, `spectral_entropy` |
-| 171 – 210 | Hemispheric asymmetry (8 pairs × 5 bands) | 40 | `asymmetry` |
-| 211 – 438 | Wavelet DWT energy + entropy (19 ch × 6 levels × 2 stats) | 228 | `wavelet` |
-| 439 – 2148 | Functional connectivity — coherence + PLV (171 pairs × 5 bands × 2 metrics) | 1710 | `connectivity` |
-| 2149 – 2186 | Nonlinear complexity — SampEn + LZC (19 ch × 2) | 38 | `complexity` |
-| 2187 – 2414 | Multi-scale temporal stats (19 ch × 3 scales × 4 stats) | 228 | `temporal_stats` |
-| **Total** | | **2415** | |
+| Positions   | Block | Dims | Module |
+|-------------|-------|------|--------|
+| [0:171]     | Per-channel statistics (19 ch × 9 features) | 171 | `band_power`, `hjorth`, `spectral_entropy` |
+| [171:211]   | Hemispheric asymmetry (8 pairs × 5 bands) | 40 | `asymmetry` |
+| [211:1465]  | Wavelet DWT (19 channels × 66 features, 7 groups) | 1254 | `wavelet` |
+| [1465:3175] | Functional connectivity — coherence + PLV (171 pairs × 5 bands × 2 metrics) | 1710 | `connectivity` |
+| [3175:3213] | Nonlinear complexity — SampEn + LZC (19 ch × 2) | 38 | `complexity` |
+| [3213:3441] | Multi-scale temporal stats (19 ch × 3 scales × 4 stats) | 228 | `temporal_stats` |
+| **Total**   | | **3441** | |
 
 ### Block 1: Per-channel statistics (171 dims)
 
@@ -279,16 +279,25 @@ Same Welch parameters as band power.  A pure sinusoid → H ≈ 0; white noise �
 
 8 symmetric pairs × 5 bands.  Formula: `(P_left − P_right) / (P_left + P_right + ε)`.  Pairs in `SYMMETRIC_PAIRS` order: `FP1/FP2, F3/F4, F7/F8, C3/C4, T3/T4, T5/T6, P3/P4, O1/O2`.  Names follow `asym_{left}_{right}_{band}`.
 
-### Block 3: Wavelet DWT (228 dims, `eeg_bg/features/wavelet.py`)
+### Block 3: Wavelet DWT (1254 dims, `eeg_bg/features/wavelet.py`)
 
-Discrete Wavelet Transform using `pywt` with `db4` wavelet and 6 decomposition levels.  Per channel, per level (1 = highest frequency, 6 = lowest):
+**Wavelet DWT block [211:1465] — 1254 dims (19 channels × 66 features each)**
 
-| Stat | Description |
-|------|-------------|
-| `dwt_l{n}_energy` | Σ c² / len(c) — detail coefficient energy |
-| `dwt_l{n}_entropy` | −Σ p·log(p+ε) — Shannon entropy of the normalised energy distribution |
+`wavelet_features(signal)` runs a single `pywt.wavedec(signal, "db4", level=6)` and returns 66 features per channel in 7 groups:
 
-19 channels × 6 levels × 2 stats = 228.  Names: `{ch}_dwt_l{level}_{energy|entropy}`.  Config keys: `ml.features.wavelet.wavelet` (default `db4`), `ml.features.wavelet.level` (default `6`).
+| # | Group | Suffix | Dims/ch | Description |
+|---|---|---|---|---|
+| 1 | Detail energy | `dwt_l{1..6}_energy` | 6 | `sum(cD_l²) / n` — normalised by signal length |
+| 2 | Detail entropy | `dwt_l{1..6}_entropy` | 6 | Shannon entropy of `cD_l²` distribution |
+| 3 | Detail coeff stats | `dwt_l{1..6}_coef_{mean,std,maxabs}` | 18 | mean, std, max|cD_l| per level |
+| 4 | Approx coeff stats | `dwt_approx_{mean,std,maxabs}` | 3 | mean, std, max|cA_6| |
+| 5 | Modulus maxima | `dwt_l{1..6}_mmx_{count,mean}` | 12 | count and mean amplitude of local maxima in |cD_l| |
+| 6 | Scale energy ratio | `dwt_l{1..6}_engratio` | 6 | `energy_l / Σ(energy_all_levels)` |
+| 7 | Reconstructed stats | `dwt_band_{delta,theta,alpha,beta,gamma}_{mean,std,power}` | 15 | per-band signal reconstructed via `pywt.waverec` with masked levels |
+
+Band-to-level mapping (125 Hz, db4, level=6): delta→[5,6], theta→[4], alpha→[3], beta→[2], gamma→[1].
+
+Config keys: `ml.features.wavelet.wavelet` (default `db4`), `ml.features.wavelet.level` (default `6`).
 
 ### Block 4: Functional connectivity (1710 dims, `eeg_bg/features/connectivity.py`)
 
@@ -327,7 +336,7 @@ Default scales: `[125, 375, 750]` samples (1 s, 3 s, 6 s at 125 Hz).  Constant w
 
 ### Missing channels
 
-If a channel is absent from the epoch's `ch_names`, its entire slot across all blocks is zero-padded.  The vector length is always 2415.
+If a channel is absent from the epoch's `ch_names`, its entire slot across all blocks is zero-padded.  The vector length is always 3441.
 
 ### Which signal is used per condition
 
@@ -343,7 +352,7 @@ If a channel is absent from the epoch's `ch_names`, its entire slot across all b
 
 Before XGBoost training, a `StandardScaler` is fit on the training feature matrix and applied to val and test sets.  The scaler is saved to `results/xgboost/{condition}/scaler.joblib`.
 
-Extracted features are cached as `cache/features/{condition}_{split}.npz` (`X`, `y`, `subject_ids`) to avoid re-extraction on subsequent runs.  Pass `--force` to bypass this cache.  If a cached file's feature dimension does not match `len(FEATURE_NAMES)` (2415), a `ValueError` is raised immediately with a `--force` hint.
+Extracted features are cached as `cache/features/{condition}_{split}.npz` (`X`, `y`, `subject_ids`) to avoid re-extraction on subsequent runs.  Pass `--force` to bypass this cache.  If a cached file's feature dimension does not match `len(FEATURE_NAMES)` (3441), a `ValueError` is raised immediately with a `--force` hint.
 
 ### SHAP pruning
 
@@ -351,7 +360,7 @@ After SHAP values are computed, `_write_shap_pruning_report()` writes `results/x
 
 ### Feature name index
 
-`FEATURE_NAMES` (public list, `eeg_bg/features/extraction.py`) contains all 2415 names in vector order.  SHAP value arrays (shape `(n_test_epochs, 2415)`) are indexed positionally against this list.  **Positions 0–210 must never be reordered** — doing so invalidates saved SHAP `.npy` arrays.
+`FEATURE_NAMES` (public list, `eeg_bg/features/extraction.py`) contains all 3441 names in vector order.  SHAP value arrays (shape `(n_test_epochs, 3441)`) are indexed positionally against this list.  **Positions 0–210 must never be reordered** — doing so invalidates saved SHAP `.npy` arrays.
 
 ### Relevant source files
 
@@ -496,7 +505,7 @@ FastICA with 19 components is fit on each epoch.  Components whose absolute corr
 
 ### Stage 3: Feature scaling (per XGBoost condition, `scripts/06_train_xgboost.py`)
 
-After epoch-level features are extracted, a `StandardScaler` is fit on the **training set only** and applied to val and test sets (zero-mean, unit-variance per feature).  Scaling is applied to the 2415-dimensional feature matrix, not to the raw signal.
+After epoch-level features are extracted, a `StandardScaler` is fit on the **training set only** and applied to val and test sets (zero-mean, unit-variance per feature).  Scaling is applied to the 3441-dimensional feature matrix, not to the raw signal.
 
 ---
 
@@ -533,7 +542,7 @@ cache/epochs/  ←─── raw condition reads here
               cache/ica/           ←─── ica condition reads here
   │
   ▼
-extract_epoch_features()  →  2415-dim vector per epoch
+extract_epoch_features()  →  3441-dim vector per epoch
   │
   ▼
 StandardScaler (fit on train)  →  XGBoost input
