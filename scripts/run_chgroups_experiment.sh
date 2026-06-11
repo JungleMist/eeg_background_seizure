@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 # run_chgroups_experiment.sh — Channel-group ablation experiment
 #
-# Runs scripts 01→02→03→06 for each of the 5 channel-group configurations.
-# After each experiment the variable caches (wiener_frequency, ica, features)
-# are removed to keep disk usage low.  The epoch cache (cache/epochs/) is
-# preserved throughout — it is identical across all experiments and expensive
-# to regenerate.
+# ICA and raw are INDEPENDENT of channel_groups, so they are computed once
+# as pre-steps.  Only the Wiener decomposition varies across experiments.
+#
+# Pre-steps (run once):
+#   01 — Extract epochs       (key-based cache; identical across all configs)
+#   03 — ICA decomposition    (does not use channel_groups)
+#
+# Per experiment (×5):
+#   Clear cache/wiener_frequency/ and cache/features/wiener_*.npz only.
+#   Keep cache/ica/ and cache/features/{raw,ica}_*.npz across experiments so
+#   that 06 --condition raw/ica are feature-cache hits from experiment 2 onward.
+#   02 — Wiener decomposition  (varies by channel_groups)
+#   06 — XGBoost + SHAP        (all conditions; raw/ica reuse cached features)
+#   07 — Archive experiment
 #
 # Usage
 # -----
@@ -13,14 +22,8 @@
 #
 # Options
 #   --workers N   Worker processes for scripts 01/02/03/06 (default: 1)
-#   --from N      Resume from config N (1–5); skips earlier configs
-#
-# Cache layout after completion:
-#   cache/epochs/          — kept (shared across all experiments)
-#   cache/wiener_frequency — removed after each experiment
-#   cache/ica/             — removed after each experiment
-#   cache/features/        — removed after each experiment
-#   results/exp_chgroups/{1..5}/  — permanent, one per config
+#   --from N      Resume from config N (1–5); skips pre-steps and earlier configs.
+#                 Assumes 01 and 03 have already completed successfully.
 #
 # Requirements: conda env eeg_pipeline must exist.
 
@@ -30,7 +33,6 @@ CONDA_RUN="conda run -n eeg_pipeline"
 WORKERS=1
 FROM=1
 
-# Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --workers) WORKERS="$2"; shift 2 ;;
@@ -39,13 +41,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Project root = directory containing this script's parent
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 CONFIGS=(
-    ""                                                          # placeholder so index starts at 1
+    ""
     "configs/exp_chgroups_1.yaml|Frontal Only"
     "configs/exp_chgroups_2.yaml|Frontal + Temporal"
     "configs/exp_chgroups_3.yaml|Frontal + Temporal + Occipital"
@@ -53,9 +54,6 @@ CONFIGS=(
     "configs/exp_chgroups_5.yaml|All Bilateral Pairs"
 )
 
-# ---------------------------------------------------------------------------
-# Helper: run one command, print label and timing, abort on failure
-# ---------------------------------------------------------------------------
 run_step() {
     local label="$1"; shift
     echo ""
@@ -63,40 +61,37 @@ run_step() {
     echo "  cmd: $*"
     local t0=$SECONDS
     "$@"
-    local elapsed=$(( SECONDS - t0 ))
-    echo "  [OK] ${elapsed}s"
+    echo "  [OK] $(( SECONDS - t0 ))s"
 }
 
 # ---------------------------------------------------------------------------
-# Helper: remove a cache subdirectory if it exists
+# PRE-STEPS: epochs and ICA — run once, shared across all experiments
 # ---------------------------------------------------------------------------
-clear_cache() {
-    local dir="cache/$1"
-    if [[ -d "$dir" ]]; then
-        echo "  Removing $dir ..."
-        rm -rf "$dir"
-    fi
-}
+if (( FROM == 1 )); then
+    echo "============================================================"
+    echo "  PRE-STEPS: epochs + ICA (independent of channel groups)"
+    echo "============================================================"
+
+    run_step "01 — Extract epochs" \
+        $CONDA_RUN python scripts/01_extract_epochs.py \
+            --config configs/exp_chgroups_1.yaml \
+            --workers "$WORKERS"
+
+    run_step "03 — ICA decomposition" \
+        $CONDA_RUN python scripts/03_run_ica.py \
+            --config configs/exp_chgroups_1.yaml \
+            --force --workers "$WORKERS"
+else
+    echo "  --from $FROM: skipping pre-steps (01 + 03 assumed done)"
+fi
 
 # ---------------------------------------------------------------------------
-# Script 01: run once up front (epochs are shared across all experiments).
-# Uses the first config; preprocessing params are identical across all configs.
-# ---------------------------------------------------------------------------
-echo "============================================================"
-echo "  PRE-STEP: Extract epochs (shared across all experiments)"
-echo "============================================================"
-run_step "01 — Extract epochs" \
-    $CONDA_RUN python scripts/01_extract_epochs.py \
-        --config configs/exp_chgroups_1.yaml \
-        --workers "$WORKERS"
-
-# ---------------------------------------------------------------------------
-# Per-experiment loop
+# Per-experiment loop: Wiener → XGBoost (all conditions) → Archive
 # ---------------------------------------------------------------------------
 for IDX in 1 2 3 4 5; do
     if (( IDX < FROM )); then
         echo ""
-        echo "Skipping config $IDX (--from $FROM)"
+        echo "  Skipping config $IDX (--from $FROM)"
         continue
     fi
 
@@ -110,22 +105,20 @@ for IDX in 1 2 3 4 5; do
     echo "  Config file     : $CFG"
     echo "============================================================"
 
-    # Clear variable caches before this experiment
-    clear_cache "wiener_frequency"
-    clear_cache "ica"
-    clear_cache "features"
+    # Clear only Wiener cache and Wiener feature cache.
+    # Raw and ICA feature caches (cache/features/{raw,ica}_*.npz) are kept so
+    # that 06 --condition raw/ica are cache hits from experiment 2 onward.
+    echo "  Clearing wiener caches..."
+    rm -rf cache/wiener_frequency/
+    rm -f  cache/features/wiener_*.npz
 
     run_step "02 — Wiener decomposition" \
         $CONDA_RUN python scripts/02_run_wiener.py \
             --config "$CFG" --force --workers "$WORKERS"
 
-    run_step "03 — ICA" \
-        $CONDA_RUN python scripts/03_run_ica.py \
-            --config "$CFG" --force --workers "$WORKERS"
-
-    run_step "06 — XGBoost + SHAP" \
+    run_step "06 — XGBoost + SHAP (all conditions)" \
         $CONDA_RUN python scripts/06_train_xgboost.py \
-            --config "$CFG" --force --workers "$WORKERS"
+            --config "$CFG" --condition all --force --workers "$WORKERS"
 
     run_step "07 — Archive experiment" \
         $CONDA_RUN python scripts/07_organize_experiment.py \
@@ -136,38 +129,37 @@ for IDX in 1 2 3 4 5; do
 done
 
 # ---------------------------------------------------------------------------
-# Final cleanup: remove remaining variable caches
+# Final cleanup
 # ---------------------------------------------------------------------------
 echo ""
 echo "============================================================"
 echo "  Final cache cleanup"
 echo "============================================================"
-clear_cache "wiener_frequency"
-clear_cache "ica"
-clear_cache "features"
+rm -rf cache/wiener_frequency/
+rm -rf cache/ica/
+rm -rf cache/features/
 
 # ---------------------------------------------------------------------------
-# Summary: collect test_metrics.json for the wiener condition from each run
+# Summary table (wiener condition test metrics)
 # ---------------------------------------------------------------------------
 echo ""
 echo "============================================================"
-echo "  CHANNEL-GROUP ABLATION — RESULTS SUMMARY (wiener condition)"
+echo "  CHANNEL-GROUP ABLATION — RESULTS SUMMARY"
 echo "============================================================"
-printf "  %-2s  %-40s  %-8s  %-8s  %-8s\n" "#" "Config" "AUROC" "F1" "Acc"
-echo "  ----------------------------------------------------------------------------"
+printf "  %-2s  %-40s  %s\n" "#" "Config" "AUROC(raw / ica / wiener)"
+echo "  ------------------------------------------------------------------------"
 
 for IDX in 1 2 3 4 5; do
     ENTRY="${CONFIGS[$IDX]}"
     LABEL="${ENTRY##*|}"
-    METRICS="results/exp_chgroups/$IDX/xgboost/wiener/test_metrics.json"
-    if [[ -f "$METRICS" ]]; then
-        AUROC=$(python -c "import json; d=json.load(open('$METRICS')); print(f\"{d['auroc']:.4f}\")")
-        F1=$(python    -c "import json; d=json.load(open('$METRICS')); print(f\"{d['f1']:.4f}\")")
-        ACC=$(python   -c "import json; d=json.load(open('$METRICS')); print(f\"{d['accuracy']:.4f}\")")
-        printf "  %-2s  %-40s  %-8s  %-8s  %-8s\n" "$IDX" "$LABEL" "$AUROC" "$F1" "$ACC"
-    else
-        printf "  %-2s  %-40s  %-8s\n" "$IDX" "$LABEL" "no results"
-    fi
+    get_auroc() {
+        local f="results/exp_chgroups/$IDX/xgboost/$1/test_metrics.json"
+        [[ -f "$f" ]] && python -c "import json; print(f\"{json.load(open('$f'))['auroc']:.4f}\")" || echo "n/a"
+    }
+    RAW=$(get_auroc raw)
+    ICA=$(get_auroc ica)
+    WIE=$(get_auroc wiener)
+    printf "  %-2s  %-40s  %s / %s / %s\n" "$IDX" "$LABEL" "$RAW" "$ICA" "$WIE"
 done
 
 echo ""
