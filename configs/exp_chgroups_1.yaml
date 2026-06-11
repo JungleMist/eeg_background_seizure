@@ -10,8 +10,8 @@
 #   conda run -n eeg_pipeline python scripts/07_organize_experiment.py --config configs/exp_chgroups_1.yaml --name chgroups-1-frontal-only
 
 paths:
-  data_root: "D:/EEGdata/TUEP/v3.1.0"
-  cache_dir: "cache"
+  data_root: "/root/autodl-tmp/EEGdata/TUEP/v3.1.0"
+  cache_dir: "/root/autodl-tmp/cache"
   results_dir: "results/exp_chgroups/1"
 
 dataset:
