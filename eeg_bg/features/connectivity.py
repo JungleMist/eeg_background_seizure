@@ -88,8 +88,10 @@ def connectivity_features(
     step = nperseg // 2
     win = hann(nperseg, sym=False)
     starts = np.arange(0, n_times - nperseg + 1, step)
-    seg_idx = starts[:, None] + np.arange(nperseg)[None, :]  # (n_seg, nperseg)
-    segs = epoch_std[:, seg_idx] * win[None, None, :]        # (n_std, n_seg, nperseg)
+    seg_idx = starts[:, None] + np.arange(nperseg)[None, :]      # (n_seg, nperseg)
+    segs = epoch_std[:, seg_idx]                               # (n_std, n_seg, nperseg)
+    segs = segs - segs.mean(axis=2, keepdims=True)             # detrend: remove segment mean
+    segs = segs * win[None, None, :]
 
     # FFT → (n_std, n_seg, n_freq)
     F = np.fft.rfft(segs, axis=2)
