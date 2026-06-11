@@ -14,6 +14,9 @@ import shap
 import xgboost as xgb
 
 from eeg_bg.features.band_power import BANDS
+from eeg_bg.features._constants import _STANDARD_19
+
+_STANDARD_19_SET: frozenset[str] = frozenset(_STANDARD_19)
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -104,6 +107,8 @@ def aggregate_shap_by_channel(
         if name.startswith("asym_"):
             continue
         ch = name.split("_")[0]   # "FP1_delta_power" → "FP1"
+        if ch not in _STANDARD_19_SET:
+            continue
         ch_indices.setdefault(ch, []).append(i)
 
     return {

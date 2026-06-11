@@ -20,14 +20,16 @@ from eeg_bg.ml.shap_analysis import (
 
 def test_compute_shap_values_shape(full_feature_xgb_model):
     rng = np.random.default_rng(0)
-    X   = rng.standard_normal((20, 211)).astype(np.float32)
+    n = len(FEATURE_NAMES)
+    X   = rng.standard_normal((20, n)).astype(np.float32)
     sv  = compute_shap_values(full_feature_xgb_model, X, FEATURE_NAMES)
-    assert sv.shape == (20, 211)
+    assert sv.shape == (20, n)
 
 
 def test_compute_shap_values_finite(full_feature_xgb_model):
     rng = np.random.default_rng(1)
-    X   = rng.standard_normal((10, 211)).astype(np.float32)
+    n = len(FEATURE_NAMES)
+    X   = rng.standard_normal((10, n)).astype(np.float32)
     sv  = compute_shap_values(full_feature_xgb_model, X, FEATURE_NAMES)
     assert np.all(np.isfinite(sv))
 
@@ -36,7 +38,7 @@ def test_compute_shap_values_finite(full_feature_xgb_model):
 
 def test_aggregate_shap_by_band_keys():
     rng = np.random.default_rng(2)
-    sv  = rng.standard_normal((10, 211))
+    sv  = rng.standard_normal((10, len(FEATURE_NAMES)))
     result = aggregate_shap_by_band(sv, FEATURE_NAMES)
     expected_keys = set(BANDS.keys()) | {"hjorth", "spectral_entropy", "asymmetry"}
     assert set(result.keys()) == expected_keys
@@ -44,7 +46,7 @@ def test_aggregate_shap_by_band_keys():
 
 def test_aggregate_shap_by_band_nonnegative():
     rng = np.random.default_rng(3)
-    sv  = rng.standard_normal((10, 211))
+    sv  = rng.standard_normal((10, len(FEATURE_NAMES)))
     result = aggregate_shap_by_band(sv, FEATURE_NAMES)
     for v in result.values():
         assert v >= 0.0
@@ -52,7 +54,7 @@ def test_aggregate_shap_by_band_nonnegative():
 
 def test_aggregate_shap_by_band_float_values():
     rng = np.random.default_rng(4)
-    sv  = rng.standard_normal((5, 211))
+    sv  = rng.standard_normal((5, len(FEATURE_NAMES)))
     result = aggregate_shap_by_band(sv, FEATURE_NAMES)
     for v in result.values():
         assert isinstance(v, float)
@@ -62,14 +64,14 @@ def test_aggregate_shap_by_band_float_values():
 
 def test_aggregate_shap_by_channel_keys():
     rng = np.random.default_rng(5)
-    sv  = rng.standard_normal((10, 211))
+    sv  = rng.standard_normal((10, len(FEATURE_NAMES)))
     result = aggregate_shap_by_channel(sv, FEATURE_NAMES)
     assert len(result) == 19
 
 
 def test_aggregate_shap_by_channel_nonnegative():
     rng = np.random.default_rng(6)
-    sv  = rng.standard_normal((10, 211))
+    sv  = rng.standard_normal((10, len(FEATURE_NAMES)))
     result = aggregate_shap_by_channel(sv, FEATURE_NAMES)
     for v in result.values():
         assert v >= 0.0
@@ -79,7 +81,8 @@ def test_aggregate_shap_by_channel_nonnegative():
 
 def test_plot_shap_summary_creates_file(full_feature_xgb_model, tmp_path):
     rng = np.random.default_rng(7)
-    X   = rng.standard_normal((15, 211)).astype(np.float32)
+    n = len(FEATURE_NAMES)
+    X   = rng.standard_normal((15, n)).astype(np.float32)
     sv  = compute_shap_values(full_feature_xgb_model, X, FEATURE_NAMES)
     out = tmp_path / "shap_summary.png"
     plot_shap_summary(sv, X, FEATURE_NAMES, title="Test", output_path=out, dpi=72)
@@ -91,7 +94,7 @@ def test_plot_shap_summary_creates_file(full_feature_xgb_model, tmp_path):
 
 def test_plot_shap_comparison_creates_file(tmp_path):
     rng = np.random.default_rng(8)
-    sv  = rng.standard_normal((10, 211))
+    sv  = rng.standard_normal((10, len(FEATURE_NAMES)))
     band_agg = aggregate_shap_by_band(sv, FEATURE_NAMES)
     ch_agg   = aggregate_shap_by_channel(sv, FEATURE_NAMES)
 

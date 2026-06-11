@@ -30,9 +30,9 @@ def tiny_feature_names():
 
 @pytest.fixture(scope="session")
 def full_feature_xgb_model():
-    """XGBClassifier fitted on 211-feature synthetic data (171 per-channel + 40 asymmetry)."""
+    """XGBClassifier fitted on 2415-feature synthetic data."""
     rng = np.random.default_rng(7)
-    X = rng.standard_normal((80, 211)).astype(np.float32)
+    X = rng.standard_normal((80, len(FEATURE_NAMES))).astype(np.float32)
     y = np.array([0] * 40 + [1] * 40, dtype=np.int32)
     model = xgb.XGBClassifier(
         n_estimators=5,
