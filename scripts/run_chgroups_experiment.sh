@@ -80,7 +80,7 @@ if (( FROM == 1 )); then
     run_step "03 — ICA decomposition" \
         $CONDA_RUN python scripts/03_run_ica.py \
             --config configs/exp_chgroups_1.yaml \
-            --force --workers "$WORKERS"
+            --workers "$WORKERS"
 else
     echo "  --from $FROM: skipping pre-steps (01 + 03 assumed done)"
 fi
