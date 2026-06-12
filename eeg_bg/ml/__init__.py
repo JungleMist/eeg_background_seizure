@@ -42,9 +42,12 @@ from eeg_bg.ml.shap_analysis import (
     plot_shap_summary,
     plot_shap_comparison,
 )
-from eeg_bg.ml.cnn_model import EEGNet
-from eeg_bg.ml.cnn_dataset import EEGEpochDataset
-from eeg_bg.ml.cnn_pipeline import cnn_predict_epochs, train_cnn
+try:
+    from eeg_bg.ml.cnn_model import EEGNet
+    from eeg_bg.ml.cnn_dataset import EEGEpochDataset
+    from eeg_bg.ml.cnn_pipeline import cnn_predict_epochs, train_cnn
+except ImportError:
+    pass  # torch not installed; CNN pipeline unavailable
 
 __all__ = [
     # XGBoost pipeline
