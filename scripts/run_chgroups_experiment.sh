@@ -184,23 +184,6 @@ print(cfg['paths']['cache_dir'])
 done
 
 # ---------------------------------------------------------------------------
-# Final cleanup
-# ---------------------------------------------------------------------------
-echo ""
-echo "============================================================"
-echo "  Final cache cleanup"
-echo "============================================================"
-FINAL_CACHE_DIR=$($CONDA_RUN python -c "
-from eeg_bg.config.settings import load_config
-cfg = load_config('configs/exp_chgroups_1.yaml')
-print(cfg['paths']['cache_dir'])
-")
-echo "  Cache dir: $FINAL_CACHE_DIR"
-rm -rf "$FINAL_CACHE_DIR/wiener_frequency"
-rm -rf "$FINAL_CACHE_DIR/ica"
-rm -rf "$FINAL_CACHE_DIR/features"
-
-# ---------------------------------------------------------------------------
 # Summary table
 # ---------------------------------------------------------------------------
 echo ""
