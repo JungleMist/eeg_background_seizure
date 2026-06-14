@@ -1,0 +1,26 @@
+{
+  "train": {
+    "n_epochs": 149224,
+    "n_subjects": 124,
+    "n_epochs_epilepsy": 119443,
+    "n_epochs_control": 29781,
+    "n_subjects_epilepsy": 67,
+    "n_subjects_control": 57
+  },
+  "val": {
+    "n_epochs": 5526,
+    "n_subjects": 17,
+    "n_epochs_epilepsy": 3811,
+    "n_epochs_control": 1715,
+    "n_subjects_epilepsy": 9,
+    "n_subjects_control": 8
+  },
+  "test": {
+    "n_epochs": 26346,
+    "n_subjects": 37,
+    "n_epochs_epilepsy": 21952,
+    "n_epochs_control": 4394,
+    "n_subjects_epilepsy": 20,
+    "n_subjects_control": 17
+  }
+}
