@@ -9,10 +9,10 @@ from eeg_bg.features.connectivity import (
 from eeg_bg.features._constants import _STANDARD_19
 
 SFREQ = 125.0
-N_PAIRS = 171  # C(19,2)
+N_PAIRS = 8  # 8 homotopic pairs (asymmetry.SYMMETRIC_PAIRS)
 N_BANDS = 5
 N_METRICS = 2
-EXPECTED_DIM = N_PAIRS * N_BANDS * N_METRICS  # 1710
+EXPECTED_DIM = N_PAIRS * N_BANDS * N_METRICS  # 80
 
 
 @pytest.fixture

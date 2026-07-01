@@ -1,34 +1,41 @@
 """Pairwise functional connectivity: coherence and Phase-Locking Value (PLV).
 
-Computes magnitude-squared coherence and per-band PLV for all 171 unique
-electrode pairs (C(19,2)) across the 5 standard EEG frequency bands.
+Computes magnitude-squared coherence and per-band PLV for the 8 homotopic
+(bilateral) electrode pairs in ``asymmetry.SYMMETRIC_PAIRS`` across the 5
+standard EEG frequency bands.
+
+Pairs are restricted to homotopic pairs (rather than all C(19,2) = 171
+possible pairs) for a physiological reason: reduced inter-hemispheric
+coherence/PLV is a documented correlate of focal lateralized epileptogenic
+networks. This measures inter-hemispheric *phase coupling*, which is a
+distinct signal from the power-asymmetry features in ``asymmetry.py`` (same
+electrode pairs, but comparing power rather than phase), so it is not
+redundant with them — it is just far cheaper than scoring all 171 pairs.
 
 Efficiency:
-  - Coherence: one vectorised Welch STFT over all 19 channels, then all 171
-    cross-spectral densities derived from that single FFT result — replaces
-    171 individual scipy.signal.coherence calls.
-  - PLV: per-band bandpass + Hilbert computed once per channel (95 ops) and
-    reused across all 171 pairs in that band.
+  - Coherence: one vectorised Welch STFT over all 19 channels, then all pair
+    cross-spectral densities derived from that single FFT result.
+  - PLV: per-band bandpass + Hilbert computed once per channel and reused
+    across all pairs in that band.
 """
 from __future__ import annotations
-
-from itertools import combinations
 
 import numpy as np
 from scipy.signal import hilbert, butter, sosfiltfilt
 from scipy.signal.windows import hann
 
 from eeg_bg.features._constants import _STANDARD_19
+from eeg_bg.features.asymmetry import SYMMETRIC_PAIRS
 from eeg_bg.features.band_power import BANDS
 
-ALL_PAIRS: list[tuple[str, str]] = list(combinations(_STANDARD_19, 2))  # 171 pairs
+ALL_PAIRS: list[tuple[str, str]] = list(SYMMETRIC_PAIRS)  # 8 homotopic pairs
 
 CONNECTIVITY_NAMES: list[str] = [
     f"{metric}_{ch1}_{ch2}_{band}"
     for ch1, ch2 in ALL_PAIRS
     for band in BANDS
     for metric in ("coh", "plv")
-]  # 171 × 5 × 2 = 1710
+]  # 8 × 5 × 2 = 80
 
 # Precompute pair index arrays once at import time for vectorised indexing.
 _PAIR_I1: list[int] = []
@@ -67,7 +74,7 @@ def connectivity_features(
     Returns
     -------
     np.ndarray
-        Shape ``(1710,)``, dtype float64.
+        Shape ``(80,)``, dtype float64.
         Layout: for each pair in ``ALL_PAIRS``, for each band in ``BANDS``,
         ``[coherence, PLV]``.  Absent-channel pairs → 10 zeros.
     """
