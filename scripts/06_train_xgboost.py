@@ -311,10 +311,23 @@ def run_condition(
         )
         print(f"  SHAP saved to {out_dir / 'shap_summary.png'}")
 
-        # Write pruning report
+        # Pruning DECISION uses train-set SHAP, not test-set SHAP: using the
+        # test set's own ranking to choose features, then scoring the pruned
+        # model on that same test set, is test-set leakage that optimistically
+        # biases the reported pruned-model AUROC. Train has ~149k epochs, so
+        # TreeExplainer runs on a stratified subsample for speed.
+        train_shap_sample_size = min(10_000, len(X_tr_sc))
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(len(X_tr_sc), size=train_shap_sample_size,
+                                 replace=False)
+        train_shap_vals = compute_shap_values(
+            model, X_tr_sc[sample_idx], FEATURE_NAMES
+        )
+
+        # Write pruning report (selection decision made on train-set SHAP)
         threshold = cfg["ml"]["shap"].get("pruning_threshold", 1.0e-4)
         surviving_idx = _write_shap_pruning_report(
-            shap_vals, FEATURE_NAMES, out_dir, threshold
+            train_shap_vals, FEATURE_NAMES, out_dir, threshold
         )
         print(
             f"  Pruning report: {len(FEATURE_NAMES) - len(surviving_idx)} features "
