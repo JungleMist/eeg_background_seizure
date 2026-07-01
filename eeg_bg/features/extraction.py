@@ -1,25 +1,32 @@
 """Epoch-level feature extraction and dataset builder.
 
 ``extract_epoch_features`` converts a single ``(n_ch, n_times)`` epoch into a
-fixed-length 3441-dimensional feature vector.
+fixed-length 1070-dimensional feature vector.
 
 ``build_dataset`` iterates over an NPZ cache directory, applies the extractor
 to every epoch that belongs to the requested split, and returns a feature
 matrix together with labels and subject IDs.
 
-Feature vector layout (3441 dims)
+Feature vector layout (1070 dims)
 ----------------------------------
-- [0:171]    Per-channel statistics — 19 channels × 9 features each
-             (delta/theta/alpha/beta/gamma power, Hjorth activity/mobility/complexity,
-             spectral entropy) in ``_STANDARD_19`` order.
-- [171:211]  Hemispheric asymmetry — 8 pairs × 5 bands (see ``ASYMMETRY_NAMES``).
-- [211:1465] Wavelet DWT — 19 channels × 66 features (energy, entropy, coef stats, approx stats, modulus maxima, scale energy ratio, reconstructed signal stats).
-- [1465:3175] Connectivity — 171 pairs × 5 bands × 2 metrics (coherence, PLV).
-- [3175:3213] Complexity — 19 channels × 2 features (SampEn, LZC).
-- [3213:3441] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
+- [0:171]   Per-channel statistics — 19 channels × 9 features each
+            (delta/theta/alpha/beta/gamma power, Hjorth activity/mobility/complexity,
+            spectral entropy) in ``_STANDARD_19`` order.
+- [171:211] Hemispheric asymmetry — 8 pairs × 5 bands (see ``ASYMMETRY_NAMES``).
+- [211:724] Wavelet DWT — 19 channels × 27 features (detail energy, modulus-maxima
+            mean, reconstructed-band stats). Cut from 66/channel — see
+            ``eeg_bg/features/wavelet.py`` module docstring for the physiological
+            rationale behind which of the original 7 subgroups survived.
+- [724:804] Connectivity — 8 homotopic pairs × 5 bands × 2 metrics (coherence, PLV).
+            Restricted from all C(19,2)=171 pairs to the 8 bilateral pairs in
+            ``asymmetry.SYMMETRIC_PAIRS`` — see ``eeg_bg/features/connectivity.py``.
+- [804:842] Complexity — 19 channels × 2 features (SampEn, LZC).
+- [842:1070] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
 
 Positions 0–210 are positionally stable; reordering them invalidates saved
-SHAP ``.npy`` arrays.
+SHAP ``.npy`` arrays. Positions past 210 changed as part of the 2026-07-01
+dimensionality reduction (3441 → 1070 dims) — any SHAP/feature-cache
+artifacts from before that change are not comparable to new runs.
 """
 from __future__ import annotations
 
@@ -60,7 +67,7 @@ FEATURE_NAMES: list[str] = (
     + CONNECTIVITY_NAMES
     + COMPLEXITY_NAMES
     + TEMPORAL_NAMES
-)  # 211 + 1254 + 1710 + 38 + 228 = 3441
+)  # 211 + 513 + 80 + 38 + 228 = 1070
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -84,7 +91,7 @@ def extract_epoch_features(
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
 ) -> np.ndarray:
-    """Extract a 2415-dimensional feature vector from one epoch.
+    """Extract a fixed-length feature vector (``len(FEATURE_NAMES)`` dims) from one epoch.
 
     Parameters
     ----------
@@ -102,7 +109,7 @@ def extract_epoch_features(
     Returns
     -------
     np.ndarray
-        Shape ``(len(FEATURE_NAMES),)`` = ``(3441,)``, ordered according to
+        Shape ``(len(FEATURE_NAMES),)`` = ``(1070,)``, ordered according to
         :data:`FEATURE_NAMES`.  Missing channels are zero-padded.
     """
     # O(1) channel lookup — avoids O(n) list.index() inside the loop.
@@ -146,14 +153,14 @@ def extract_epoch_features(
                                   nperseg=nperseg, freq_band=freq_band,
                                   psd_cache=psd_cache)
     # ── New feature blocks ────────────────────────────────────────────────────
-    # Wavelet: 7 feature groups per channel (66 dims per channel, 1254 total)
+    # Wavelet: 3 feature groups per channel (27 dims per channel, 513 total)
     wavelet_vec = np.concatenate([
         wavelet_features(epoch[ch_map[ch]] if ch_map.get(ch) is not None
                          else np.zeros(epoch.shape[1]))
         for ch in _STANDARD_19
     ])
 
-    # Connectivity: coherence + PLV — 171 pairs × 5 bands × 2 metrics = 1710 dims
+    # Connectivity: coherence + PLV — 8 homotopic pairs × 5 bands × 2 metrics = 80 dims
     conn_vec = connectivity_features(epoch, ch_names, sfreq=sfreq, nperseg=nperseg)
 
     # Complexity: SampEn + LZC per channel (38 dims)
