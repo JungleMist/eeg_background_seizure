@@ -1,4 +1,4 @@
-"""DWT features per channel — 66 features per channel, 7 feature groups.
+"""DWT features per channel — 27 features per channel, 3 feature groups.
 
 Uses PyWavelets (pywt) db4 wavelet at 6 levels by default.
 Approximate band-to-level mapping at 125 Hz, level 6:
@@ -9,15 +9,19 @@ Approximate band-to-level mapping at 125 Hz, level 6:
     level 5 →  2– 4 Hz  (δ-hi)   cD5
     level 6 →  0.5–2 Hz (δ)      cD6
 
-Feature groups (66 per channel):
-    1. Detail energy         dwt_l{l}_energy         l=1..6   → 6
-    2. Detail entropy        dwt_l{l}_entropy         l=1..6   → 6
-    3. Detail coeff stats    dwt_l{l}_coef_mean/std/maxabs      → 18
-    4. Approx coeff stats    dwt_approx_mean/std/maxabs          → 3
-    5. Modulus maxima        dwt_l{l}_mmx_count/mean  l=1..6  → 12
-    6. Scale energy ratio    dwt_l{l}_engratio        l=1..6   → 6
-    7. Reconstructed stats   dwt_band_{b}_mean/std/power b=delta..gamma → 15
-    Total: 6+6+18+3+12+6+15 = 66
+Feature groups (27 per channel). Of the original 7 groups (66/channel), 4
+were cut as redundant with existing Welch-based per-channel features
+(band power, Hjorth, spectral entropy in extraction.py) and absent from
+every SHAP top-20 across raw/ica/wiener conditions: detail entropy
+(redundant with spectral_entropy), detail coeff mean/std/maxabs (redundant
+with Hjorth activity/mobility), approx coeff stats (redundant with delta
+power), and scale energy ratio (a normalized derivative of detail energy,
+largely duplicate information). Modulus maxima kept only its mean variant
+(count never appeared in top-20).
+    1. Detail energy         dwt_l{l}_energy    l=1..6   → 6
+    2. Modulus maxima mean   dwt_l{l}_mmx_mean  l=1..6   → 6
+    3. Reconstructed stats   dwt_band_{b}_mean/std/power b=delta..gamma → 15
+    Total: 6+6+15 = 27
 """
 from __future__ import annotations
 
@@ -42,25 +46,17 @@ _BANDS_ORDER = ["delta", "theta", "alpha", "beta", "gamma"]
 _WAVELET_SUFFIXES: list[str] = (
     # Group 1: detail energy (6)
     [f"dwt_l{l}_energy" for l in range(1, 7)]
-    # Group 2: detail entropy (6)
-    + [f"dwt_l{l}_entropy" for l in range(1, 7)]
-    # Group 3: detail coeff stats (18)
-    + [f"dwt_l{l}_coef_{s}" for l in range(1, 7) for s in ("mean", "std", "maxabs")]
-    # Group 4: approx coeff stats (3)
-    + ["dwt_approx_mean", "dwt_approx_std", "dwt_approx_maxabs"]
-    # Group 5: modulus maxima (12)
-    + [f"dwt_l{l}_mmx_{s}" for l in range(1, 7) for s in ("count", "mean")]
-    # Group 6: scale energy ratio (6)
-    + [f"dwt_l{l}_engratio" for l in range(1, 7)]
-    # Group 7: reconstructed band stats (15)
+    # Group 2: modulus maxima mean (6)
+    + [f"dwt_l{l}_mmx_mean" for l in range(1, 7)]
+    # Group 3: reconstructed band stats (15)
     + [f"dwt_band_{b}_{s}" for b in _BANDS_ORDER for s in ("mean", "std", "power")]
-)  # length 66
+)  # length 27
 
 WAVELET_NAMES: list[str] = [
     f"{ch}_{s}"
     for ch in _STANDARD_19
     for s in _WAVELET_SUFFIXES
-]  # 19 × 66 = 1254
+]  # 19 × 27 = 513
 
 
 def wavelet_features(
@@ -82,64 +78,36 @@ def wavelet_features(
     Returns
     -------
     np.ndarray
-        Shape ``(66,)``, dtype float64.
+        Shape ``(27,)``, dtype float64.
     """
     sig = signal.astype(np.float64)
     n = len(sig)
     coeffs = pywt.wavedec(sig, wavelet, level=level)
     # coeffs[0] = cA_level, coeffs[level+1-l] = cD_l
 
-    # --- groups 1 & 2: energy and entropy per detail level ---
+    # --- group 1: detail energy per level ---
     energies: list[float] = []
-    entropies: list[float] = []
     detail_coeffs: list[np.ndarray] = []
     for l in range(1, level + 1):
         c = coeffs[level + 1 - l]
         detail_coeffs.append(c)
-        sq = c * c
-        raw_energy = float(sq.sum())
-        if raw_energy == 0.0:
-            energies.append(0.0)
-            entropies.append(0.0)
-        else:
-            sum_sq = raw_energy
-            energies.append(float(raw_energy / n))
-            p = sq / sum_sq
-            entropies.append(float(-np.sum(p * np.log(p + 1e-30))))
+        raw_energy = float((c * c).sum())
+        energies.append(float(raw_energy / n))
 
-    # --- group 3: detail coeff stats ---
-    def _coef_stats(c: np.ndarray) -> tuple[float, float, float]:
-        if len(c) == 0:
-            return 0.0, 0.0, 0.0
-        return float(c.mean()), float(c.std()), float(np.abs(c).max())
-
-    detail_stats: list[float] = []
-    for c in detail_coeffs:
-        m, s, mx = _coef_stats(c)
-        detail_stats.extend([m, s, mx])
-
-    # --- group 4: approx coeff stats ---
-    ca = coeffs[0]
-    approx_stats = list(_coef_stats(ca))
-
-    # --- group 5: modulus maxima ---
+    # --- group 2: modulus maxima mean ---
     mmx_feats: list[float] = []
     for c in detail_coeffs:
         if len(c) < 3:
-            mmx_feats.extend([0.0, 0.0])
+            mmx_feats.append(0.0)
             continue
         ac = np.abs(c)
         peaks = np.where((ac[1:-1] > ac[:-2]) & (ac[1:-1] > ac[2:]))[0] + 1
         if len(peaks) == 0:
-            mmx_feats.extend([0.0, 0.0])
+            mmx_feats.append(0.0)
         else:
-            mmx_feats.extend([float(len(peaks)), float(ac[peaks].mean())])
+            mmx_feats.append(float(ac[peaks].mean()))
 
-    # --- group 6: scale energy ratio ---
-    total_energy = sum(energies) + 1e-30
-    engratio: list[float] = [e / total_energy for e in energies]
-
-    # --- group 7: reconstructed band stats ---
+    # --- group 3: reconstructed band stats ---
     band_stats: list[float] = []
     for band in _BANDS_ORDER:
         lvls = _BAND_LEVELS[band]
@@ -159,11 +127,7 @@ def wavelet_features(
 
     feats = (
         energies       # group 1 (6)
-        + entropies    # group 2 (6)
-        + detail_stats # group 3 (18)
-        + approx_stats # group 4 (3)
-        + mmx_feats    # group 5 (12)
-        + engratio     # group 6 (6)
-        + band_stats   # group 7 (15)
+        + mmx_feats    # group 2 (6)
+        + band_stats   # group 3 (15)
     )
     return np.asarray(feats, dtype=np.float64)

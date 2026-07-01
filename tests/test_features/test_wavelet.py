@@ -19,13 +19,13 @@ def random_signal():
 
 def test_wavelet_features_shape(sine_signal):
     out = wavelet_features(sine_signal)
-    assert out.shape == (66,)
+    assert out.shape == (27,)
 
 
 def test_wavelet_names_length():
     from eeg_bg.features._constants import _STANDARD_19
-    assert len(WAVELET_NAMES) == len(_STANDARD_19) * 66
-    assert len(WAVELET_NAMES) == 1254
+    assert len(WAVELET_NAMES) == len(_STANDARD_19) * 27
+    assert len(WAVELET_NAMES) == 513
 
 
 def test_wavelet_names_unique():
@@ -36,12 +36,6 @@ def test_wavelet_energy_nonnegative(random_signal):
     out = wavelet_features(random_signal)
     energies = out[0:6]
     assert np.all(energies >= 0.0)
-
-
-def test_wavelet_entropy_nonnegative(random_signal):
-    out = wavelet_features(random_signal)
-    entropies = out[6:12]
-    assert np.all(entropies >= 0.0)
 
 
 def test_wavelet_sine_dominant_level(sine_signal):
@@ -65,39 +59,29 @@ def test_wavelet_output_dtype(random_signal):
     assert out.dtype == np.float64
 
 
-def test_wavelet_detail_coef_stats_finite(random_signal):
+def test_wavelet_modulus_maxima_mean_nonneg(random_signal):
     out = wavelet_features(random_signal)
-    assert np.all(np.isfinite(out[12:30]))
+    mmx_mean = out[6:12]
+    assert np.all(mmx_mean >= 0.0)
 
 
-def test_wavelet_approx_stats_finite(random_signal):
+def test_wavelet_reconstructed_stats_finite(random_signal):
     out = wavelet_features(random_signal)
-    assert np.all(np.isfinite(out[30:33]))
-
-
-def test_wavelet_modulus_maxima_count_nonneg(random_signal):
-    out = wavelet_features(random_signal)
-    counts = out[33:45:2]  # mmx_count at even positions within the mmx group
-    assert np.all(counts >= 0.0)
-
-
-def test_wavelet_scale_energy_ratio_sums_to_one(random_signal):
-    out = wavelet_features(random_signal)
-    ratios = out[45:51]
-    assert abs(ratios.sum() - 1.0) < 1e-6
+    assert np.all(np.isfinite(out[12:27]))
 
 
 def test_wavelet_reconstructed_power_nonneg(random_signal):
     out = wavelet_features(random_signal)
-    # power is every 3rd value starting at index 53 within the rec group
-    powers = out[51:66][2::3]  # indices 53, 56, 59, 62, 65 relative to full vector
+    # band_stats layout: 5 bands x [mean, std, power]; power is every 3rd
+    # value starting at index 2 within the group-3 slice out[12:27].
+    powers = out[12:27][2::3]  # indices 14, 17, 20, 23, 26 relative to full vector
     assert np.all(powers >= 0.0)
 
 
 def test_wavelet_reconstructed_selectivity(sine_signal):
     """10 Hz sine: alpha band (level 3, 8-16 Hz) should have highest reconstructed power."""
     out = wavelet_features(sine_signal)
-    powers = out[51:66][2::3]  # delta, theta, alpha, beta, gamma powers
+    powers = out[12:27][2::3]  # delta, theta, alpha, beta, gamma powers
     assert powers[2] == powers.max()  # alpha (index 2) dominates
 
 
