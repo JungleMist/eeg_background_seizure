@@ -40,7 +40,10 @@ def test_aggregate_shap_by_band_keys():
     rng = np.random.default_rng(2)
     sv  = rng.standard_normal((10, len(FEATURE_NAMES)))
     result = aggregate_shap_by_band(sv, FEATURE_NAMES)
-    expected_keys = set(BANDS.keys()) | {"hjorth", "spectral_entropy", "asymmetry"}
+    expected_keys = set(BANDS.keys()) | {
+        "hjorth", "spectral_entropy", "asymmetry",
+        "wavelet", "connectivity", "complexity", "temporal",
+    }
     assert set(result.keys()) == expected_keys
 
 
@@ -75,6 +78,20 @@ def test_aggregate_shap_by_channel_nonnegative():
     result = aggregate_shap_by_channel(sv, FEATURE_NAMES)
     for v in result.values():
         assert v >= 0.0
+
+
+def test_aggregate_shap_by_channel_splits_connectivity_pair():
+    """A coh_FP1_FP2_delta feature should contribute to both FP1 and FP2."""
+    names = ["FP1_delta_power", "coh_FP1_FP2_delta"]
+    sv = np.zeros((5, 2))
+    sv[:, 0] = 0.0     # FP1_delta_power contributes nothing
+    sv[:, 1] = 2.0     # coh_FP1_FP2_delta has |SHAP| = 2.0 for every row
+    result = aggregate_shap_by_channel(sv, names)
+    assert set(result.keys()) == {"FP1", "FP2"}
+    # FP1 gets a weighted mean of [0.0 (full weight) and 2.0 (half weight)]
+    assert result["FP1"] == pytest.approx((0.0 * 1.0 + 2.0 * 0.5) / 1.5)
+    # FP2 only has the connectivity contribution (half weight)
+    assert result["FP2"] == pytest.approx(2.0)
 
 
 # ── plot_shap_summary ─────────────────────────────────────────────────────────

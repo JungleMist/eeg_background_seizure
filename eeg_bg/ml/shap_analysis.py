@@ -33,6 +33,31 @@ def _mean_abs_shap_for(
     return float(np.mean(np.abs(shap_values[:, indices])))
 
 
+def _mean_abs_shap_for_prefixes(
+    shap_values: np.ndarray,
+    feature_names: list[str],
+    prefixes: tuple[str, ...],
+) -> float:
+    """Mean |SHAP| across all features whose name starts with any of *prefixes*."""
+    indices = [i for i, n in enumerate(feature_names) if n.startswith(prefixes)]
+    if not indices:
+        return 0.0
+    return float(np.mean(np.abs(shap_values[:, indices])))
+
+
+def _mean_abs_shap_for_any(
+    shap_values: np.ndarray,
+    feature_names: list[str],
+    patterns: tuple[str, ...],
+) -> float:
+    """Mean |SHAP| across all features whose name contains any of *patterns*."""
+    indices = [i for i, n in enumerate(feature_names)
+               if any(p in n for p in patterns)]
+    if not indices:
+        return 0.0
+    return float(np.mean(np.abs(shap_values[:, indices])))
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def compute_shap_values(
@@ -67,13 +92,16 @@ def aggregate_shap_by_band(
     """Mean |SHAP| aggregated by feature type.
 
     Groups features into: one group per EEG frequency band (``"_power"``
-    suffix), one for Hjorth features, one for spectral entropy.
+    suffix), one for Hjorth features, one for spectral entropy, one for
+    hemispheric asymmetry, and one each for the wavelet, connectivity,
+    complexity, and multi-scale temporal-stats blocks.
 
     Returns
     -------
     dict[str, float]
         Keys: ``"delta"``, ``"theta"``, ``"alpha"``, ``"beta"``,
-        ``"gamma"``, ``"hjorth"``, ``"spectral_entropy"``.
+        ``"gamma"``, ``"hjorth"``, ``"spectral_entropy"``, ``"asymmetry"``,
+        ``"wavelet"``, ``"connectivity"``, ``"complexity"``, ``"temporal"``.
     """
     result: dict[str, float] = {}
     for band in BANDS:
@@ -85,6 +113,14 @@ def aggregate_shap_by_band(
                                                      "_spectral_entropy")
     result["asymmetry"]        = _mean_abs_shap_for(shap_values, feature_names,
                                                      "asym_")
+    result["wavelet"]          = _mean_abs_shap_for(shap_values, feature_names,
+                                                     "_dwt_")
+    result["connectivity"]     = _mean_abs_shap_for_prefixes(
+        shap_values, feature_names, ("coh_", "plv_"))
+    result["complexity"]       = _mean_abs_shap_for_any(
+        shap_values, feature_names, ("_sample_entropy", "_lempel_ziv"))
+    result["temporal"]         = _mean_abs_shap_for(shap_values, feature_names,
+                                                     "_scale")
     return result
 
 
@@ -92,28 +128,49 @@ def aggregate_shap_by_channel(
     shap_values: np.ndarray,
     feature_names: list[str],
 ) -> dict[str, float]:
-    """Mean |SHAP| aggregated across all 9 features of each channel.
+    """Mean |SHAP| aggregated across all per-channel features of each channel.
+
+    Channel-prefixed features (per-channel stats, wavelet, complexity,
+    temporal — e.g. ``"FP1_delta_power"``) contribute their full |SHAP| to
+    that one channel. Pairwise connectivity features (``"coh_{ch1}_{ch2}_
+    {band}"`` / ``"plv_{ch1}_{ch2}_{band}"``) contribute half their |SHAP|
+    to each of the two channels involved, since they can't be attributed to
+    a single channel.
 
     Returns
     -------
     dict[str, float]
-        Keys are channel names (e.g. ``"FP1"``, ``"T3"``, …).
+        Keys are channel names (e.g. ``"FP1"``, ``"T3"``, …). Values are a
+        weighted mean of |SHAP| — the sum of (weight × |SHAP|) contributions
+        divided by the total weight accumulated for that channel.
     """
-    # Single pass: build {channel: [feature_indices]} index, then compute
-    # mean |SHAP| per channel.  Asymmetry features ("asym_" prefix) are
-    # excluded — they are reported under aggregate_shap_by_band("asymmetry").
-    ch_indices: dict[str, list[int]] = {}
+    # Asymmetry features ("asym_" prefix) are excluded — they are reported
+    # under aggregate_shap_by_band("asymmetry").
+    weighted_sum: dict[str, float] = {}
+    weight_count: dict[str, float] = {}
+
+    abs_shap = np.abs(shap_values)
+
     for i, name in enumerate(feature_names):
         if name.startswith("asym_"):
+            continue
+        if name.startswith(("coh_", "plv_")):
+            _, ch1, ch2, _band = name.split("_", 3)
+            val = float(np.mean(abs_shap[:, i]))
+            for ch in (ch1, ch2):
+                weighted_sum[ch] = weighted_sum.get(ch, 0.0) + 0.5 * val
+                weight_count[ch] = weight_count.get(ch, 0.0) + 0.5
             continue
         ch = name.split("_")[0]   # "FP1_delta_power" → "FP1"
         if ch not in _STANDARD_19_SET:
             continue
-        ch_indices.setdefault(ch, []).append(i)
+        val = float(np.mean(abs_shap[:, i]))
+        weighted_sum[ch] = weighted_sum.get(ch, 0.0) + val
+        weight_count[ch] = weight_count.get(ch, 0.0) + 1.0
 
     return {
-        ch: float(np.mean(np.abs(shap_values[:, idxs])))
-        for ch, idxs in ch_indices.items()
+        ch: weighted_sum[ch] / weight_count[ch]
+        for ch in weighted_sum
     }
 
 
@@ -190,7 +247,10 @@ def plot_shap_comparison(
     condition_labels = ["Raw (C)", "ICA (B)", "Wiener (A)"]
     col_colors       = ["#888888", "#E07B54", "#4C8BBE"]
 
-    band_keys = list(BANDS.keys()) + ["hjorth", "spectral_entropy", "asymmetry"]
+    band_keys = list(BANDS.keys()) + [
+        "hjorth", "spectral_entropy", "asymmetry",
+        "wavelet", "connectivity", "complexity", "temporal",
+    ]
 
     # Determine channel sort order from Wiener importance (fallback: raw).
     # Computed once here so all three columns share the same y-axis ordering.
