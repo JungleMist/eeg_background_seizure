@@ -8,3 +8,5 @@ __pycache__/
 .pytest_cache/
 .claude/
 /.vscode
+.DS_Store
+configs/local*.yaml
