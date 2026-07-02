@@ -30,7 +30,7 @@ split:
 preprocessing:
   target_sfreq: 125
   bandpass: [0.5, 40.0]
-  epoch_length_sec: 8.0
+  epoch_length_sec: 20.0
   artifact_threshold_uv: 200.0
   seizure_buffer_sec: 30.0
 
@@ -63,7 +63,7 @@ channels:
 
 wiener:
   mode: "frequency"
-  nperseg: 250
+  nperseg: 500
   freq_resolution_hz: 0.5
   coherence_threshold: 0.15
   filter_magnitude_threshold: 50.0
@@ -112,7 +112,7 @@ ml:
       wavelet: db4
       level: 6
     connectivity:
-      nperseg: 250
+      nperseg: 500
     complexity:
       m: 2
       r_factor: 0.2
