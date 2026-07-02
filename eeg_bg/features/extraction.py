@@ -1,13 +1,13 @@
 """Epoch-level feature extraction and dataset builder.
 
 ``extract_epoch_features`` converts a single ``(n_ch, n_times)`` epoch into a
-fixed-length 1070-dimensional feature vector.
+fixed-length 804-dimensional feature vector.
 
 ``build_dataset`` iterates over an NPZ cache directory, applies the extractor
 to every epoch that belongs to the requested split, and returns a feature
 matrix together with labels and subject IDs.
 
-Feature vector layout (1070 dims)
+Feature vector layout (804 dims)
 ----------------------------------
 - [0:171]   Per-channel statistics — 19 channels × 9 features each
             (delta/theta/alpha/beta/gamma power, Hjorth activity/mobility/complexity,
@@ -20,13 +20,12 @@ Feature vector layout (1070 dims)
 - [724:804] Connectivity — 8 homotopic pairs × 5 bands × 2 metrics (coherence, PLV).
             Restricted from all C(19,2)=171 pairs to the 8 bilateral pairs in
             ``asymmetry.SYMMETRIC_PAIRS`` — see ``eeg_bg/features/connectivity.py``.
-- [804:842] Complexity — 19 channels × 2 features (SampEn, LZC).
-- [842:1070] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
 
 Positions 0–210 are positionally stable; reordering them invalidates saved
-SHAP ``.npy`` arrays. Positions past 210 changed as part of the 2026-07-01
-dimensionality reduction (3441 → 1070 dims) — any SHAP/feature-cache
-artifacts from before that change are not comparable to new runs.
+SHAP ``.npy`` arrays. This ``lite`` branch drops the Complexity (SampEn/LZC,
+38 dims) and Temporal multi-scale stats (228 dims) blocks that trailed the
+1070-dim vector on ``master`` — those two blocks were the most time-consuming
+part of feature extraction; everything else is unchanged from ``master``.
 """
 from __future__ import annotations
 
@@ -44,8 +43,6 @@ from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES
 from eeg_bg.features._constants import _STANDARD_19
 from eeg_bg.features.wavelet import wavelet_features, WAVELET_NAMES
 from eeg_bg.features.connectivity import connectivity_features, CONNECTIVITY_NAMES
-from eeg_bg.features.complexity import complexity_features, COMPLEXITY_NAMES
-from eeg_bg.features.temporal_stats import epoch_temporal_stats, TEMPORAL_NAMES
 
 # Feature name suffixes in inner-loop order
 _FEAT_SUFFIXES: list[str] = (
@@ -65,9 +62,7 @@ FEATURE_NAMES: list[str] = (
     + ASYMMETRY_NAMES
     + WAVELET_NAMES
     + CONNECTIVITY_NAMES
-    + COMPLEXITY_NAMES
-    + TEMPORAL_NAMES
-)  # 211 + 513 + 80 + 38 + 228 = 1070
+)  # 211 + 513 + 80 = 804
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -109,7 +104,7 @@ def extract_epoch_features(
     Returns
     -------
     np.ndarray
-        Shape ``(len(FEATURE_NAMES),)`` = ``(1070,)``, ordered according to
+        Shape ``(len(FEATURE_NAMES),)`` = ``(804,)``, ordered according to
         :data:`FEATURE_NAMES`.  Missing channels are zero-padded.
     """
     # O(1) channel lookup — avoids O(n) list.index() inside the loop.
@@ -163,19 +158,11 @@ def extract_epoch_features(
     # Connectivity: coherence + PLV — 8 homotopic pairs × 5 bands × 2 metrics = 80 dims
     conn_vec = connectivity_features(epoch, ch_names, sfreq=sfreq, nperseg=nperseg)
 
-    # Complexity: SampEn + LZC per channel (38 dims)
-    compl_vec = complexity_features(epoch, ch_names)
-
-    # Temporal: multi-scale stats per channel (228 dims)
-    temp_vec = epoch_temporal_stats(epoch, ch_names)
-
     return np.concatenate([
         np.asarray(features, dtype=np.float64),
         asym,
         wavelet_vec,
         conn_vec,
-        compl_vec,
-        temp_vec,
     ]).astype(np.float64)
 
 
