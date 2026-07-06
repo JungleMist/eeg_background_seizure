@@ -96,10 +96,10 @@ The package is `eeg_bg/`, pip-installed from `setup.py`. Configuration is loaded
 
 **Data flow (unidirectional):**
 ```
-EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
+EDF files (TUEP v3.1.0, /root/autodl-tmp/EEGdata/TUEP/v3.1.0)
   → io/edf_reader.py      — loads EDF, normalises channel names (strips "EEG " prefix and "-REF" suffix), resamples to 125 Hz, converts V→µV
   → io/annotation.py      — parses csv_bi files; excludes ±30 s seizure buffers from background intervals
-  → preprocessing/epoch.py — slices 8 s epochs, rejects epochs exceeding 200 µV
+  → preprocessing/epoch.py — slices 20 s epochs, rejects epochs exceeding 200 µV
   → cache/epochs/          — checkpoint 1 (.npz via io/cache.py)
   → decomposition/wiener.py — vector Wiener decomposition (core method)
   → decomposition/ica.py    — FastICA ablation baseline
@@ -110,7 +110,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
   → ml/xgb_pipeline.py      — GridSearchCV + early stopping; subject-level aggregation
   → ml/shap_analysis.py     — TreeExplainer SHAP; band/channel aggregation; comparison plot
   → results/xgboost/        — model.joblib, metrics JSON, SHAP plots
-  → ml/cnn_pipeline.py      — parallel path: EEGNet trained directly on raw (19, 1000) epoch tensors (no hand-crafted features)
+  → ml/cnn_pipeline.py      — parallel path: EEGNet trained directly on raw (19, 2500) epoch tensors (no hand-crafted features)
   → results/cnn/            — best_model.pt, metrics JSON, predictions CSV
 ```
 
@@ -121,7 +121,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/config/settings.py` | `load_config(path)` — loads YAML and resolves relative `cache_dir`/`results_dir` to absolute paths against the project root. |
 | `eeg_bg/io/edf_reader.py` | `load_edf(path, cfg)` — loads EDF via MNE, strips `"EEG "` prefix and `"-REF"` suffix from channel names, resamples to 125 Hz, converts V→µV. |
 | `eeg_bg/io/annotation.py` | Parses `csv_bi` seizure annotation files; `extract_bckg_intervals` returns non-seizure segments with ±`seizure_buffer_sec` guard zones excluded. |
-| `eeg_bg/preprocessing/epoch.py` | `slice_epochs` — cuts fixed-length (8 s) epochs from a continuous recording; rejects epochs where any channel exceeds `artifact_threshold_uv` (200 µV). |
+| `eeg_bg/preprocessing/epoch.py` | `slice_epochs` — cuts fixed-length (20 s) epochs from a continuous recording; rejects epochs where any channel exceeds `artifact_threshold_uv` (200 µV). |
 | `eeg_bg/decomposition/wiener.py` | Core Wiener filter: `estimate_cross_psd` → `compute_wiener_filter` → `apply_wiener_filter` → `decompose_epoch` / `decompose_subject`. Returns `WienerResult` (raw, specific, coherent, filters dict, skipped_pairs). |
 | `eeg_bg/decomposition/wiener_scalar.py` | Fixed-scalar ablation baseline for comparison. |
 | `eeg_bg/decomposition/wiener_zerophase.py` | Real-constrained ("zerophase") per-frequency Wiener ablation: solves `Re(S_ref) h = Re(s_cross)` per frequency bin instead of the unconstrained complex solve, testing the hypothesis that volume-conducted artifact has ~zero phase lag while independent neural signal does not. |
@@ -142,7 +142,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(211,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
 | `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. `find_optimal_threshold`: also reused by the CNN pipeline. |
 | `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×4 cross-condition publication figure: raw/ica/wiener/wiener_zerophase). |
-| `eeg_bg/ml/cnn_model.py` | `EEGNet(n_channels=19, n_times=1000, F1, D, dropout)` — compact EEG CNN (Lawhern et al. 2018): temporal conv → depthwise spatial conv → separable conv → sigmoid. Input `(batch, 1, 19, 1000)`, output `(batch, 1)` probability. |
+| `eeg_bg/ml/cnn_model.py` | `EEGNet(n_channels=19, n_times=1000, F1, D, dropout)` — compact EEG CNN (Lawhern et al. 2018): temporal conv → depthwise spatial conv → separable conv → sigmoid. `n_times=1000` is just the constructor default; `cnn_pipeline.py` always derives the real value from the data (currently 2500, `epoch_length_sec × target_sfreq`). Input `(batch, 1, 19, n_times)`, output `(batch, 1)` probability. |
 | `eeg_bg/ml/cnn_dataset.py` | `EEGEpochDataset(cache_root, condition, split)` — PyTorch `Dataset` reading the same `cache/{epochs,wiener_frequency,ica}/` trees as `build_dataset`; yields `(epoch_tensor, label, subject_id)` with each channel z-scored independently. |
 | `eeg_bg/ml/cnn_pipeline.py` | `cnn_predict_epochs`: batched inference → subject-level DataFrame (epoch probas averaged per subject). `train_cnn`: training loop (weighted BCE for class imbalance, Adam, `ReduceLROnPlateau`, early stopping on val AUROC); writes `best_model.pt` + metrics/predictions to `out_dir`. Reuses `find_optimal_threshold`/`evaluate_subject_level` from `xgb_pipeline.py`. |
 | `eeg_bg/visualization/coherence_plots.py` | `plot_coherence_matrix` (pre/post heatmap side-by-side), `plot_coherence_reduction` (boxplot by pair or subject), `plot_signal_decomposition` (raw / coherent / specific waveform panels for one channel). |
@@ -172,7 +172,7 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 - PSD estimated with **boxcar window** so that when `nperseg == n_times` the filter can be applied exactly via rfft without windowing mismatch.
 - When `nperseg < n_times`, filter coefficients are linearly interpolated to the full rfft grid; `specific + coherent == raw` is guaranteed by construction regardless.
 - A coherence gate (max pairwise coherence across all pairs in the group, over the target frequency band) skips groups below `coherence_threshold` (default 0.15).
-- `nperseg` in `wiener:` is for filter estimation; V1 coherence uses `freq_resolution_hz` (125 / 0.5 = 250 samples = 4 segments per 1000-sample epoch) to avoid trivial coherence=1.
+- `nperseg` in `wiener:` is for filter estimation; V1 coherence uses `freq_resolution_hz` (125 / 0.5 = 250 samples = 10 segments per 2500-sample epoch) to avoid trivial coherence=1.
 
 ### Feature vector layout
 
@@ -202,7 +202,7 @@ cache/
 ├── ica/ (same tree)                                       — keys: specific, n_artifacts_removed, label, subject_id, split
 └── features/{condition}_{split}.npz                       — keys: X, y, subject_ids
 ```
-The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`); the `wiener_zerophase` condition maps to `cache/wiener_zerophase/` directly (name matches). `wiener_zerophase` is wired into `scripts/06_train_xgboost.py` (a 4th `--condition`, included in `all`) but **not** into the CNN pipeline — `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` and `scripts/08_train_cnn.py` still only support `raw`/`ica`/`wiener`. `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, 1000)` tensors rather than the 211-dim feature vectors.
+The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`); the `wiener_zerophase` condition maps to `cache/wiener_zerophase/` directly (name matches). `wiener_zerophase` is wired into `scripts/06_train_xgboost.py` (a 4th `--condition`, included in `all`) but **not** into the CNN pipeline — `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` and `scripts/08_train_cnn.py` still only support `raw`/`ica`/`wiener`. `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, n_times)` tensors (currently `(19, 2500)`) rather than the 211-dim feature vectors.
 
 ### Output directory structure
 
