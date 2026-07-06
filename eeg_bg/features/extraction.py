@@ -1,32 +1,29 @@
 """Epoch-level feature extraction and dataset builder.
 
 ``extract_epoch_features`` converts a single ``(n_ch, n_times)`` epoch into a
-fixed-length 1070-dimensional feature vector.
+fixed-length 211-dimensional feature vector.
 
 ``build_dataset`` iterates over an NPZ cache directory, applies the extractor
 to every epoch that belongs to the requested split, and returns a feature
 matrix together with labels and subject IDs.
 
-Feature vector layout (1070 dims)
-----------------------------------
-- [0:171]   Per-channel statistics — 19 channels × 9 features each
-            (delta/theta/alpha/beta/gamma power, Hjorth activity/mobility/complexity,
-            spectral entropy) in ``_STANDARD_19`` order.
-- [171:211] Hemispheric asymmetry — 8 pairs × 5 bands (see ``ASYMMETRY_NAMES``).
-- [211:724] Wavelet DWT — 19 channels × 27 features (detail energy, modulus-maxima
-            mean, reconstructed-band stats). Cut from 66/channel — see
-            ``eeg_bg/features/wavelet.py`` module docstring for the physiological
-            rationale behind which of the original 7 subgroups survived.
-- [724:804] Connectivity — 8 homotopic pairs × 5 bands × 2 metrics (coherence, PLV).
-            Restricted from all C(19,2)=171 pairs to the 8 bilateral pairs in
-            ``asymmetry.SYMMETRIC_PAIRS`` — see ``eeg_bg/features/connectivity.py``.
-- [804:842] Complexity — 19 channels × 2 features (SampEn, LZC).
-- [842:1070] Temporal multi-scale stats — 19 channels × 3 scales × 4 stats.
+Feature vector layout (211 = 171 per-channel + 40 hemispheric asymmetry)
+-------------------------------------------------------------------------
+First 171 features — 19 channels × 9 features each (in ``_STANDARD_19`` order):
 
-Positions 0–210 are positionally stable; reordering them invalidates saved
-SHAP ``.npy`` arrays. Positions past 210 changed as part of the 2026-07-01
-dimensionality reduction (3441 → 1070 dims) — any SHAP/feature-cache
-artifacts from before that change are not comparable to new runs.
+    FP1_delta_power, FP1_theta_power, FP1_alpha_power, FP1_beta_power,
+    FP1_gamma_power, FP1_hjorth_activity, FP1_hjorth_mobility,
+    FP1_hjorth_complexity, FP1_spectral_entropy,
+    FP2_delta_power, ...  (continues for all 19 channels)
+
+Last 40 features — 8 symmetric pairs × 5 bands hemispheric asymmetry:
+
+    asym_FP1_FP2_delta, asym_FP1_FP2_theta, ..., asym_O1_O2_gamma
+
+``eeg_bg/features/{wavelet,connectivity,complexity,temporal_stats}.py`` are
+not called from here — they were integrated for a 1070-dim expansion and
+later disconnected to revert to this original 211-dim vector. The modules
+and their own unit tests remain in the codebase, untouched, for future use.
 """
 from __future__ import annotations
 
@@ -42,10 +39,6 @@ from eeg_bg.features.hjorth import hjorth_parameters
 from eeg_bg.features.spectral_entropy import spectral_entropy as _spectral_entropy
 from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES
 from eeg_bg.features._constants import _STANDARD_19
-from eeg_bg.features.wavelet import wavelet_features, WAVELET_NAMES
-from eeg_bg.features.connectivity import connectivity_features, CONNECTIVITY_NAMES
-from eeg_bg.features.complexity import complexity_features, COMPLEXITY_NAMES
-from eeg_bg.features.temporal_stats import epoch_temporal_stats, TEMPORAL_NAMES
 
 # Feature name suffixes in inner-loop order
 _FEAT_SUFFIXES: list[str] = (
@@ -63,11 +56,7 @@ FEATURE_NAMES: list[str] = (
         for suffix in _FEAT_SUFFIXES
     ]
     + ASYMMETRY_NAMES
-    + WAVELET_NAMES
-    + CONNECTIVITY_NAMES
-    + COMPLEXITY_NAMES
-    + TEMPORAL_NAMES
-)  # 211 + 513 + 80 + 38 + 228 = 1070
+)  # length == 211
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -91,7 +80,7 @@ def extract_epoch_features(
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
 ) -> np.ndarray:
-    """Extract a fixed-length feature vector (``len(FEATURE_NAMES)`` dims) from one epoch.
+    """Extract a 211-dimensional feature vector from one epoch.
 
     Parameters
     ----------
@@ -109,8 +98,9 @@ def extract_epoch_features(
     Returns
     -------
     np.ndarray
-        Shape ``(len(FEATURE_NAMES),)`` = ``(1070,)``, ordered according to
-        :data:`FEATURE_NAMES`.  Missing channels are zero-padded.
+        Shape ``(211,)``, ordered according to :data:`FEATURE_NAMES`.
+        First 171 entries are per-channel statistics; last 40 are hemispheric
+        asymmetry features.
     """
     # O(1) channel lookup — avoids O(n) list.index() inside the loop.
     ch_map = {name: i for i, name in enumerate(ch_names)}
@@ -124,6 +114,7 @@ def extract_epoch_features(
     for ch in _STANDARD_19:
         idx = ch_map.get(ch)
         if idx is None:
+            # Channel absent — fill with zeros so vector length is always 211
             features.extend([0.0] * len(_FEAT_SUFFIXES))
             continue
 
@@ -152,31 +143,9 @@ def extract_epoch_features(
     asym = hemispheric_asymmetry(epoch, ch_names, sfreq=sfreq,
                                   nperseg=nperseg, freq_band=freq_band,
                                   psd_cache=psd_cache)
-    # ── New feature blocks ────────────────────────────────────────────────────
-    # Wavelet: 3 feature groups per channel (27 dims per channel, 513 total)
-    wavelet_vec = np.concatenate([
-        wavelet_features(epoch[ch_map[ch]] if ch_map.get(ch) is not None
-                         else np.zeros(epoch.shape[1]))
-        for ch in _STANDARD_19
-    ])
-
-    # Connectivity: coherence + PLV — 8 homotopic pairs × 5 bands × 2 metrics = 80 dims
-    conn_vec = connectivity_features(epoch, ch_names, sfreq=sfreq, nperseg=nperseg)
-
-    # Complexity: SampEn + LZC per channel (38 dims)
-    compl_vec = complexity_features(epoch, ch_names)
-
-    # Temporal: multi-scale stats per channel (228 dims)
-    temp_vec = epoch_temporal_stats(epoch, ch_names)
-
-    return np.concatenate([
-        np.asarray(features, dtype=np.float64),
-        asym,
-        wavelet_vec,
-        conn_vec,
-        compl_vec,
-        temp_vec,
-    ]).astype(np.float64)
+    return np.concatenate(
+        [np.asarray(features, dtype=np.float64), asym]
+    ).astype(np.float64)
 
 
 def _extract_one_file(args: tuple) -> tuple[list, list, list]:

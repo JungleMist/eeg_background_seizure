@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment
 
-- Python via **conda env `eeg_pipeline`** (`C:\ProgramData\anaconda3\envs\eeg_pipeline`), Python 3.11. Use `conda run -n eeg_pipeline` or activate it before running commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib. To recreate the environment: `conda env create -f environment.yaml` (macOS: `environment_macos.yaml`).
+- Python via **conda env `eeg_pipeline`** (`C:\ProgramData\anaconda3\envs\eeg_pipeline`), Python 3.11. Use `conda run -n eeg_pipeline` or activate it before running commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib. To recreate the environment: `conda env create -f environment.yaml` (Windows export — UTF-16, `C:\` paths baked in). On macOS, maintain a local `environment_macos.yaml` instead (gitignored, not tracked in this repo) with the same pinned versions listed under Core dependencies below.
 - Install the package in development mode: `pip install -e .`
 - Core dependencies: numpy 2.4.6, scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, joblib 1.5.3, pandas 2.3.3, matplotlib 3.10.8, pyyaml 6.0.3, pytest 9.0.2, tqdm 4.67.3, xgboost 3.2.0, shap 0.51.0, pywavelets ≥1.4 (DWT features), torch (CNN pipeline, script 08 — CPU or CUDA build).
 - **Note**: `np.trapezoid` is used (not `np.trapz`, removed in NumPy 2.0).
@@ -51,7 +51,7 @@ conda run -n eeg_pipeline python scripts/04_run_verification.py [--workers N]
 conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N] [--epoch-idx I] [--channels "FP1,FP2,T3"]
 
 # 06 — XGBoost + SHAP for all three conditions → results/xgboost/
-conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force] [--prune-shap]
+conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force]
 
 # 07 — Archive experiment config + results (xgboost AND cnn, whichever are present) → experiments/<timestamp>/
 conda run -n eeg_pipeline python scripts/07_organize_experiment.py [--name LABEL] [--config PATH] [--results-dir PATH]
@@ -71,7 +71,7 @@ Changing a `configs/default.yaml` key requires re-running all scripts at or afte
 | 1 | `01+` (all scripts) | `paths`, `dataset`, `split`, `preprocessing`, `channels.standard_19` |
 | 2 | `02+` | `channels.channel_groups`, `channels.passthrough`, `wiener` |
 | 3 | `03+` | `ica` |
-| 4 | `06` only | `ml.xgboost`, `ml.shap`, `ml.features` (wavelet/connectivity/complexity/temporal hyperparameters) |
+| 4 | `06` only | `ml.xgboost`, `ml.shap` (`ml.features` is currently dead config — see "Feature vector layout" below) |
 | 5 | `08` only | `ml.cnn` |
 
 Scripts 04 and 05 produce no cache and always re-run from existing caches — changing `verification` or `visualization` keys requires no `--force`. Script 06 additionally has a **shape guard**: if a cached `cache/features/{condition}_{split}.npz` has a different column count than the current `FEATURE_NAMES` (e.g. after a feature-engineering code change bumped the vector length), `_load_or_extract_features` raises `ValueError` naming `--force` rather than silently training on a stale/misaligned feature matrix.
@@ -106,7 +106,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
   → cache/wiener_frequency|ica/ — checkpoint 2
   → verification/           — V1 coherence, V2 transitivity, V3 frequency variation
   → visualization/          — matplotlib figures returned as plt.Figure (never call plt.show())
-  → features/extraction.py  — extract_epoch_features() → 1070-dim vector per epoch (per-channel + asymmetry + wavelet + connectivity + complexity + temporal)
+  → features/extraction.py  — extract_epoch_features() → 211-dim vector per epoch (per-channel + asymmetry)
   → ml/xgb_pipeline.py      — GridSearchCV + early stopping; subject-level aggregation
   → ml/shap_analysis.py     — TreeExplainer SHAP; band/channel aggregation; comparison plot
   → results/xgboost/        — model.joblib, metrics JSON, SHAP plots
@@ -134,11 +134,11 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/io/cache.py` | `load_or_compute` wraps any `compute_fn` with `.npz` on-disk caching; cache key = SHA-256 of `edf_path|start_sec|sfreq|bandpass`. |
 | `eeg_bg/features/_constants.py` | `_STANDARD_19` — the canonical 19-channel order. Extracted to its own module (not `extraction.py`) purely to avoid a circular import: `connectivity.py` needs the channel list to build `ALL_PAIRS` at import time, but `extraction.py` imports `connectivity.py`. |
 | `eeg_bg/features/asymmetry.py` | `hemispheric_asymmetry(epoch, ch_names, sfreq)` → `(40,)` vector; `ASYMMETRY_NAMES` — 40 strings (`"asym_{left}_{right}_{band}"`). Order is fixed; reordering invalidates saved SHAP `.npy` arrays. 8 symmetric pairs × 5 bands, formula: `(P_left − P_right) / (P_left + P_right + ε)`. |
-| `eeg_bg/features/wavelet.py` | `wavelet_features(signal)` → `(27,)` per channel (513 total across 19 channels). PyWavelets `db4`, 6-level DWT (`level 1` ≈ 32–62 Hz γ … `level 6` ≈ 0.5–2 Hz δ). 27 features/channel: detail energy per level (6), modulus-maxima mean per level (6), reconstructed-band signal stats (15). Cut from an original 66/channel (7 subgroups) on 2026-07-01 — entropy, coefficient stats, approximation-coefficient stats, modulus-maxima counts, and scale-energy ratios were dropped as redundant with existing Welch-based features and absent from SHAP top-20s. `WAVELET_NAMES` built at import time. |
-| `eeg_bg/features/connectivity.py` | `connectivity_features(epoch, ch_names, sfreq, nperseg)` → `(80,)`. Magnitude-squared coherence + Phase-Locking Value (PLV, via Hilbert transform) for `ALL_PAIRS` = the 8 homotopic pairs in `asymmetry.SYMMETRIC_PAIRS` × 5 bands × 2 metrics. Restricted from all C(19,2) = 171 pairs on 2026-07-01 — inter-hemispheric coherence/PLV is a physiologically distinct signal from power-asymmetry (already captured in `asymmetry.py`) and a documented correlate of lateralized epileptogenic networks. Bandpass+Hilbert phase is computed once per channel per band and reused across pairs for efficiency. |
-| `eeg_bg/features/complexity.py` | `complexity_features(epoch, ch_names, m, r_factor)` → `(38,)`. Sample Entropy (embedding dim `m=2`, tolerance `r=0.2×std`, `scipy.spatial.cKDTree` for O(n log n) template matching) + Lempel-Ziv Complexity (binarised at median, normalised by `n/log2(n)`) per channel. |
-| `eeg_bg/features/temporal_stats.py` | `epoch_temporal_stats(epoch, ch_names, scales)` → `(228,)`. Mean/variance/skewness/kurtosis computed per non-overlapping window then averaged across windows, at 3 scales (125/375/750 samples = 1 s/3 s/6 s at 125 Hz) per channel. |
-| `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(1070,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
+| `eeg_bg/features/wavelet.py` | `wavelet_features(signal)` → `(27,)` per channel (513 total across 19 channels). PyWavelets `db4`, 6-level DWT (`level 1` ≈ 32–62 Hz γ … `level 6` ≈ 0.5–2 Hz δ). 27 features/channel: detail energy per level (6), modulus-maxima mean per level (6), reconstructed-band signal stats (15). Cut from an original 66/channel (7 subgroups) on 2026-07-01 — entropy, coefficient stats, approximation-coefficient stats, modulus-maxima counts, and scale-energy ratios were dropped as redundant with existing Welch-based features and absent from SHAP top-20s. `WAVELET_NAMES` built at import time. **Not called from `extraction.py`** — `master` was reverted to the original 211-dim vector (per-channel + asymmetry only); this module and its own unit tests remain in the codebase, untouched, for potential future use. |
+| `eeg_bg/features/connectivity.py` | `connectivity_features(epoch, ch_names, sfreq, nperseg)` → `(80,)`. Magnitude-squared coherence + Phase-Locking Value (PLV, via Hilbert transform) for `ALL_PAIRS` = the 8 homotopic pairs in `asymmetry.SYMMETRIC_PAIRS` × 5 bands × 2 metrics. Restricted from all C(19,2) = 171 pairs on 2026-07-01 — inter-hemispheric coherence/PLV is a physiologically distinct signal from power-asymmetry (already captured in `asymmetry.py`) and a documented correlate of lateralized epileptogenic networks. Bandpass+Hilbert phase is computed once per channel per band and reused across pairs for efficiency. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
+| `eeg_bg/features/complexity.py` | `complexity_features(epoch, ch_names, m, r_factor)` → `(38,)`. Sample Entropy (embedding dim `m=2`, tolerance `r=0.2×std`, `scipy.spatial.cKDTree` for O(n log n) template matching) + Lempel-Ziv Complexity (binarised at median, normalised by `n/log2(n)`) per channel. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
+| `eeg_bg/features/temporal_stats.py` | `epoch_temporal_stats(epoch, ch_names, scales)` → `(228,)`. Mean/variance/skewness/kurtosis computed per non-overlapping window then averaged across windows, at 3 scales (125/375/750 samples = 1 s/3 s/6 s at 125 Hz) per channel. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
+| `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(211,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
 | `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. `find_optimal_threshold`: also reused by the CNN pipeline. |
 | `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×3 cross-condition publication figure). |
 | `eeg_bg/ml/cnn_model.py` | `EEGNet(n_channels=19, n_times=1000, F1, D, dropout)` — compact EEG CNN (Lawhern et al. 2018): temporal conv → depthwise spatial conv → separable conv → sigmoid. Input `(batch, 1, 19, 1000)`, output `(batch, 1)` probability. |
@@ -150,7 +150,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/features/band_power.py` | `relative_band_power(signal, sfreq, band)` → scalar; `BANDS` dict mapping name→(low, high) Hz for delta/theta/alpha/beta/gamma. |
 | `eeg_bg/features/hjorth.py` | `hjorth_parameters(signal)` → `(activity, mobility, complexity)` triple. |
 | `eeg_bg/features/spectral_entropy.py` | `spectral_entropy(signal, sfreq)` → scalar normalised Shannon entropy of PSD. |
-| `eeg_bg/features/extraction.py` (constants) | `FEATURE_NAMES` — public list of 1070 strings built at import time; positions 0–210 are positionally stable (see below) since SHAP `.npy` arrays are indexed by position. `_CONDITION_TO_SUBDIR` maps `"wiener"→"wiener_frequency"` etc. |
+| `eeg_bg/features/extraction.py` (constants) | `FEATURE_NAMES` — public list of 211 strings built at import time; positionally stable (see below) since SHAP `.npy` arrays are indexed by position. `_CONDITION_TO_SUBDIR` maps `"wiener"→"wiener_frequency"` etc. |
 
 ### Channel groups (G1–G6)
 
@@ -175,20 +175,16 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 
 ### Feature vector layout
 
-`extract_epoch_features` produces a **1070-dim vector**, built by concatenating six blocks in this order:
+`extract_epoch_features` produces the original **211-dim vector**, built by concatenating two blocks in this order:
 
 | Range | Size | Block | Detail |
 |-------|------|-------|--------|
 | `[0:171]` | 171 | Per-channel statistics | 19 channels × 9 features (`delta/theta/alpha/beta/gamma_power, hjorth_activity/mobility/complexity, spectral_entropy`), in `_STANDARD_19` order |
 | `[171:211]` | 40 | Hemispheric asymmetry | 8 pairs × 5 bands, see `ASYMMETRY_NAMES` |
-| `[211:724]` | 513 | Wavelet DWT | 19 channels × 27 features (`db4`, 6-level) — detail energy, modulus-maxima mean, reconstructed-signal stats |
-| `[724:804]` | 80 | Connectivity | 8 homotopic pairs (`asymmetry.SYMMETRIC_PAIRS`) × 5 bands × 2 metrics (coherence, PLV) |
-| `[804:842]` | 38 | Complexity | 19 channels × 2 features (SampEn, LZC) |
-| `[842:1070]` | 228 | Multi-scale temporal stats | 19 channels × 3 scales × 4 stats (mean/var/skew/kurtosis) |
 
-**Positions 0–210 are positionally stable** — this is the original 211-dim vector and predates the wavelet/connectivity/complexity/temporal blocks; reordering `standard_19` or `SYMMETRIC_PAIRS` invalidates saved SHAP `.npy` arrays (indexed by position, not name). The blocks after position 210 were added later (see `docs/superpowers/plans/2026-06-10-feature-engineering-expansion.md`) and were reduced on 2026-07-01 to curb overfitting risk against the ~124-subject training set (wavelet 66→27 features/channel, connectivity 171→8 pairs); SHAP artifacts and feature caches from before that date are not comparable to current runs.
+**This vector is positionally stable** — reordering `standard_19` or `SYMMETRIC_PAIRS` invalidates saved SHAP `.npy` arrays (indexed by position, not name). A wavelet DWT + connectivity + complexity + multi-scale temporal-stats expansion (up to 1070 dims) was integrated on top of this vector and later reverted back to it; `eeg_bg/features/{wavelet,connectivity,complexity,temporal_stats}.py` and their unit tests still exist in the codebase (see the module table above) but are not called from `extraction.py`. `aggregate_shap_by_band` in `eeg_bg/ml/shap_analysis.py` still reports `"wavelet"`/`"connectivity"`/`"complexity"`/`"temporal"` keys in `shap_by_band.json` — these will correctly show `0.0` under this 211-dim vector since no matching feature names exist (pattern-matching degrades gracefully; not a bug).
 
-**`ml.features` in `configs/default.yaml` is currently dead config** — it documents intended hyperparameters for the newer blocks (`wavelet.wavelet`/`wavelet.level`, `connectivity.nperseg`, `complexity.m`/`complexity.r_factor`, `temporal.scales`), but nothing in the codebase reads `cfg["ml"]["features"]`. `extraction.py` calls `wavelet_features()`, `complexity_features()`, and `epoch_temporal_stats()` with no extra arguments, so they silently fall back to the hardcoded defaults in their own modules (`db4`/level 6, `m=2`/`r_factor=0.2`, `scales=[125,375,750]`) — which happen to match the YAML values today, but editing the YAML has no effect. The only feature-extraction params actually threaded through from config are `preprocessing.target_sfreq`, `wiener.nperseg`, and `wiener.freq_band` (passed into `build_dataset`/`extract_epoch_features` from `scripts/06_train_xgboost.py`), which drive the per-channel block and the connectivity block's `nperseg`/`sfreq`. To actually change wavelet/complexity/temporal behavior, edit the defaults in `eeg_bg/features/{wavelet,complexity,temporal_stats}.py` directly, or wire `cfg["ml"]["features"]` through `extract_epoch_features`'s call sites.
+**`ml.features` in `configs/default.yaml` is fully dead config** — it documents hyperparameters for the disconnected blocks (`wavelet.wavelet`/`wavelet.level`, `connectivity.nperseg`, `complexity.m`/`complexity.r_factor`, `temporal.scales`), but nothing in the codebase reads `cfg["ml"]["features"]`, and `extraction.py` no longer calls `wavelet_features()`, `connectivity_features()`, `complexity_features()`, or `epoch_temporal_stats()` at all. `ml.shap.pruning_threshold` is likewise now dead config — script 06 no longer has a SHAP-pruning code path. The only feature-extraction params actually threaded through from config are `preprocessing.target_sfreq`, `wiener.nperseg`, and `wiener.freq_band` (passed into `build_dataset`/`extract_epoch_features` from `scripts/06_train_xgboost.py`), which drive the per-channel block.
 
 ### Label encoding
 
@@ -204,7 +200,7 @@ cache/
 ├── ica/ (same tree)                                       — keys: specific, n_artifacts_removed, label, subject_id, split
 └── features/{condition}_{split}.npz                       — keys: X, y, subject_ids
 ```
-The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`). `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, 1000)` tensors rather than the 1070-dim feature vectors.
+The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`). `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, 1000)` tensors rather than the 211-dim feature vectors.
 
 ### Output directory structure
 
@@ -224,11 +220,10 @@ results/
 │   │   ├── best_params.json          — GridSearchCV best hyperparameters
 │   │   ├── val_metrics.json / test_metrics.json  — {auroc, f1, accuracy}
 │   │   ├── val_predictions.csv / test_predictions.csv  — subject_id, pred_proba, true_label
-│   │   ├── shap_values_test.npy      — (n_test_epochs, 1070) raw SHAP values
+│   │   ├── shap_values_test.npy      — (n_test_epochs, 211) raw SHAP values
 │   │   ├── shap_summary.png          — beeswarm plot (top 20 features)
 │   │   ├── shap_by_band.json         — mean |SHAP| per feature-type group
 │   │   └── shap_by_channel.json      — mean |SHAP| per EEG channel
-│   ├── pruning_report.json           — features with mean |SHAP| < ml.shap.pruning_threshold (from --prune-shap)
 │   ├── comparison_summary.csv        — 3 conditions × {val_auroc, test_auroc, f1, acc}
 │   └── shap_comparison.png           — 2×3 publication comparison figure
 ├── cnn/
@@ -272,7 +267,7 @@ All tests run without real EDF data. There are four conftest scopes:
 
 - **`tests/conftest.py`** (root): `synthetic_epoch` (19-ch 1000-sample epoch with a single point source, SNR ≈ 50:1), `synthetic_epochs_batch` (batch of 5), `tmp_cache_dir`, `cfg` (deep-copied `BASE_CFG` dict).
 - **`tests/test_features/conftest.py`**: `ch_names_19`, `sfreq`, `synthetic_epoch` (simple random — independent of root fixture), `pure_sine_signal` (10 Hz sine), `constant_signal`.
-- **`tests/test_ml/conftest.py`**: `tiny_xgb_model` (10-feature, 5-estimator, session-scoped), `full_feature_xgb_model` (1070-feature, session-scoped).
+- **`tests/test_ml/conftest.py`**: `tiny_xgb_model` (10-feature, 5-estimator, session-scoped), `full_feature_xgb_model` (211-feature, session-scoped).
 - **`tests/test_ml/test_cnn_*.py`** fixtures build a `tiny_cache` tmp_path fixture: minimal `epochs/{subject_id}/data.npz` files with `epochs`/`label`/`subject_id`/`split` keys, used to smoke-test `EEGEpochDataset`, `EEGNet`, and `train_cnn` without real data or GPU.
 
 Test files under `tests/test_visualization/` must call `matplotlib.use("Agg")` **before** any `import matplotlib.pyplot` (same rule as scripts).
@@ -288,7 +283,7 @@ Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark
 - **XGBoost `n_estimators` in `param_grid` is ignored during Phase 1**: `xgb_pipeline.py` overrides it to 500 for the grid search and uses early stopping in Phase 2 to find the final tree count. The entry in `configs/default.yaml` is documentation only.
 - **`device="cuda"` automatically sets `n_jobs=1`**: `xgb_pipeline.py` detects the CUDA device setting and overrides GridSearchCV's `n_jobs` to avoid CUDA context conflicts across parallel workers. No manual change needed.
 - **ICA fits on a 1 Hz high-pass copy but applies to 0.5 Hz data**: `fit_ica()` creates a temporary high-pass-filtered copy for FastICA convergence (MNE best practice), then applies the fitted mixing matrix to the original 0.5 Hz bandpass epochs. The `specific` output in the ICA cache is in the original 0.5 Hz bandpass domain. `max_iter` (default 1000) is read from `ica.max_iter` in the config and passed directly to the MNE ICA constructor — the scikit-learn default of 200 is too low for 19-channel EEG and causes frequent `ConvergenceWarning`.
-- **`FEATURE_NAMES` (1070 entries) must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 1070)` are indexed by position against `FEATURE_NAMES`. Any reordering of channels in `configs/default.yaml` `standard_19`, of pairs in `asymmetry.SYMMETRIC_PAIRS`, or of the block order in `eeg_bg/features/extraction.py` invalidates saved SHAP arrays. Script 06 guards against a stale feature-dim mismatch and raises `ValueError` pointing at `--force`. Note: `connectivity.ALL_PAIRS` now derives from `asymmetry.SYMMETRIC_PAIRS`, so reordering `SYMMETRIC_PAIRS` invalidates both the asymmetry block *and* the connectivity block.
+- **`FEATURE_NAMES` (211 entries) must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 211)` are indexed by position against `FEATURE_NAMES`. Any reordering of channels in `configs/default.yaml` `standard_19`, of pairs in `asymmetry.SYMMETRIC_PAIRS`, or of the block order in `eeg_bg/features/extraction.py` invalidates saved SHAP arrays. Script 06 guards against a stale feature-dim mismatch and raises `ValueError` pointing at `--force`.
 - **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
 - **Scripts 01–04, 06, and 08 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers; script 08 uses PyTorch `DataLoader(num_workers=...)` instead). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 04 additionally runs V1/V2/V3 concurrently via `ThreadPoolExecutor` in Phase 2 after decomposition. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition. Script 08 defaults `num_workers=0` (main-process loading) because it's Windows-safe by default; override via `ml.cnn.num_workers` or `--workers`.
 - **Cache key composition for script 01**: the SHA-256 key is derived from `edf_path`, `target_sfreq`, and `bandpass` only. Changing `epoch_length_sec`, `artifact_threshold_uv`, or `seizure_buffer_sec` does NOT generate a new key — the existing `.npz` is silently reused unless you pass `--force`. Scripts 02 and 03 have no key-based invalidation at all; any config change to `wiener.*` or `ica.*` requires `--force` for those scripts.
@@ -297,7 +292,7 @@ Integration tests (requiring real TUEP EDF files) should be marked `@pytest.mark
 
 ## Reference Documentation
 
-- **`docs/Developer_qa.md`** — Detailed Q&A: epoch validity criteria (4 criteria with decision flow), `.npz` cache file schemas (exact keys/shapes/dtypes per cache family), feature extraction internals (band definitions, Hjorth formulae, spectral entropy formula, per-condition signal mapping). Predates the wavelet/connectivity/complexity/temporal/CNN additions — cross-check numeric claims (e.g. it describes the older 211-dim feature layout and stale label-dtype info) against the code before relying on it.
+- **`docs/Developer_qa.md`** — Detailed Q&A: epoch validity criteria (4 criteria with decision flow), `.npz` cache file schemas (exact keys/shapes/dtypes per cache family), feature extraction internals (band definitions, Hjorth formulae, spectral entropy formula, per-condition signal mapping). Its 211-dim feature-layout description is accurate again now that `master` has been reverted to this vector, but it predates the CNN pipeline and may still have stale label-dtype info — cross-check non-feature-layout numeric claims against the code before relying on them.
 - **`docs/preprocessing.md`** — Every transformation applied to raw TUEP EDF recordings before epochs are written to `cache/epochs/`: dataset discovery, reference filtering, split assignment, EDF loading, channel normalisation, bandpass filtering, resampling, unit conversion, epoch slicing, and artifact rejection.
-- **`docs/superpowers/plans/`** and **`docs/superpowers/specs/`** — implementation plans and design specs for major feature additions (Wiener framework, experiment organizer, feature-engineering expansion, CNN training). Useful for the *rationale* behind a module's design; treat exact dimension/line-number claims as historical snapshots, not current truth — the feature-engineering expansion plan, for instance, targets a 2415-dim vector, and `FEATURE_NAMES` briefly grew to 3441-dim (wavelet block reaching 66 features/channel) before being reduced to the current 1070-dim vector on 2026-07-01 to curb overfitting risk (see "Feature vector layout" above).
+- **`docs/superpowers/plans/`** and **`docs/superpowers/specs/`** — implementation plans and design specs for major feature additions (Wiener framework, experiment organizer, feature-engineering expansion, CNN training). Useful for the *rationale* behind a module's design; treat exact dimension/line-number claims as historical snapshots, not current truth — the feature-engineering expansion plan targeted a 2415-dim vector, and `FEATURE_NAMES` briefly grew to 3441-dim, then 1070-dim, before the wavelet/connectivity/complexity/temporal blocks were disconnected entirely and `master` reverted to the original 211-dim vector (see "Feature vector layout" above).
 - **`eeg_bg/README.md`** — Full package API reference: every public function signature, return type, parameter table, and usage example.

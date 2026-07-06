@@ -204,6 +204,8 @@ pip install -e .
 | tqdm | 4.67.3 | Pipeline progress bars |
 | xgboost | 3.2.0 | XGBoost classifier, GridSearchCV, early stopping |
 | shap | 0.51.0 | TreeExplainer SHAP values, beeswarm summary plots |
+| pywavelets | ≥1.4 | DWT features (`eeg_bg/features/wavelet.py` — not called from `extraction.py`, see Step 6) |
+| torch | CPU or CUDA build | EEGNet CNN pipeline (script 08) |
 
 ---
 
@@ -239,10 +241,17 @@ D:\eeg_background_seizure\
 │   │   ├── band_power.py            ← Relative band power (5 EEG bands, boxcar Welch)
 │   │   ├── hjorth.py                ← Hjorth activity / mobility / complexity
 │   │   ├── spectral_entropy.py      ← Shannon entropy of normalized PSD
-│   │   └── extraction.py           ← extract_epoch_features(), build_dataset(), FEATURE_NAMES
+│   │   ├── asymmetry.py             ← Hemispheric asymmetry (8 pairs × 5 bands)
+│   │   ├── extraction.py           ← extract_epoch_features(), build_dataset(), FEATURE_NAMES (211-dim)
+│   │   └── wavelet.py, connectivity.py, complexity.py, temporal_stats.py
+│   │                                  ← Disconnected feature blocks (not called from extraction.py;
+│   │                                     kept for potential future use, see History note above)
 │   └── ml/
-│       ├── xgb_pipeline.py          ← train_xgboost(), subject_level_predict(), evaluate_subject_level()
-│       └── shap_analysis.py         ← compute_shap_values(), aggregate/plot functions
+│       ├── xgb_pipeline.py          ← train_xgboost(), subject_level_predict(), evaluate_subject_level(), find_optimal_threshold()
+│       ├── shap_analysis.py         ← compute_shap_values(), aggregate/plot functions
+│       ├── cnn_model.py             ← EEGNet — compact EEG classification CNN (Lawhern et al. 2018)
+│       ├── cnn_dataset.py           ← EEGEpochDataset — reads the same cache/ trees as build_dataset(), yields raw tensors
+│       └── cnn_pipeline.py          ← cnn_predict_epochs(), train_cnn() — parallel CNN path, no hand-crafted features
 │
 ├── scripts/
 │   ├── 01_extract_epochs.py         ← Step 1: EDF → cached epochs (.npz)
@@ -251,7 +260,8 @@ D:\eeg_background_seizure\
 │   ├── 04_run_verification.py       ← Step 4: V1/V2/V3 verification → CSV reports
 │   ├── 05_run_visualization.py      ← Step 5: cached results → waveform + PSD figures
 │   ├── 06_train_xgboost.py         ← Step 6: feature extraction + XGBoost × 3 conditions + SHAP
-│   └── 07_organize_experiment.py   ← Step 7: archive config + results → experiments/<timestamp>/
+│   ├── 07_organize_experiment.py   ← Step 7: archive config + results → experiments/<timestamp>/
+│   └── 08_train_cnn.py             ← Step 8: EEGNet CNN trained directly on raw epoch tensors → results/cnn/
 │
 ├── configs/
 │   └── default.yaml                 ← All tunable parameters (including ml: section)
@@ -263,14 +273,9 @@ D:\eeg_background_seizure\
 │   ├── test_preprocessing/          ← epoch slicing, reference detection
 │   ├── test_decomposition/          ← wiener, wiener_scalar, ica
 │   ├── test_verification/           ← coherence V1, transitivity V2/V3
-│   ├── test_features/               ← band_power, hjorth, spectral_entropy, extraction (~16 tests)
-│   └── test_ml/                     ← xgb_pipeline, shap_analysis (~12 tests)
-│
-├── notebooks/                       ← Interactive exploration (cells to be written)
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_wiener_demo.ipynb
-│   ├── 03_ica_comparison.ipynb
-│   └── 04_verification_results.ipynb
+│   ├── test_features/               ← band_power, hjorth, spectral_entropy, extraction, asymmetry, wavelet, connectivity, complexity, temporal_stats (72 tests)
+│   ├── test_ml/                     ← xgb_pipeline, shap_analysis, CNN model/dataset/training (31 tests)
+│   └── test_scripts/                ← script 06 shape guard (1 test)
 │
 ├── experiments/                     ← Auto-generated, git-ignored
 │   └── YYYY-MM-DD_HHMMSS[_<name>]/ ← One folder per archived run (script 07)
@@ -299,11 +304,15 @@ D:\eeg_background_seizure\
 │   │   ├── v1_coherence.csv
 │   │   ├── v2_transitivity.csv
 │   │   └── v3_frequency_variation.csv
-│   └── xgboost/                     ← Outputs from script 06
-│       ├── {raw,ica,wiener}/        ← model.joblib, scaler.joblib, metrics JSONs,
-│       │                               predictions CSVs, SHAP values + plots
-│       ├── comparison_summary.csv
-│       └── shap_comparison.png
+│   ├── xgboost/                     ← Outputs from script 06
+│   │   ├── {raw,ica,wiener}/        ← model.joblib, scaler.joblib, metrics JSONs,
+│   │   │                               predictions CSVs, SHAP values + plots
+│   │   ├── comparison_summary.csv
+│   │   └── shap_comparison.png
+│   └── cnn/                         ← Outputs from script 08
+│       ├── {raw,ica,wiener}/        ← best_model.pt, best_params.json, metrics JSONs,
+│       │                               predictions CSVs
+│       └── comparison_summary.csv
 ├── setup.py
 ├── requirements.txt
 └── pytest.ini
@@ -343,7 +352,7 @@ cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/                    �
                ▼                               ▼
            Script 05                       Script 06
     [visualization] load epoch       [features] extract_epoch_features
-      + wiener_frequency + ica          × 3 conditions (171 features/epoch)
+      + wiener_frequency + ica          × 3 conditions (211 features/epoch)
     plot_multichannel_comparison       [ml] train_xgboost (GridSearchCV
     plot_psd_comparison                     + early stopping on val)
                │                       subject_level_predict
@@ -358,6 +367,8 @@ cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/                    �
                                          comparison_summary.csv
                                          shap_comparison.png
 ```
+
+**Script 08** (not shown above to keep the diagram readable) runs independently in parallel with script 06: it reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly via `EEGEpochDataset` (raw `(19, 1000)` tensors, no hand-crafted features), trains an EEGNet CNN per condition, and writes `results/cnn/{condition}/{best_model.pt, metrics JSONs, predictions CSVs}` plus a top-level `results/cnn/comparison_summary.csv`.
 
 ### Cache File Schema
 
@@ -550,11 +561,20 @@ does not yet exist):
 
 ### Step 6 — Train XGBoost Classifiers + SHAP Analysis
 
-Extracts 171 handcrafted features per epoch (relative band power × 5 bands,
-Hjorth parameters × 3, spectral entropy — for each of 19 channels) under three
-preprocessing conditions, trains an XGBoost classifier per condition via 5-fold
-GridSearchCV + early-stopping refit on the validation set, evaluates at subject
-level, and generates SHAP feature importance comparison figures.
+Extracts 211 handcrafted features per epoch — 171 per-channel features (relative
+band power × 5 bands, Hjorth parameters × 3, spectral entropy, for each of 19
+channels) plus 40 hemispheric asymmetry features (8 symmetric pairs × 5 bands) —
+under three preprocessing conditions, trains an XGBoost classifier per condition
+via 5-fold GridSearchCV + early-stopping refit on the validation set, evaluates
+at subject level, and generates SHAP feature importance comparison figures.
+
+*History:* this 211-dim vector is the original feature set. It was later expanded
+to 1070 dims (adding wavelet DWT, connectivity, complexity, and multi-scale
+temporal-stats blocks — see `eeg_bg/features/{wavelet,connectivity,complexity,
+temporal_stats}.py`), then reverted back to the original 211-dim vector to curb
+overfitting risk against the ~124-subject training set. Those four modules and
+their unit tests remain in the codebase, disconnected from `extraction.py`, for
+potential future use.
 
 ```bash
 # All three conditions (raw / ica / wiener) — default
@@ -606,6 +626,36 @@ python scripts/07_organize_experiment.py --config configs/local.yaml --name abla
 Safe to run after a partial condition re-run (e.g. `--condition wiener` in step 6)
 — the archive will contain only the conditions that have complete results.
 
+Script 07 also archives `results/cnn/` (script 08's output) alongside `results/xgboost/` whenever CNN results are present, adding a `cnn/{raw,ica,wiener}/` folder and a CNN results table in `report.md`.
+
+---
+
+### Step 8 — Train EEGNet CNN
+
+A parallel classification path that trains directly on raw `(19, 1000)` epoch
+tensors — no hand-crafted features. Reads the same `cache/{epochs,
+wiener_frequency,ica}/` trees as script 06 and trains an independent EEGNet
+(Lawhern et al. 2018) per condition: weighted BCE loss for class imbalance,
+Adam optimizer, `ReduceLROnPlateau`, and early stopping on validation AUROC.
+Has no dependency on script 06 and can run any time after 01 (+02/03 for the
+wiener/ica conditions).
+
+```bash
+# All three conditions (raw / ica / wiener) — default
+python scripts/08_train_cnn.py
+
+# Single condition
+python scripts/08_train_cnn.py --condition wiener
+
+# Force re-training even if output already exists
+python scripts/08_train_cnn.py --force
+```
+
+**Output:** `results/cnn/{condition}/` — `best_model.pt` (EEGNet state dict),
+`best_params.json`, val/test metrics JSONs, val/test predictions CSVs;
+`results/cnn/comparison_summary.csv` once all three conditions have been
+trained.
+
 ---
 
 ### Pipeline Dependency Graph
@@ -635,7 +685,7 @@ EDF files
                          experiments/<timestamp>/
 ```
 
-**Script 06 per-condition dependencies:**
+**Script 06 and script 08 per-condition dependencies** (identical for both — script 08 is not shown in the diagram above to keep it readable, but it hangs off `cache/epochs/` in parallel with 05/06/07, with no dependency on script 06):
 
 | `--condition` | Requires |
 |---------------|----------|
@@ -644,7 +694,7 @@ EDF files
 | `ica` | 01 + 03 |
 | `all` (default) | 01 + 02 + 03 |
 
-**Script 07** can be run after any subset of conditions from script 06 have completed. It discovers whichever of `{raw, ica, wiener}` have results and archives only those.
+**Script 07** can be run after any subset of conditions from script 06 and/or script 08 have completed. It discovers whichever of `{raw, ica, wiener}` have results in `results/xgboost/` and `results/cnn/` and archives only those.
 
 **Script 05** reads `cache/wiener_frequency/` and `cache/ica/` optionally — panels are omitted if those caches are absent, so it can be run after 01 alone for raw-only figures.
 
@@ -661,6 +711,7 @@ python scripts/03_run_ica.py
 python scripts/04_run_verification.py
 python scripts/05_run_visualization.py
 python scripts/06_train_xgboost.py
+python scripts/08_train_cnn.py
 python scripts/07_organize_experiment.py --name full-run
 ```
 
@@ -677,12 +728,13 @@ python scripts/03_run_ica.py                     &
 python scripts/04_run_verification.py            &
 wait
 
-# Steps 5–6: no dependency on each other — run concurrently
+# Steps 5, 6, 8: no dependency on each other — run concurrently
 python scripts/05_run_visualization.py &
 python scripts/06_train_xgboost.py     &
+python scripts/08_train_cnn.py         &
 wait
 
-# Step 7: archive results after step 6 completes
+# Step 7: archive results after steps 6 and 8 complete
 python scripts/07_organize_experiment.py --name full-run
 ```
 
@@ -806,18 +858,21 @@ conda run -n eeg_pipeline pytest tests/test_decomposition/ -v
 conda run -n eeg_pipeline pytest tests/ -m "not integration" -q
 ```
 
-**Current status:** ~96 tests, all passing.
+**Current status:** 155 tests (excluding 1 integration test), all passing.
 
 | Test module | Count | What is verified |
 |-------------|-------|-----------------|
-| `test_config.py` | 5 | YAML loading, path resolution |
-| `test_io/` | 23 | Dataset traversal, EDF channel normalisation, annotation parsing (incl. full-recording semantics), cache read/write |
-| `test_preprocessing/` | 7 | Epoch slicing, artifact rejection, bandpass filter, reference detection |
-| `test_decomposition/` | 8 | Wiener decomposition identity (`specific + coherent = raw`), scalar ablation, ICA shape |
-| `test_verification/` | 4 | V1 coherence reduction, V2/V3 DataFrame structure |
+| `test_config.py` | 3 | YAML loading, path resolution |
+| `test_io/` | 17 | Dataset traversal, EDF channel normalisation, annotation parsing (incl. full-recording semantics), cache read/write |
+| `test_preprocessing/` | 9 | Epoch slicing, artifact rejection, bandpass filter, reference detection |
+| `test_decomposition/` | 13 | Wiener decomposition identity (`specific + coherent = raw`), scalar ablation, ICA shape |
+| `test_verification/` | 5 | V1 coherence reduction, V2/V3 DataFrame structure |
 | `test_visualization/` | 4 | PSD figure shape, 3-column grid layout, config channel defaults |
-| `test_features/` | ~20 | Band power normalisation, Hjorth correctness, spectral entropy range, FEATURE_NAMES length/uniqueness, build_dataset split filtering |
-| `test_ml/` | ~12 | subject_level_predict aggregation, evaluate_subject_level keys, SHAP shape/non-negativity, plot functions create files |
+| `test_features/` | 72 | Band power normalisation, Hjorth correctness, spectral entropy range, FEATURE_NAMES length/uniqueness, build_dataset split filtering, plus the disconnected asymmetry/wavelet/connectivity/complexity/temporal_stats modules' own unit tests |
+| `test_ml/` | 31 | subject_level_predict aggregation, evaluate_subject_level keys, SHAP shape/non-negativity, plot functions create files, EEGNet/EEGEpochDataset/train_cnn smoke tests |
+| `test_scripts/` | 1 | Script 06's stale-feature-cache shape guard |
+
+CNN tests (`tests/test_ml/test_cnn_*.py`) are known to segfault on some macOS/torch environments; exclude with `-k "not cnn"` if that happens on your machine.
 
 ### Synthetic Fixture Design
 

@@ -77,51 +77,6 @@ from eeg_bg.ml.shap_analysis import (
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _write_shap_pruning_report(
-    shap_values: np.ndarray,
-    feature_names: list[str],
-    out_dir: Path,
-    threshold: float,
-) -> list[int]:
-    """Write pruning_report.json and return indices of surviving features.
-
-    Parameters
-    ----------
-    shap_values : np.ndarray
-        Shape ``(n_epochs, n_features)``.
-    feature_names : list[str]
-        Length ``n_features`` — positionally aligned with shap_values columns.
-    out_dir : Path
-        Condition output directory (e.g. ``results/xgboost/raw/``).
-    threshold : float
-        Features with mean |SHAP| < threshold are flagged for pruning.
-
-    Returns
-    -------
-    list[int]
-        Column indices of features with mean |SHAP| >= threshold (survivors).
-    """
-    mean_abs_shap = np.abs(shap_values).mean(axis=0)
-    pruned = [
-        {"feature": name, "mean_abs_shap": float(val)}
-        for name, val in zip(feature_names, mean_abs_shap)
-        if val < threshold
-    ]
-    surviving_indices = [
-        i for i, val in enumerate(mean_abs_shap) if val >= threshold
-    ]
-    report = {
-        "threshold": threshold,
-        "n_features_total": len(feature_names),
-        "n_features_pruned": len(pruned),
-        "n_features_surviving": len(surviving_indices),
-        "pruned_features": pruned,
-    }
-    out_path = out_dir / "pruning_report.json"
-    with open(out_path, "w") as f:
-        json.dump(report, f, indent=2)
-    return surviving_indices
-
 def _load_or_extract_features(
     cache_root: Path,
     feature_cache_dir: Path,
@@ -201,7 +156,6 @@ def run_condition(
     feature_cache_dir: Path,
     out_root: Path,
     force: bool,
-    prune_shap: bool = False,
 ) -> dict:
     """Full pipeline for one condition.  Returns metrics + SHAP aggregates."""
     sfreq      = float(cfg["preprocessing"]["target_sfreq"])
@@ -310,50 +264,6 @@ def run_condition(
             dpi=int(shap_cfg["dpi"]),
         )
         print(f"  SHAP saved to {out_dir / 'shap_summary.png'}")
-
-        # Pruning DECISION uses train-set SHAP, not test-set SHAP: using the
-        # test set's own ranking to choose features, then scoring the pruned
-        # model on that same test set, is test-set leakage that optimistically
-        # biases the reported pruned-model AUROC. Train has ~149k epochs, so
-        # TreeExplainer runs on a stratified subsample for speed.
-        train_shap_sample_size = min(10_000, len(X_tr_sc))
-        rng = np.random.default_rng(42)
-        sample_idx = rng.choice(len(X_tr_sc), size=train_shap_sample_size,
-                                 replace=False)
-        train_shap_vals = compute_shap_values(
-            model, X_tr_sc[sample_idx], FEATURE_NAMES
-        )
-
-        # Write pruning report (selection decision made on train-set SHAP)
-        threshold = cfg["ml"]["shap"].get("pruning_threshold", 1.0e-4)
-        surviving_idx = _write_shap_pruning_report(
-            train_shap_vals, FEATURE_NAMES, out_dir, threshold
-        )
-        print(
-            f"  Pruning report: {len(FEATURE_NAMES) - len(surviving_idx)} features "
-            f"below threshold {threshold} (out of {len(FEATURE_NAMES)})"
-        )
-
-        # Optional: retrain on pruned feature set
-        if prune_shap and len(surviving_idx) < len(FEATURE_NAMES):
-            print(
-                f"  Pruning {len(FEATURE_NAMES)} → {len(surviving_idx)} features, "
-                "retraining..."
-            )
-            pruned_names = [FEATURE_NAMES[i] for i in surviving_idx]
-            X_train_p = X_tr_sc[:, surviving_idx]
-            X_val_p   = X_val_sc[:, surviving_idx] if len(X_val_sc) else X_val_sc
-            X_test_p  = X_test_sc[:, surviving_idx]
-            model_p = train_xgboost(X_train_p, y_train, X_val_p, y_val, cfg)
-            test_df_p = subject_level_predict(model_p, X_test_p, sids_test, y_test)
-            test_metrics_p = evaluate_subject_level(test_df_p, threshold=opt_threshold)
-            pruned_out = out_dir / "pruned"
-            pruned_out.mkdir(exist_ok=True)
-            _save_json(test_metrics_p, pruned_out / "test_metrics.json")
-            with open(pruned_out / "surviving_features.json", "w") as f:
-                json.dump(pruned_names, f, indent=2)
-            joblib.dump(model_p, pruned_out / "model.joblib")
-            print(f"  Pruned model test AUROC: {test_metrics_p['auroc']:.4f}")
     else:
         band_agg = {}
         ch_agg   = {}
@@ -370,7 +280,7 @@ def run_condition(
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def main(config_path: str, condition: str, force: bool, prune_shap: bool = False) -> None:
+def main(config_path: str, condition: str, force: bool) -> None:
     cfg         = load_config(config_path)
     cache_root  = Path(cfg["paths"]["cache_dir"])
     results_dir = Path(cfg["paths"]["results_dir"])
@@ -382,7 +292,7 @@ def main(config_path: str, condition: str, force: bool, prune_shap: bool = False
 
     for cond in conditions:
         result = run_condition(
-            cond, cfg, cache_root, feat_cache, out_root, force, prune_shap,
+            cond, cfg, cache_root, feat_cache, out_root, force,
         )
         if result:
             all_results[cond] = result
@@ -445,11 +355,5 @@ if __name__ == "__main__":
         "--force", action="store_true",
         help="Re-extract features even if feature cache exists",
     )
-    parser.add_argument(
-        "--prune-shap",
-        action="store_true",
-        default=False,
-        help="After SHAP analysis, retrain on features above pruning_threshold.",
-    )
     args = parser.parse_args()
-    main(args.config, args.condition, args.force, args.prune_shap)
+    main(args.config, args.condition, args.force)

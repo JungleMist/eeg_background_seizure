@@ -1,6 +1,6 @@
 # `eeg_bg` — Package API Reference
 
-The `eeg_bg` package is organized into five sub-packages. All public functions are importable from their respective module paths. This document describes every module's purpose, public API, and internal design notes.
+The `eeg_bg` package is organized into eight sub-packages. All public functions are importable from their respective module paths. This document describes every module's purpose, public API, and internal design notes.
 
 ---
 
@@ -12,6 +12,8 @@ The `eeg_bg` package is organized into five sub-packages. All public functions a
 4. [`decomposition`](#decomposition) — Wiener and ICA signal decomposition
 5. [`verification`](#verification) — Physical validation experiments
 6. [`visualization`](#visualization) — Figure generation
+7. [`features`](#features) — Handcrafted feature extraction
+8. [`ml`](#ml) — XGBoost + SHAP and EEGNet CNN pipelines
 
 ---
 
@@ -581,11 +583,13 @@ from eeg_bg.features.extraction import extract_epoch_features, build_dataset, FE
 
 #### `FEATURE_NAMES: list[str]`
 
-Stable ordered list of 171 feature names, built at import time. Each name has the form `"{channel}_{feature}"`, e.g. `"FP1_delta_power"`, `"T3_hjorth_activity"`. Channels iterate in the canonical 19-channel order from `configs/default.yaml`; features iterate in the order `delta_power, theta_power, alpha_power, beta_power, gamma_power, hjorth_activity, hjorth_mobility, hjorth_complexity, spectral_entropy`.
+Stable ordered list of 211 feature names, built at import time by concatenating two blocks: 171 per-channel names (form `"{channel}_{feature}"`, e.g. `"FP1_delta_power"`, `"T3_hjorth_activity"`) followed by 40 hemispheric-asymmetry names from `asymmetry.ASYMMETRY_NAMES` (e.g. `"asym_FP1_FP2_delta"`). Channels iterate in the canonical 19-channel order from `configs/default.yaml`; per-channel features iterate in the order `delta_power, theta_power, alpha_power, beta_power, gamma_power, hjorth_activity, hjorth_mobility, hjorth_complexity, spectral_entropy`.
+
+*History:* this 211-dim, 2-block vector is the original feature set. It was later expanded to 1070 dims by appending wavelet DWT, connectivity, complexity, and multi-scale temporal-stats blocks (see `wavelet`, `connectivity`, `complexity`, `temporal_stats` below), then reverted back to the original 211-dim vector to curb overfitting risk against the ~124-subject training set. Those four modules and their own unit tests remain in the codebase, disconnected from `extraction.py`, for potential future use.
 
 #### `extract_epoch_features(epoch, ch_names, sfreq, nperseg=250, freq_band=(0.5, 40.0)) -> np.ndarray`
 
-Converts a single `(n_ch, n_times)` epoch into a fixed-length `(171,)` feature vector.
+Converts a single `(n_ch, n_times)` epoch into a fixed-length `(211,)` feature vector: 171 per-channel statistics followed by 40 hemispheric-asymmetry features (via `asymmetry.hemispheric_asymmetry`).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -595,11 +599,11 @@ Converts a single `(n_ch, n_times)` epoch into a fixed-length `(171,)` feature v
 | `nperseg` | `int` | Welch window length (default 250) |
 | `freq_band` | `tuple[float, float]` | Analysis band in Hz |
 
-Missing channels (not in `ch_names`) fill with zeros so the output length is always 171.
+Missing channels (not in `ch_names`) fill with zeros so the output length is always 211.
 
 ```python
 feat = extract_epoch_features(epoch, ch_names, sfreq=125.0)
-# feat.shape → (171,)
+# feat.shape → (211,)
 ```
 
 #### `build_dataset(cache_root, condition, split, sfreq, nperseg, freq_band) -> tuple[np.ndarray, np.ndarray, list[str]]`
@@ -612,7 +616,42 @@ Iterates all `.npz` files in the appropriate cache subdirectory, filters by spli
 | `"wiener"` | `cache/wiener_frequency/` | `"specific"` |
 | `"ica"` | `cache/ica/` | `"specific"` |
 
-**Returns:** `(X, y, subject_ids)` where `X` is `(n_epochs, 171)`, `y` is `(n_epochs,)` int (0=epilepsy, 1=control), and `subject_ids` is a list of one subject ID per epoch row.
+**Returns:** `(X, y, subject_ids)` where `X` is `(n_epochs, 211)`, `y` is `(n_epochs,)` int (0=epilepsy, 1=control), and `subject_ids` is a list of one subject ID per epoch row.
+
+---
+
+### `eeg_bg.features.asymmetry`
+
+```python
+from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES, SYMMETRIC_PAIRS
+```
+
+#### `SYMMETRIC_PAIRS: list[tuple[str, str]]`
+
+The 8 anatomically symmetric (left, right) electrode pairs: `(FP1,FP2), (F3,F4), (F7,F8), (C3,C4), (T3,T4), (T5,T6), (P3,P4), (O1,O2)`. Order is fixed — reordering invalidates saved SHAP `.npy` arrays, and `connectivity.ALL_PAIRS` derives from this same list.
+
+#### `hemispheric_asymmetry(epoch, ch_names, sfreq, nperseg=250, freq_band=(0.5, 40.0), psd_cache=None) -> np.ndarray`
+
+Computes `(40,)` normalised left–right power asymmetry: `(P_left - P_right) / (P_left + P_right + ε)` for each of the 8 symmetric pairs × 5 bands. Values lie in `(-1, +1)`; positive → left dominates. `psd_cache` optionally reuses PSDs already computed by `extract_epoch_features`'s per-channel loop to avoid redundant `welch()` calls. Zero-padded when either electrode in a pair is absent.
+
+#### `ASYMMETRY_NAMES: list[str]`
+
+40 names of the form `"asym_{left}_{right}_{band}"`, e.g. `"asym_FP1_FP2_delta"`.
+
+---
+
+### Disconnected feature modules
+
+These four modules are fully implemented and unit-tested, but are **not called** from `extraction.py` on the current codebase (see the History note above) — they're kept in the codebase for potential future re-integration.
+
+| Module | Function | Output | Description |
+|--------|----------|--------|-------------|
+| `wavelet.py` | `wavelet_features(signal, wavelet="db4", level=6) -> np.ndarray` | `(27,)` per channel | PyWavelets DWT: detail energy per level (6), modulus-maxima mean per level (6), reconstructed-band signal stats (15). `WAVELET_NAMES` (513 total across 19 channels). |
+| `connectivity.py` | `connectivity_features(epoch, ch_names, sfreq, nperseg) -> np.ndarray` | `(80,)` | Magnitude-squared coherence + Phase-Locking Value (via Hilbert transform) for the 8 homotopic pairs in `asymmetry.SYMMETRIC_PAIRS` × 5 bands × 2 metrics. `CONNECTIVITY_NAMES`. |
+| `complexity.py` | `complexity_features(epoch, ch_names, m=2, r_factor=0.2) -> np.ndarray` | `(38,)` | Sample Entropy + Lempel-Ziv Complexity per channel. `COMPLEXITY_NAMES`. |
+| `temporal_stats.py` | `epoch_temporal_stats(epoch, ch_names, scales=[125,375,750]) -> np.ndarray` | `(228,)` | Mean/variance/skewness/kurtosis per non-overlapping window, averaged across windows, at 3 time scales per channel. `TEMPORAL_NAMES`. |
+
+`eeg_bg/ml/shap_analysis.py::aggregate_shap_by_band` still reports `"wavelet"`, `"connectivity"`, `"complexity"`, and `"temporal"` keys in its output dict — these correctly evaluate to `0.0` under the current 211-dim vector since no matching feature names exist (pattern-matching degrades gracefully; not a bug).
 
 ---
 
@@ -621,7 +660,9 @@ Iterates all `.npz` files in the appropriate cache subdirectory, filters by spli
 ### `eeg_bg.ml.xgb_pipeline`
 
 ```python
-from eeg_bg.ml.xgb_pipeline import train_xgboost, subject_level_predict, evaluate_subject_level
+from eeg_bg.ml.xgb_pipeline import (
+    train_xgboost, subject_level_predict, evaluate_subject_level, find_optimal_threshold,
+)
 ```
 
 #### `train_xgboost(X_train, y_train, X_val, y_val, cfg) -> xgb.XGBClassifier`
@@ -638,9 +679,13 @@ Averages epoch-level `predict_proba` outputs per subject.
 
 **Returns DataFrame columns:** `subject_id`, `pred_proba` (mean across epochs), `true_label`.
 
-#### `evaluate_subject_level(subject_df) -> dict[str, float]`
+#### `find_optimal_threshold(subject_df) -> float`
 
-Computes metrics from the output of `subject_level_predict`.
+Sweeps 181 evenly-spaced thresholds in `[0.05, 0.95]` and returns the one maximising macro-averaged F1 on a subject-level DataFrame (as returned by `subject_level_predict`). Falls back to `0.5` if nothing improves on it. Used to pick a val-set-derived decision threshold that's then applied to both val and test evaluation (avoiding test-set leakage). Also reused by `eeg_bg/ml/cnn_pipeline.py::train_cnn`.
+
+#### `evaluate_subject_level(subject_df, threshold=0.5) -> dict[str, float]`
+
+Computes metrics from the output of `subject_level_predict`, thresholding `pred_proba` at `threshold` to derive class predictions.
 
 **Returns:** `{"auroc": float, "f1": float, "accuracy": float}`
 
@@ -660,23 +705,67 @@ from eeg_bg.ml.shap_analysis import (
 
 #### `compute_shap_values(model, X, feature_names) -> np.ndarray`
 
-Computes SHAP values using `shap.TreeExplainer`. Returns `(n_samples, n_features)` array for the positive class (control / label=1).
+Computes SHAP values using `shap.TreeExplainer`. Returns `(n_samples, n_features)` array. `feature_names` is accepted for documentation/API symmetry with the aggregation functions below but isn't used inside this function — the positional correspondence between `X`'s columns and `feature_names` is the caller's responsibility (see `extraction.FEATURE_NAMES`).
 
 #### `aggregate_shap_by_band(shap_values, feature_names) -> dict[str, float]`
 
-Mean `|SHAP|` grouped by feature type. Keys: `"delta"`, `"theta"`, `"alpha"`, `"beta"`, `"gamma"`, `"hjorth"`, `"spectral_entropy"`.
+Mean `|SHAP|` grouped by feature type, via substring/prefix matching against `feature_names` (not stored metadata). Keys: `"delta"`, `"theta"`, `"alpha"`, `"beta"`, `"gamma"`, `"hjorth"`, `"spectral_entropy"`, `"asymmetry"`, `"wavelet"`, `"connectivity"`, `"complexity"`, `"temporal"`. On the current 211-dim feature vector, the last four keys always evaluate to `0.0` since no wavelet/connectivity/complexity/temporal-stats feature names exist (see the "Disconnected feature modules" note in the `features` section above).
 
 #### `aggregate_shap_by_channel(shap_values, feature_names) -> dict[str, float]`
 
-Mean `|SHAP|` grouped by EEG channel. Keys are the 19 channel names.
+Mean `|SHAP|` grouped by EEG channel. Keys are the 19 channel names. Asymmetry features (`asym_` prefix) are excluded (reported under `aggregate_shap_by_band` instead); pairwise connectivity features split their `|SHAP|` 50/50 between the two channels involved.
 
-#### `plot_shap_summary(shap_values, X, feature_names, save_path, max_display=20) -> None`
+#### `plot_shap_summary(shap_values, X, feature_names, title, output_path, max_display=20, dpi=150) -> None`
 
-Beeswarm SHAP summary plot (top `max_display` features). Saves to `save_path` and does not return a figure.
+Beeswarm SHAP summary plot (top `max_display` features) via `shap.summary_plot`. Saves to `output_path` and does not return a figure.
 
-#### `plot_shap_comparison(results_dir, save_path) -> None`
+#### `plot_shap_comparison(results, output_path, dpi=200) -> None`
 
-2 × 3 publication-quality figure comparing SHAP band and channel importance across the three conditions (Raw | ICA | Wiener). Saves to `save_path`.
+2 × 3 publication-quality figure comparing SHAP band and channel importance across the three conditions (Raw | ICA | Wiener). `results` is a `dict[str, dict]` keyed by condition, each value holding pre-aggregated `"shap_by_band"`/`"shap_by_channel"` dicts (as produced by the two functions above). Saves to `output_path`.
+
+---
+
+### `eeg_bg.ml.cnn_model`
+
+```python
+from eeg_bg.ml.cnn_model import EEGNet
+```
+
+#### `EEGNet(n_channels=19, n_times=1000, F1=8, D=2, dropout=0.25)` — `nn.Module`
+
+Compact EEG classification CNN (Lawhern et al. 2018, *EEGNet*). Three blocks: temporal conv (learns frequency-band-like filters along time) → depthwise spatial conv (combines channels within each temporal filter, `F2 = F1 * D` filters) → separable temporal conv (compact temporal refinement) → `Linear` + `Sigmoid`. `forward(x)` takes `x` of shape `(batch, 1, n_channels, n_times)` and returns `(batch, 1)` probabilities in `[0, 1]`.
+
+---
+
+### `eeg_bg.ml.cnn_dataset`
+
+```python
+from eeg_bg.ml.cnn_dataset import EEGEpochDataset
+```
+
+#### `EEGEpochDataset(cache_root, condition, split)` — `torch.utils.data.Dataset`
+
+Reads the same `cache/{epochs,wiener_frequency,ica}/` trees as `extraction.build_dataset`, but yields raw epoch tensors instead of hand-crafted feature vectors — loads all matching epochs eagerly into memory. `__getitem__` returns `(epoch_tensor, label, subject_id)` where `epoch_tensor` has shape `(1, 19, 1000)` and is z-scored independently per channel (`(x - mean) / (std + 1e-8)` over the time axis). Raises `ValueError`/`FileNotFoundError` for an unrecognised `condition` or a missing cache subdirectory, mirroring `build_dataset`.
+
+---
+
+### `eeg_bg.ml.cnn_pipeline`
+
+```python
+from eeg_bg.ml.cnn_pipeline import cnn_predict_epochs, train_cnn
+```
+
+#### `cnn_predict_epochs(model, dataloader, device="cpu") -> pd.DataFrame`
+
+Runs `model` over `dataloader` in eval mode and averages epoch-level probabilities per subject, mirroring `xgb_pipeline.subject_level_predict`.
+
+**Returns DataFrame columns:** `subject_id`, `pred_proba`, `true_label`.
+
+#### `train_cnn(condition, cfg, out_dir, force=False) -> dict`
+
+Full training loop for one condition: builds `EEGEpochDataset`/`DataLoader` for train/val/test, constructs an `EEGNet` sized from `cfg["ml"]["cnn"]` (`F1`, `D`, `dropout`) with `n_times` inferred from the actual data, trains with class-balanced weighted BCE loss (`pos_weight` from the train-split class ratio), `Adam` + `ReduceLROnPlateau` (mode `"max"` on val AUROC), and early stopping (`patience` epochs without val-AUROC improvement). Reuses `find_optimal_threshold`/`evaluate_subject_level` from `xgb_pipeline.py` for threshold selection and final metrics. If `force=False` and `out_dir/val_metrics.json` already exists, skips training and returns the cached metrics.
+
+**Returns:** `{"val": {...}, "test": {...}}` metric dicts. **Writes** `best_model.pt` (state dict), `best_params.json`, `val_metrics.json`/`test_metrics.json`, `val_predictions.csv`/`test_predictions.csv` to `out_dir`.
 
 ---
 
