@@ -60,16 +60,18 @@ FEATURE_NAMES: list[str] = (
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
-    "raw":    "epochs",
-    "wiener": "wiener_frequency",
-    "ica":    "ica",
+    "raw":              "epochs",
+    "wiener":           "wiener_frequency",
+    "ica":              "ica",
+    "wiener_zerophase": "wiener_zerophase",
 }
 
 # NPZ array key that holds the signal data for each condition
 _CONDITION_TO_KEY: dict[str, str] = {
-    "raw":    "epochs",
-    "wiener": "specific",
-    "ica":    "specific",
+    "raw":              "epochs",
+    "wiener":           "specific",
+    "ica":              "specific",
+    "wiener_zerophase": "specific",
 }
 
 

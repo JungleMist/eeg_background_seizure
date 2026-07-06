@@ -220,13 +220,14 @@ def plot_shap_comparison(
     output_path: Path,
     dpi: int = 200,
 ) -> None:
-    """2 × 3 publication figure comparing SHAP importance across conditions.
+    """2 × 4 publication figure comparing SHAP importance across conditions.
 
     Parameters
     ----------
     results : dict[str, dict]
-        Keys must include ``"raw"``, ``"ica"``, ``"wiener"``.  Each value is a
-        dict with keys ``"shap_by_band"`` and ``"shap_by_channel"``.
+        Keys must include ``"raw"``, ``"ica"``, ``"wiener"``,
+        ``"wiener_zerophase"``.  Each value is a dict with keys
+        ``"shap_by_band"`` and ``"shap_by_channel"``.
     output_path : Path
         Destination PNG file.
     dpi : int
@@ -237,15 +238,15 @@ def plot_shap_comparison(
     Row 1 (top):    Bar chart — mean |SHAP| per frequency-band feature group.
     Row 2 (bottom): Horizontal bar chart — mean |SHAP| per channel.
 
-    Columns (left → right): Raw (C) | ICA (B) | Wiener (A).
+    Columns (left → right): Raw (C) | ICA (B) | Wiener (A) | Wiener Zero-Phase (D).
     Same y-axis scale within each row for direct cross-condition comparison.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    condition_order  = ["raw", "ica", "wiener"]
-    condition_labels = ["Raw (C)", "ICA (B)", "Wiener (A)"]
-    col_colors       = ["#888888", "#E07B54", "#4C8BBE"]
+    condition_order  = ["raw", "ica", "wiener", "wiener_zerophase"]
+    condition_labels = ["Raw (C)", "ICA (B)", "Wiener (A)", "Wiener Zero-Phase (D)"]
+    col_colors       = ["#888888", "#E07B54", "#4C8BBE", "#5A9367"]
 
     band_keys = list(BANDS.keys()) + [
         "hjorth", "spectral_entropy", "asymmetry",
@@ -259,8 +260,8 @@ def plot_shap_comparison(
     ch_order = sorted(ref_ch, key=lambda c: ref_ch.get(c, 0), reverse=True)
 
     fig, axes = plt.subplots(
-        2, 3,
-        figsize=(14, 9),
+        2, 4,
+        figsize=(18, 9),
         sharey="row",
     )
 
@@ -299,7 +300,8 @@ def plot_shap_comparison(
         ax1.tick_params(labelsize=8)
 
     fig.suptitle(
-        "SHAP Feature Importance: Raw (C) vs ICA (B) vs Wiener Specific (A)",
+        "SHAP Feature Importance: Raw (C) vs ICA (B) vs Wiener Specific (A) "
+        "vs Wiener Zero-Phase (D)",
         fontsize=11, fontweight="bold",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])

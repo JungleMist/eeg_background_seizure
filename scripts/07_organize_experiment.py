@@ -3,7 +3,7 @@ cross-condition summary, regenerate the SHAP comparison figure, and write
 both a human-readable ``report.md`` and a machine-readable ``experiment.json``
 into a timestamped ``experiments/<run>/`` folder.
 
-The script discovers whichever conditions (raw / ica / wiener) currently have
+The script discovers whichever conditions (raw / ica / wiener / wiener_zerophase) currently have
 results in ``results/xgboost/`` and captures only those.  This means it is
 safe to run even after a partial re-run (e.g. ``--condition wiener`` in
 script 06) — the cross-condition summary and SHAP comparison figure are always
@@ -26,7 +26,7 @@ experiments/YYYY-MM-DD_HHMMSS[_<name>]/
     report.md                   — human-readable summary
     comparison_summary.csv      — re-derived from per-condition metrics JSONs
     shap_comparison.png         — re-generated via plot_shap_comparison()
-    {raw,ica,wiener}/           — present only when that condition has results
+    {raw,ica,wiener,wiener_zerophase}/  — present only when that condition has results
         val_metrics.json
         test_metrics.json
         best_params.json
@@ -53,7 +53,7 @@ from eeg_bg.ml.shap_analysis import plot_shap_comparison
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-CONDITIONS = ["raw", "ica", "wiener"]
+CONDITIONS = ["raw", "ica", "wiener", "wiener_zerophase"]
 
 # Files to copy from results/xgboost/{condition}/ into the experiment archive.
 _CONDITION_FILES = [

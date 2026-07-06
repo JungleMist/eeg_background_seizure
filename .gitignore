@@ -10,6 +10,7 @@ __pycache__/
 /.vscode
 .DS_Store
 configs/local*.yaml
+environment_macos.yaml
 
 # Untrack results plots
 plot_chgroups_auto.py

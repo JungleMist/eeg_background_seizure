@@ -37,7 +37,7 @@ All scripts accept `--config configs/default.yaml` (default) and `--force` to re
 conda run -n eeg_pipeline python scripts/01_extract_epochs.py [--force] [--workers N]
 
 # 02 — Wiener decomposition on cached epochs → cache/wiener_frequency/
-conda run -n eeg_pipeline python scripts/02_run_wiener.py [--mode frequency|scalar] [--force] [--workers N]
+conda run -n eeg_pipeline python scripts/02_run_wiener.py [--mode frequency|scalar|zerophase] [--force] [--workers N]
 
 # 03 — ICA ablation → cache/ica/
 conda run -n eeg_pipeline python scripts/03_run_ica.py [--force] [--workers N]
@@ -50,8 +50,8 @@ conda run -n eeg_pipeline python scripts/04_run_verification.py [--workers N]
 # 05 — Per-subject waveform and PSD figures → results/figures/{subject_id}/
 conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N] [--epoch-idx I] [--channels "FP1,FP2,T3"]
 
-# 06 — XGBoost + SHAP for all three conditions → results/xgboost/
-conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|all] [--force]
+# 06 — XGBoost + SHAP for all four conditions → results/xgboost/
+conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|wiener_zerophase|all] [--force]
 
 # 07 — Archive experiment config + results (xgboost AND cnn, whichever are present) → experiments/<timestamp>/
 conda run -n eeg_pipeline python scripts/07_organize_experiment.py [--name LABEL] [--config PATH] [--results-dir PATH]
@@ -124,6 +124,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/preprocessing/epoch.py` | `slice_epochs` — cuts fixed-length (8 s) epochs from a continuous recording; rejects epochs where any channel exceeds `artifact_threshold_uv` (200 µV). |
 | `eeg_bg/decomposition/wiener.py` | Core Wiener filter: `estimate_cross_psd` → `compute_wiener_filter` → `apply_wiener_filter` → `decompose_epoch` / `decompose_subject`. Returns `WienerResult` (raw, specific, coherent, filters dict, skipped_pairs). |
 | `eeg_bg/decomposition/wiener_scalar.py` | Fixed-scalar ablation baseline for comparison. |
+| `eeg_bg/decomposition/wiener_zerophase.py` | Real-constrained ("zerophase") per-frequency Wiener ablation: solves `Re(S_ref) h = Re(s_cross)` per frequency bin instead of the unconstrained complex solve, testing the hypothesis that volume-conducted artifact has ~zero phase lag while independent neural signal does not. |
 | `eeg_bg/decomposition/ica.py` | `fit_ica` uses FP1/FP2 as artifact-reference channels; `apply_ica` removes components correlated above `artifact_corr_threshold`. Stores cleaned signal as `specific` key (mirrors Wiener). |
 | `eeg_bg/verification/coherence.py` | V1: pairwise coherence matrix before/after decomposition (`run_v1`). Uses `freq_resolution_hz` (not `nperseg`) to set estimation window so coherence averaging is valid. |
 | `eeg_bg/verification/transitivity.py` | V2: single-point-source transitivity constraint; V3: frequency variation of \|h(f)\| across target band. |
@@ -140,7 +141,7 @@ EDF files (TUEP v3.1.0, D:/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/features/temporal_stats.py` | `epoch_temporal_stats(epoch, ch_names, scales)` → `(228,)`. Mean/variance/skewness/kurtosis computed per non-overlapping window then averaged across windows, at 3 scales (125/375/750 samples = 1 s/3 s/6 s at 125 Hz) per channel. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
 | `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(211,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
 | `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. `find_optimal_threshold`: also reused by the CNN pipeline. |
-| `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×3 cross-condition publication figure). |
+| `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×4 cross-condition publication figure: raw/ica/wiener/wiener_zerophase). |
 | `eeg_bg/ml/cnn_model.py` | `EEGNet(n_channels=19, n_times=1000, F1, D, dropout)` — compact EEG CNN (Lawhern et al. 2018): temporal conv → depthwise spatial conv → separable conv → sigmoid. Input `(batch, 1, 19, 1000)`, output `(batch, 1)` probability. |
 | `eeg_bg/ml/cnn_dataset.py` | `EEGEpochDataset(cache_root, condition, split)` — PyTorch `Dataset` reading the same `cache/{epochs,wiener_frequency,ica}/` trees as `build_dataset`; yields `(epoch_tensor, label, subject_id)` with each channel z-scored independently. |
 | `eeg_bg/ml/cnn_pipeline.py` | `cnn_predict_epochs`: batched inference → subject-level DataFrame (epoch probas averaged per subject). `train_cnn`: training loop (weighted BCE for class imbalance, Adam, `ReduceLROnPlateau`, early stopping on val AUROC); writes `best_model.pt` + metrics/predictions to `out_dir`. Reuses `find_optimal_threshold`/`evaluate_subject_level` from `xgb_pipeline.py`. |
@@ -197,10 +198,11 @@ cache/
 ├── epochs/{label_prefix}_{subject_id}/{sha256_key}.npz   — keys: epochs, ch_names, label, subject_id, split
 ├── wiener_frequency/ (same tree)                          — keys: specific, coherent, label, subject_id, split
 ├── wiener_scalar/ (same tree)                             — keys: specific, coherent, label, subject_id, split (--mode scalar output)
+├── wiener_zerophase/ (same tree)                          — keys: specific, coherent, label, subject_id, split (--mode zerophase output)
 ├── ica/ (same tree)                                       — keys: specific, n_artifacts_removed, label, subject_id, split
 └── features/{condition}_{split}.npz                       — keys: X, y, subject_ids
 ```
-The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`). `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, 1000)` tensors rather than the 211-dim feature vectors.
+The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`); the `wiener_zerophase` condition maps to `cache/wiener_zerophase/` directly (name matches). `wiener_zerophase` is wired into `scripts/06_train_xgboost.py` (a 4th `--condition`, included in `all`) but **not** into the CNN pipeline — `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` and `scripts/08_train_cnn.py` still only support `raw`/`ica`/`wiener`. `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, 1000)` tensors rather than the 211-dim feature vectors.
 
 ### Output directory structure
 
@@ -214,7 +216,7 @@ results/
 │   ├── v2_transitivity.csv
 │   └── v3_frequency_variation.csv
 ├── xgboost/
-│   ├── {raw,ica,wiener}/
+│   ├── {raw,ica,wiener,wiener_zerophase}/
 │   │   ├── model.joblib              — fitted XGBClassifier
 │   │   ├── scaler.joblib             — StandardScaler (fit on train)
 │   │   ├── best_params.json          — GridSearchCV best hyperparameters
@@ -224,8 +226,8 @@ results/
 │   │   ├── shap_summary.png          — beeswarm plot (top 20 features)
 │   │   ├── shap_by_band.json         — mean |SHAP| per feature-type group
 │   │   └── shap_by_channel.json      — mean |SHAP| per EEG channel
-│   ├── comparison_summary.csv        — 3 conditions × {val_auroc, test_auroc, f1, acc}
-│   └── shap_comparison.png           — 2×3 publication comparison figure
+│   ├── comparison_summary.csv        — 4 conditions × {val_auroc, test_auroc, f1, acc}
+│   └── shap_comparison.png           — 2×4 publication comparison figure
 ├── cnn/
 │   ├── {raw,ica,wiener}/
 │   │   ├── best_model.pt             — EEGNet state_dict
@@ -249,7 +251,7 @@ experiments/<timestamp>_<name>/
 ├── report.md                — human-readable summary table(s), including a CNN results table if any CNN results are found
 ├── comparison_summary.csv   — re-derived from results/xgboost/
 ├── shap_comparison.png      — re-generated from per-condition SHAP data
-├── {raw,ica,wiener}/        — per-condition XGBoost JSON files (metrics, SHAP by band/channel, best_params)
+├── {raw,ica,wiener,wiener_zerophase}/  — per-condition XGBoost JSON files (metrics, SHAP by band/channel, best_params)
 └── cnn/{raw,ica,wiener}/    — per-condition CNN result files (only for conditions with a test_metrics.json)
 ```
 

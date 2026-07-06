@@ -116,9 +116,10 @@ def test_plot_shap_comparison_creates_file(tmp_path):
     ch_agg   = aggregate_shap_by_channel(sv, FEATURE_NAMES)
 
     results = {
-        "raw":    {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
-        "ica":    {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
-        "wiener": {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
+        "raw":              {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
+        "ica":              {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
+        "wiener":           {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
+        "wiener_zerophase": {"shap_by_band": band_agg, "shap_by_channel": ch_agg},
     }
     out = tmp_path / "shap_comparison.png"
     plot_shap_comparison(results, output_path=out, dpi=72)

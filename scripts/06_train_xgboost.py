@@ -1,14 +1,14 @@
-"""Train XGBoost classifiers and generate SHAP analysis for three preprocessing conditions.
+"""Train XGBoost classifiers and generate SHAP analysis for four preprocessing conditions.
 
-For each condition (raw / ica / wiener), the script:
+For each condition (raw / ica / wiener / wiener_zerophase), the script:
   1. Loads or extracts handcrafted features (see FEATURE_NAMES) from the NPZ caches.
   2. Scales features with ``StandardScaler`` (fit on train, applied to val/test).
   3. Trains an ``XGBClassifier`` via 5-fold GridSearchCV + early-stopping refit.
   4. Evaluates at subject level (mean of per-epoch ``predict_proba``).
   5. Computes SHAP values on the test set and saves per-condition analysis files.
 
-When all three conditions have been processed (``--condition all``), a
-cross-condition comparison CSV and a 2 × 3 publication SHAP figure are written.
+When all four conditions have been processed (``--condition all``), a
+cross-condition comparison CSV and a 2 × 4 publication SHAP figure are written.
 
 Usage
 -----
@@ -38,8 +38,8 @@ results/xgboost/{condition}/
     data_stats.json        — {train,val,test} subject + epoch counts
 
 results/xgboost/
-    comparison_summary.csv — 3 conditions × {val_auroc, test_auroc, f1, acc}
-    shap_comparison.png    — 2×3 publication figure (after --condition all)
+    comparison_summary.csv — 4 conditions × {val_auroc, test_auroc, f1, acc}
+    shap_comparison.png    — 2×4 publication figure (after --condition all)
 """
 import argparse
 import json
@@ -287,7 +287,7 @@ def main(config_path: str, condition: str, force: bool) -> None:
     feat_cache  = cache_root / "features"
     out_root    = results_dir / "xgboost"
 
-    conditions = ["raw", "ica", "wiener"] if condition == "all" else [condition]
+    conditions = ["raw", "ica", "wiener", "wiener_zerophase"] if condition == "all" else [condition]
     all_results: dict[str, dict] = {}
 
     for cond in conditions:
@@ -318,13 +318,13 @@ def main(config_path: str, condition: str, force: bool) -> None:
         print(f"\nComparison summary saved to {summary_path}")
 
         # ── SHAP comparison figure ────────────────────────────────────────────
-        if all(c in all_results for c in ["raw", "ica", "wiener"]):
+        if all(c in all_results for c in ["raw", "ica", "wiener", "wiener_zerophase"]):
             shap_results = {
                 c: {
                     "shap_by_band":    all_results[c].get("shap_by_band", {}),
                     "shap_by_channel": all_results[c].get("shap_by_channel", {}),
                 }
-                for c in ["raw", "ica", "wiener"]
+                for c in ["raw", "ica", "wiener", "wiener_zerophase"]
             }
             comp_fig_path = out_root / "shap_comparison.png"
             plot_shap_comparison(
@@ -347,7 +347,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--condition",
-        choices=["raw", "ica", "wiener", "all"],
+        choices=["raw", "ica", "wiener", "wiener_zerophase", "all"],
         default="all",
         help="Preprocessing condition to train (default: all)",
     )
