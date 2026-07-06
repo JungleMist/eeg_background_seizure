@@ -18,8 +18,13 @@ def _process_wiener_file(args):
     if out_path.exists() and not force:
         return (npz_path.name, "cached", None)
 
-    from eeg_bg.decomposition import wiener as wiener_freq, wiener_scalar
-    decompose = wiener_freq.decompose_epoch if mode == "frequency" else wiener_scalar.decompose_epoch
+    from eeg_bg.decomposition import wiener as wiener_freq, wiener_scalar, wiener_zerophase
+    _mode_dispatch = {
+        "frequency": wiener_freq.decompose_epoch,
+        "scalar": wiener_scalar.decompose_epoch,
+        "zerophase": wiener_zerophase.decompose_epoch,
+    }
+    decompose = _mode_dispatch[mode]
 
     try:
         data = np.load(npz_path, allow_pickle=True)
@@ -75,7 +80,7 @@ def main(config_path: str, mode: str = "frequency", force: bool = False,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Wiener decomposition on cached epochs")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--mode", choices=["frequency", "scalar"], default="frequency")
+    parser.add_argument("--mode", choices=["frequency", "scalar", "zerophase"], default="frequency")
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
         "--workers", type=int, default=None,

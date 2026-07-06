@@ -197,7 +197,16 @@ channels:
 wiener:
   mode: "frequency"           # categorical: "frequency" (per-frequency Wiener
                               #   filter, script 02) | "scalar" (fixed-scalar
-                              #   ablation baseline, wiener_scalar.py)
+                              #   ablation baseline, wiener_scalar.py) |
+                              #   "zerophase" (real-constrained per-frequency
+                              #   filter, wiener_zerophase.py).
+                              #   NOTE: this key is documentation only — script
+                              #   02's actual mode comes from its own --mode
+                              #   CLI flag, not this value. The only place
+                              #   this key is read is
+                              #   scripts/07_organize_experiment.py, which
+                              #   just archives the string into experiment
+                              #   metadata.
   nperseg: 250                # Welch window for filter estimation (samples).
                               #   PAIRED: ≤ target_sfreq × epoch_length_sec
                               #   Formula: target_sfreq × window_sec
