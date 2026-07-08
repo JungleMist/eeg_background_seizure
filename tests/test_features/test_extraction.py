@@ -173,6 +173,31 @@ def test_build_dataset_wiener_zerophase_condition(tmp_path):
     assert len(sids) == 3
 
 
+def test_build_dataset_wiener_phasegated_condition(tmp_path):
+    """wiener_phasegated resolves to cache/wiener_phasegated/specific."""
+    rng = np.random.default_rng(6)
+    ep_arr = rng.standard_normal((3, 19, 1000)).astype(np.float64)
+    path = tmp_path / "wiener_phasegated" / "s001" / "ep.npz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        specific=ep_arr,
+        ch_names=np.array(["FP1", "FP2", "F3", "F4", "F7", "F8", "C3", "C4",
+                            "T3", "T4", "T5", "T6", "P3", "P4", "O1", "O2",
+                            "Fz", "Cz", "Pz"], dtype=object),
+        label=0,
+        subject_id="s001",
+        split="train",
+    )
+
+    X, y, sids = build_dataset(tmp_path, "wiener_phasegated", "train",
+                                sfreq=125.0, nperseg=250,
+                                freq_band=(0.5, 40.0))
+    assert X.shape == (3, 211)
+    assert y.shape == (3,)
+    assert len(sids) == 3
+
+
 def test_feature_names_first_211_unchanged():
     """Positions 0–210 must match the original 211-dim vector exactly."""
     from eeg_bg.features.asymmetry import ASYMMETRY_NAMES

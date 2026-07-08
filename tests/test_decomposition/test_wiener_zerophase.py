@@ -51,7 +51,8 @@ def test_zerophase_matches_real_part_for_single_reference(synthetic_epoch):
     """For a 2-channel (single-reference) group, the real-constrained solve
     is mathematically identical to Re(h_complex), since both reduce to
     Re(S_ij)/S_jj (S_jj is already real). Not true in general for
-    2-reference (3-channel chain) groups.
+    2-reference (3-channel chain) groups. With the zero-referenced phase gate,
+    this old behaviour is preserved when the threshold is pi.
     """
     epoch, ch_names, cfg, *_ = synthetic_epoch
     sfreq = cfg["preprocessing"]["target_sfreq"]
@@ -61,9 +62,35 @@ def test_zerophase_matches_real_part_for_single_reference(synthetic_epoch):
 
     _, S = estimate_cross_psd(pair_data, sfreq, nperseg)
     h_complex = compute_wiener_filter(S, target_idx=0)
-    h_real = compute_zerophase_filter(S, target_idx=0)
+    h_real = compute_zerophase_filter(
+        S, target_idx=0, phase_gate_threshold_rad=np.pi
+    )
 
     np.testing.assert_allclose(h_real, h_complex.real, atol=1e-10)
+
+
+def test_zerophase_blocks_antiphase_filter_below_pi_threshold():
+    S = np.zeros((2, 2, 1), dtype=complex)
+    S[0, 0, 0] = 1.0
+    S[1, 1, 0] = 1.0
+    S[0, 1, 0] = -1.0
+    S[1, 0, 0] = -1.0
+
+    h_strict = compute_zerophase_filter(
+        S,
+        target_idx=0,
+        phase_gate_threshold_rad=0.0,
+        reg_factor=0.0,
+    )
+    h_old = compute_zerophase_filter(
+        S,
+        target_idx=0,
+        phase_gate_threshold_rad=np.pi,
+        reg_factor=0.0,
+    )
+
+    np.testing.assert_array_equal(h_strict, np.zeros((1, 1)))
+    np.testing.assert_allclose(h_old, np.array([[-1.0]]))
 
 
 def test_zerophase_passthrough_unchanged(synthetic_epoch):

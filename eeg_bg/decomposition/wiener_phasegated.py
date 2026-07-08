@@ -1,21 +1,11 @@
 """
-Ablation: zero-phase Wiener mode. Constrains the per-frequency filter h(f)
-to be real-valued rather than the unconstrained complex solve in wiener.py,
-while keeping full per-frequency resolution (unlike the band-averaged scalar
-in wiener_scalar.py).
+Zero-referenced phase-gated complex Wiener mode.
 
-Physical motivation: EEG-frequency tissue conduction is quasi-static, so
-genuine volume-conducted/myogenic interference between electrodes should
-show ~zero phase lag; independent neural sources should not. This module now
-uses a zero-referenced phase gate, so phase difference pi is treated as the
-maximum phase difference rather than zero-lag polarity reversal.
-
-Math: minimizing E[|X_i(f) - h^T X_ref(f)|^2] over real h at a fixed
-frequency bin gives the normal equations Re(S_ref(f)) h(f) = Re(s_cross(f)).
-For single-reference (2-channel) groups this is identical to
-Re(h_complex(f)) from compute_wiener_filter, since the auto-spectrum on the
-diagonal is already real. For 2-reference (3-channel chain) groups it is a
-genuine 2x2 real solve, not an approximation of the complex one.
+This mode first estimates the standard complex per-frequency Wiener filter,
+then keeps only reference/frequency coefficients whose target-reference
+cross-spectrum phase is close enough to 0.  Phase difference pi is treated as
+the maximum phase difference, so anti-phase coherent components are preserved
+unless ``wiener.phase_gate_threshold_rad`` is set to pi.
 """
 from __future__ import annotations
 
@@ -31,44 +21,19 @@ from eeg_bg.decomposition.phase_gate import (
 from eeg_bg.decomposition.wiener import (
     WienerResult,
     estimate_cross_psd,
+    compute_wiener_filter,
     apply_wiener_filter,
 )
 
 
-def compute_zerophase_filter(
-    S: np.ndarray,   # (n_ch, n_ch, n_freqs)
+def compute_phasegated_filter(
+    S: np.ndarray,
     target_idx: int,
-    phase_gate_threshold_rad: float = np.pi,
+    phase_gate_threshold_rad: float,
     reg_factor: float = 1e-4,
 ) -> np.ndarray:
-    """Real-constrained per-frequency Wiener filter with phase gating.
-
-    Solves Re(S_ref(f)) @ h(f) = Re(s_cross(f)) at each frequency bin.  Uses
-    the same Tikhonov diagonal-loading regularisation as compute_wiener_filter
-    in wiener.py, applied to the real matrices.  The final real filter is then
-    multiplied by zero-referenced phase-gate weights derived from the original
-    complex cross-spectrum.
-
-    Returns
-    -------
-    h : np.ndarray, shape ``(n_ref, n_freqs)``, real (float64)
-    """
-    n_ch = S.shape[0]
-    n_freqs = S.shape[2]
-    ref_indices = [i for i in range(n_ch) if i != target_idx]
-    n_ref = len(ref_indices)
-    h = np.zeros((n_ref, n_freqs), dtype=np.float64)
-
-    for f in range(n_freqs):
-        S_ref = np.real(S[np.ix_(ref_indices, ref_indices)][:, :, f])
-        s_cross = np.real(S[target_idx, ref_indices, f])
-        eps = reg_factor * max(float(np.diag(S_ref).mean()), 1e-30)
-        S_ref_reg = S_ref + eps * np.eye(n_ref, dtype=np.float64)
-        try:
-            h[:, f] = np.linalg.solve(S_ref_reg, s_cross)
-        except np.linalg.LinAlgError:
-            pass
-
+    """Return a complex Wiener filter after zero-referenced phase gating."""
+    h = compute_wiener_filter(S, target_idx=target_idx, reg_factor=reg_factor)
     weights = phase_gate_weights(S, target_idx, phase_gate_threshold_rad)
     return h * weights
 
@@ -121,7 +86,7 @@ def decompose_epoch(
         group_filters: dict[str, np.ndarray] = {}
         group_unstable = False
         for local_idx, ch in enumerate(pair):
-            h = compute_zerophase_filter(
+            h = compute_phasegated_filter(
                 S,
                 target_idx=local_idx,
                 phase_gate_threshold_rad=phase_gate_threshold,

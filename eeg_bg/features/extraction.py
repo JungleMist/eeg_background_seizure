@@ -63,6 +63,7 @@ _CONDITION_TO_SUBDIR: dict[str, str] = {
     "raw":              "epochs",
     "wiener":           "wiener_frequency",
     "ica":              "ica",
+    "wiener_phasegated": "wiener_phasegated",
     "wiener_zerophase": "wiener_zerophase",
 }
 
@@ -71,6 +72,7 @@ _CONDITION_TO_KEY: dict[str, str] = {
     "raw":              "epochs",
     "wiener":           "specific",
     "ica":              "specific",
+    "wiener_phasegated": "specific",
     "wiener_zerophase": "specific",
 }
 

@@ -3,7 +3,8 @@ cross-condition summary, regenerate the SHAP comparison figure, and write
 both a human-readable ``report.md`` and a machine-readable ``experiment.json``
 into a timestamped ``experiments/<run>/`` folder.
 
-The script discovers whichever conditions (raw / ica / wiener / wiener_zerophase) currently have
+The script discovers whichever XGBoost conditions (raw / ica / wiener /
+wiener_phasegated / wiener_zerophase) currently have
 results in ``results/xgboost/`` and captures only those.  This means it is
 safe to run even after a partial re-run (e.g. ``--condition wiener`` in
 script 06) — the cross-condition summary and SHAP comparison figure are always
@@ -26,7 +27,8 @@ experiments/YYYY-MM-DD_HHMMSS[_<name>]/
     report.md                   — human-readable summary
     comparison_summary.csv      — re-derived from per-condition metrics JSONs
     shap_comparison.png         — re-generated via plot_shap_comparison()
-    {raw,ica,wiener,wiener_zerophase}/  — present only when that condition has results
+    {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
+        — present only when that condition has results
         val_metrics.json
         test_metrics.json
         best_params.json
@@ -53,7 +55,10 @@ from eeg_bg.ml.shap_analysis import plot_shap_comparison
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-CONDITIONS = ["raw", "ica", "wiener", "wiener_zerophase"]
+XGB_CONDITIONS = [
+    "raw", "ica", "wiener", "wiener_phasegated", "wiener_zerophase",
+]
+CNN_CONDITIONS = ["raw", "ica", "wiener"]
 
 # Files to copy from results/xgboost/{condition}/ into the experiment archive.
 _CONDITION_FILES = [
@@ -91,6 +96,7 @@ _SNAPSHOT_KEYS: list[tuple[str, list[str]]] = [
     ("wiener.nperseg",          ["wiener", "nperseg"]),
     ("wiener.freq_resolution_hz", ["wiener", "freq_resolution_hz"]),
     ("wiener.coherence_threshold", ["wiener", "coherence_threshold"]),
+    ("wiener.phase_gate_threshold_rad", ["wiener", "phase_gate_threshold_rad"]),
     ("ica.n_components",        ["ica", "n_components"]),
     ("ica.artifact_corr_threshold", ["ica", "artifact_corr_threshold"]),
     ("ml.cv_folds",             ["ml", "xgboost", "cv_folds"]),
@@ -122,7 +128,7 @@ def _extract_config_snapshot(cfg: dict) -> dict:
 def _discover_conditions(xgb_root: Path) -> list[str]:
     """Return XGBoost conditions that have a test_metrics.json (i.e. are complete)."""
     return [
-        c for c in CONDITIONS
+        c for c in XGB_CONDITIONS
         if (xgb_root / c / "test_metrics.json").exists()
     ]
 
@@ -130,7 +136,7 @@ def _discover_conditions(xgb_root: Path) -> list[str]:
 def _discover_cnn_conditions(cnn_root: Path) -> list[str]:
     """Return CNN conditions that have a test_metrics.json (i.e. are complete)."""
     return [
-        c for c in CONDITIONS
+        c for c in CNN_CONDITIONS
         if (cnn_root / c / "test_metrics.json").exists()
     ]
 

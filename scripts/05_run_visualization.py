@@ -27,9 +27,10 @@ results/figures/{subject_id}/psd_comparison.png
 results/figures/{subject_id}/edf/epoch_{i}/{condition}.edf
     Only produced with --export-edf / visualization.export_edf: true. Up to
     export_edf_max_epochs (must be >= 1) epochs per subject, each reconstructed to a real
-    .edf file per available condition (raw, wiener, wiener_zerophase, ica),
-    grouped in one folder per epoch so all preprocessing variants of the
-    same original epoch can be compared side by side.
+    .edf file per available condition (raw, wiener, wiener_phasegated,
+    wiener_zerophase, ica), grouped in one folder per epoch so all
+    preprocessing variants of the same original epoch can be compared side by
+    side.
 """
 import argparse
 import matplotlib
@@ -76,6 +77,7 @@ def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channe
         export_edf_max_epochs = _validate_export_edf_max_epochs(export_edf_max_epochs)
     epoch_root     = Path(cfg["paths"]["cache_dir"]) / "epochs"
     wiener_root    = Path(cfg["paths"]["cache_dir"]) / "wiener_frequency"
+    wiener_pg_root = Path(cfg["paths"]["cache_dir"]) / "wiener_phasegated"
     wiener_zp_root = Path(cfg["paths"]["cache_dir"]) / "wiener_zerophase"
     ica_root       = Path(cfg["paths"]["cache_dir"]) / "ica"
     fig_dir     = Path(cfg["paths"]["results_dir"]) / "figures"
@@ -115,6 +117,12 @@ def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channe
             wdata           = np.load(wiener_path, allow_pickle=True)
             wiener_full     = wdata["specific"]       # (n_epochs, n_ch, n_times)
             wiener_specific = wiener_full[ei]         # (n_ch, n_times)
+
+        # ── Wiener-phasegated (optional; EDF export only) ────────────────────
+        wiener_pg_path = wiener_pg_root / npz_path.relative_to(epoch_root)
+        wiener_pg_full = None
+        if wiener_pg_path.exists():
+            wiener_pg_full = np.load(wiener_pg_path, allow_pickle=True)["specific"]
 
         # ── Wiener-zerophase (optional) ───────────────────────────────────────
         wiener_zp_path = wiener_zp_root / npz_path.relative_to(epoch_root)
@@ -157,6 +165,7 @@ def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channe
             n_export = min(export_edf_max_epochs, len(epochs))
             full_by_condition = {
                 "raw": epochs, "wiener": wiener_full,
+                "wiener_phasegated": wiener_pg_full,
                 "wiener_zerophase": wiener_zp_full, "ica": ica_full,
             }
             for exp_ei in range(n_export):
@@ -188,7 +197,7 @@ if __name__ == "__main__":
                              "(default: visualization.psd_target_channels from config)")
     parser.add_argument("--export-edf", dest="export_edf", action="store_true", default=None,
                         help="Also export each subject's epochs to .edf files per condition "
-                             "(raw/wiener/wiener_zerophase/ica); "
+                             "(raw/wiener/wiener_phasegated/wiener_zerophase/ica); "
                              "default: visualization.export_edf from config (false)")
     parser.add_argument("--export-edf-max-epochs", type=int, default=None,
                         help="Positive max epochs per subject to export as .edf when --export-edf is set; "

@@ -220,13 +220,14 @@ def plot_shap_comparison(
     output_path: Path,
     dpi: int = 200,
 ) -> None:
-    """2 × 4 publication figure comparing SHAP importance across conditions.
+    """2 × 5 publication figure comparing SHAP importance across conditions.
 
     Parameters
     ----------
     results : dict[str, dict]
-        Keys must include ``"raw"``, ``"ica"``, ``"wiener"``,
-        ``"wiener_zerophase"``.  Each value is a dict with keys
+        Keys may include ``"raw"``, ``"ica"``, ``"wiener"``,
+        ``"wiener_phasegated"``, and ``"wiener_zerophase"``.
+        Each value is a dict with keys
         ``"shap_by_band"`` and ``"shap_by_channel"``.
     output_path : Path
         Destination PNG file.
@@ -238,15 +239,21 @@ def plot_shap_comparison(
     Row 1 (top):    Bar chart — mean |SHAP| per frequency-band feature group.
     Row 2 (bottom): Horizontal bar chart — mean |SHAP| per channel.
 
-    Columns (left → right): Raw (C) | ICA (B) | Wiener (A) | Wiener Zero-Phase (D).
+    Columns (left → right): Raw (C) | ICA (B) | Wiener (A) |
+    Wiener Phase-Gated (E) | Wiener Zero-Phase (D).
     Same y-axis scale within each row for direct cross-condition comparison.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    condition_order  = ["raw", "ica", "wiener", "wiener_zerophase"]
-    condition_labels = ["Raw (C)", "ICA (B)", "Wiener (A)", "Wiener Zero-Phase (D)"]
-    col_colors       = ["#888888", "#E07B54", "#4C8BBE", "#5A9367"]
+    condition_order = [
+        "raw", "ica", "wiener", "wiener_phasegated", "wiener_zerophase"
+    ]
+    condition_labels = [
+        "Raw (C)", "ICA (B)", "Wiener (A)",
+        "Wiener Phase-Gated (E)", "Wiener Zero-Phase (D)",
+    ]
+    col_colors = ["#888888", "#E07B54", "#4C8BBE", "#7B68AA", "#5A9367"]
 
     band_keys = list(BANDS.keys()) + [
         "hjorth", "spectral_entropy", "asymmetry",
@@ -254,14 +261,14 @@ def plot_shap_comparison(
     ]
 
     # Determine channel sort order from Wiener importance (fallback: raw).
-    # Computed once here so all three columns share the same y-axis ordering.
+    # Computed once here so all columns share the same y-axis ordering.
     ref_ch = (results.get("wiener", results.get("raw", {}))
               .get("shap_by_channel", {}))
     ch_order = sorted(ref_ch, key=lambda c: ref_ch.get(c, 0), reverse=True)
 
     fig, axes = plt.subplots(
-        2, 4,
-        figsize=(18, 9),
+        2, 5,
+        figsize=(22, 9),
         sharey="row",
     )
 
@@ -301,7 +308,7 @@ def plot_shap_comparison(
 
     fig.suptitle(
         "SHAP Feature Importance: Raw (C) vs ICA (B) vs Wiener Specific (A) "
-        "vs Wiener Zero-Phase (D)",
+        "vs Wiener Phase-Gated (E) vs Wiener Zero-Phase (D)",
         fontsize=11, fontweight="bold",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.96])

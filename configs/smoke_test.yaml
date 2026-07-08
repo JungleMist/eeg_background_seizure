@@ -196,8 +196,11 @@ channels:
 #   will include frequency bins that were filtered out in preprocessing.
 wiener:
   mode: "frequency"           # categorical: "frequency" (per-frequency Wiener
-                              #   filter, script 02) | "scalar" (fixed-scalar
-                              #   ablation baseline, wiener_scalar.py)
+                              #   filter, script 02) | "phasegated"
+                              #   (complex Wiener with zero-referenced phase
+                              #   gate) | "scalar" (fixed-scalar ablation) |
+                              #   "zerophase" (real-constrained per-frequency
+                              #   filter, wiener_zerophase.py)
   nperseg: 250                # Welch window for filter estimation (samples).
                               #   PAIRED: ≤ target_sfreq × epoch_length_sec
                               #   Formula: target_sfreq × window_sec
@@ -215,6 +218,11 @@ wiener:
                                     #   skipped (passthrough).  Guards against
                                     #   near-singular cross-PSD matrices in
                                     #   3-electrode chains.
+  phase_gate_threshold_rad: 0.392    # radians; zero-referenced hard gate for
+                                    #   phasegated and zerophase modes. 0 keeps
+                                    #   only strictly in-phase coherence; pi
+                                    #   admits all phases. Phase pi is treated
+                                    #   as the maximum phase difference.
   freq_band: [0.5, 40.0]      # [low_hz, high_hz]; coherence gate and V1/V2/V3
                               #   verification band.  PAIRED: must be ⊆ bandpass.
 
