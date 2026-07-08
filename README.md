@@ -542,9 +542,15 @@ python scripts/05_run_visualization.py
 
 # Limit to first 5 subjects, choose epoch 2:
 python scripts/05_run_visualization.py --n-subjects 5 --epoch-idx 2
+
+# Optionally export capped EDF files for side-by-side review:
+python scripts/05_run_visualization.py --export-edf --export-edf-max-epochs 3
 ```
 
-**Output:** `results/figures/{subject_id}/waveform_comparison.png`
+**Output:** `results/figures/{subject_id}/waveform_comparison.png` and
+`results/figures/{subject_id}/psd_comparison.png`. With `--export-edf`, up to
+`export_edf_max_epochs` (`>=1`) epochs per subject are also written under
+`results/figures/{subject_id}/edf/epoch_{i}/{condition}.edf`.
 
 Each figure contains up to three panels (panels are omitted if the corresponding cache
 does not yet exist):

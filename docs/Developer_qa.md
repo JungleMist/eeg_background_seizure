@@ -729,7 +729,7 @@ No `--force` flag and no caching.  Every run recomputes V1/V2/V3 from scratch an
 
 #### `05_run_visualization.py`
 
-No `--force` flag.  Every run regenerates all figures and silently overwrites existing `.png` files in `results/figures/`.
+No `--force` flag.  Every run regenerates all figures and silently overwrites existing `.png` files in `results/figures/`.  If `--export-edf` is enabled, the script also overwrites capped EDF review files under `results/figures/{subject_id}/edf/`; `export_edf_max_epochs` must be a positive integer (`>=1`).
 
 #### `06_train_xgboost.py`
 

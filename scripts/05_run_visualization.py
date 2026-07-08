@@ -12,6 +12,9 @@ python scripts/05_run_visualization.py
 # Limit to first 5 subjects, epoch 2, custom PSD channels:
 python scripts/05_run_visualization.py --n-subjects 5 --epoch-idx 2 --channels "FP1,FP2,T3"
 
+# Also export per-epoch .edf files (up to export_edf_max_epochs >= 1 epochs/subject):
+python scripts/05_run_visualization.py --export-edf --export-edf-max-epochs 3
+
 Output
 ------
 results/figures/{subject_id}/waveform_comparison.png
@@ -20,6 +23,13 @@ results/figures/{subject_id}/waveform_comparison.png
 
 results/figures/{subject_id}/psd_comparison.png
     PSD overlay (raw / Wiener / ICA) for target channels (from config or --channels).
+
+results/figures/{subject_id}/edf/epoch_{i}/{condition}.edf
+    Only produced with --export-edf / visualization.export_edf: true. Up to
+    export_edf_max_epochs (must be >= 1) epochs per subject, each reconstructed to a real
+    .edf file per available condition (raw, wiener, wiener_zerophase, ica),
+    grouped in one folder per epoch so all preprocessing variants of the
+    same original epoch can be compared side by side.
 """
 import argparse
 import matplotlib
@@ -34,20 +44,40 @@ from eeg_bg.visualization.waveform_plots import plot_multichannel_comparison
 from eeg_bg.visualization.psd_plots import plot_psd_comparison
 
 
+class VisualizationConfigError(ValueError):
+    """Invalid visualization config or CLI option."""
+
+
 def _save(fig: plt.Figure, path: Path) -> None:
     """Save figure to *path* at 150 dpi and close it."""
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channels: list[str] | None) -> None:
+def _validate_export_edf_max_epochs(value: int) -> int:
+    """Return a positive EDF export cap or raise a clear config error."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise VisualizationConfigError(
+            "export_edf_max_epochs must be a positive integer (>= 1)"
+        )
+    return value
+
+
+def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channels: list[str] | None,
+         export_edf: bool | None, export_edf_max_epochs: int | None) -> None:
     cfg         = load_config(config_path)
     channels    = channels    if channels    is not None else cfg["visualization"]["psd_target_channels"]
     n_subjects  = n_subjects  if n_subjects  is not None else cfg["visualization"]["n_subjects"]
     epoch_idx   = epoch_idx   if epoch_idx   is not None else cfg["visualization"]["epoch_idx"]
-    epoch_root  = Path(cfg["paths"]["cache_dir"]) / "epochs"
-    wiener_root = Path(cfg["paths"]["cache_dir"]) / "wiener_frequency"
-    ica_root    = Path(cfg["paths"]["cache_dir"]) / "ica"
+    export_edf  = export_edf  if export_edf  is not None else cfg["visualization"].get("export_edf", False)
+    export_edf_max_epochs = (export_edf_max_epochs if export_edf_max_epochs is not None
+                              else cfg["visualization"].get("export_edf_max_epochs", 3))
+    if export_edf:
+        export_edf_max_epochs = _validate_export_edf_max_epochs(export_edf_max_epochs)
+    epoch_root     = Path(cfg["paths"]["cache_dir"]) / "epochs"
+    wiener_root    = Path(cfg["paths"]["cache_dir"]) / "wiener_frequency"
+    wiener_zp_root = Path(cfg["paths"]["cache_dir"]) / "wiener_zerophase"
+    ica_root       = Path(cfg["paths"]["cache_dir"]) / "ica"
     fig_dir     = Path(cfg["paths"]["results_dir"]) / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
     sfreq       = float(cfg["preprocessing"]["target_sfreq"])
@@ -79,17 +109,27 @@ def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channe
 
         # ── Wiener-specific (optional) ────────────────────────────────────────
         wiener_path     = wiener_root / npz_path.relative_to(epoch_root)
+        wiener_full     = None
         wiener_specific = None
         if wiener_path.exists():
             wdata           = np.load(wiener_path, allow_pickle=True)
-            wiener_specific = wdata["specific"][ei]   # (n_ch, n_times)
+            wiener_full     = wdata["specific"]       # (n_epochs, n_ch, n_times)
+            wiener_specific = wiener_full[ei]         # (n_ch, n_times)
+
+        # ── Wiener-zerophase (optional) ───────────────────────────────────────
+        wiener_zp_path = wiener_zp_root / npz_path.relative_to(epoch_root)
+        wiener_zp_full = None
+        if wiener_zp_path.exists():
+            wiener_zp_full = np.load(wiener_zp_path, allow_pickle=True)["specific"]
 
         # ── ICA-cleaned (optional) ────────────────────────────────────────────
         ica_path     = ica_root / npz_path.relative_to(epoch_root)
+        ica_full     = None
         ica_specific = None
         if ica_path.exists():
             idata        = np.load(ica_path, allow_pickle=True)
-            ica_specific = idata["specific"][ei]      # (n_ch, n_times)
+            ica_full     = idata["specific"]          # (n_epochs, n_ch, n_times)
+            ica_specific = ica_full[ei]               # (n_ch, n_times)
 
         fig = plot_multichannel_comparison(
             raw, wiener_specific, ica_specific,
@@ -110,6 +150,24 @@ def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channe
         )
         _save(fig_psd, subj_fig_dir / "psd_comparison.png")
 
+        # ── EDF export (optional) ───────────────────────────────────────────
+        if export_edf:
+            from eeg_bg.io.edf_writer import export_epoch_edf
+
+            n_export = min(export_edf_max_epochs, len(epochs))
+            full_by_condition = {
+                "raw": epochs, "wiener": wiener_full,
+                "wiener_zerophase": wiener_zp_full, "ica": ica_full,
+            }
+            for exp_ei in range(n_export):
+                epoch_dir = subj_fig_dir / "edf" / f"epoch_{exp_ei}"
+                epoch_dir.mkdir(parents=True, exist_ok=True)
+                for cond_name, cond_full in full_by_condition.items():
+                    if cond_full is None:
+                        continue
+                    export_epoch_edf(cond_full[exp_ei], ch_names, sfreq,
+                                      epoch_dir / f"{cond_name}.edf")
+
     print(f"Done. Figures saved to {fig_dir}")
 
 
@@ -128,6 +186,17 @@ if __name__ == "__main__":
     parser.add_argument("--channels",   default=None,
                         help="Comma-separated channel names for PSD plot "
                              "(default: visualization.psd_target_channels from config)")
+    parser.add_argument("--export-edf", dest="export_edf", action="store_true", default=None,
+                        help="Also export each subject's epochs to .edf files per condition "
+                             "(raw/wiener/wiener_zerophase/ica); "
+                             "default: visualization.export_edf from config (false)")
+    parser.add_argument("--export-edf-max-epochs", type=int, default=None,
+                        help="Positive max epochs per subject to export as .edf when --export-edf is set; "
+                             "default: visualization.export_edf_max_epochs from config (3)")
     args = parser.parse_args()
     channels = [c.strip() for c in args.channels.split(",")] if args.channels else None
-    main(args.config, args.n_subjects, args.epoch_idx, channels)
+    try:
+        main(args.config, args.n_subjects, args.epoch_idx, channels,
+             args.export_edf, args.export_edf_max_epochs)
+    except VisualizationConfigError as exc:
+        parser.error(str(exc))

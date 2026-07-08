@@ -289,6 +289,16 @@ visualization:
   psd_target_channels: ["FP1", "FP2"]
   n_subjects: 4   # number of subjects to visualise; 0 = all subjects
   epoch_idx: 1    # which epoch index to visualise per subject
+  export_edf: false          # if true, also reconstruct up to export_edf_max_epochs
+                              # epochs per subject to results/figures/{subject_id}/edf/
+                              # epoch_{i}/{condition}.edf for raw/wiener/wiener_zerophase/
+                              # ica (whichever cache exists). Off by default — these are
+                              # new, heavier per-subject binary artifacts not needed for
+                              # routine PNG-based QA.
+  export_edf_max_epochs: 3   # positive cap (>= 1) on how many epochs per subject
+                              # get exported when export_edf is true. This output is
+                              # reviewed by a human, so there is no benefit to
+                              # exporting every epoch.
 
 # -----------------------------------------------------------------------------
 # Machine learning  [Tier 4 — re-run 06+]
