@@ -14,6 +14,7 @@ BASE_CFG = {
         "mode": "frequency",
         "nperseg": 500,
         "coherence_threshold": 0.05,   # Low so decomposition always runs
+        "overlap_policy": "coherence_weighted",
         "phase_gate_threshold_rad": 0.392,
         "freq_band": [0.5, 40.0],
     },

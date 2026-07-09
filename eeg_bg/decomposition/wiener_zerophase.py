@@ -19,10 +19,7 @@ genuine 2x2 real solve, not an approximation of the complex one.
 """
 from __future__ import annotations
 
-from itertools import combinations
-
 import numpy as np
-from scipy.signal import coherence as scipy_coherence, welch
 
 from eeg_bg.decomposition.phase_gate import (
     phase_gate_threshold_from_config,
@@ -30,8 +27,8 @@ from eeg_bg.decomposition.phase_gate import (
 )
 from eeg_bg.decomposition.wiener import (
     WienerResult,
-    estimate_cross_psd,
     apply_wiener_filter,
+    decompose_epoch_with_fusion,
 )
 
 
@@ -80,79 +77,26 @@ def decompose_epoch(
     subject_id: str = "",
     epoch_idx: int = 0,
 ) -> WienerResult:
-    sfreq = float(cfg["preprocessing"]["target_sfreq"])
-    nperseg = cfg["wiener"]["nperseg"]
-    coh_threshold = cfg["wiener"]["coherence_threshold"]
-    mag_threshold = float(cfg["wiener"].get("filter_magnitude_threshold", 50.0))
     phase_gate_threshold = phase_gate_threshold_from_config(cfg)
-    channel_groups = cfg["channels"]["channel_groups"]
-    freq_band = cfg["wiener"]["freq_band"]
-    n_times = epoch.shape[1]
 
-    specific = epoch.copy()
-    coherent = np.zeros_like(epoch)
-    filters: dict = {}
-    skipped: list[str] = []
+    def candidate_fn(group_data, S, target_idx, freq_mask, n_times):
+        h = compute_zerophase_filter(
+            S,
+            target_idx=target_idx,
+            phase_gate_threshold_rad=phase_gate_threshold,
+        )
+        _, coherent = apply_wiener_filter(
+            group_data, h, target_idx, n_times
+        )
+        return h, coherent
 
-    freqs, _ = welch(epoch[0], fs=sfreq, nperseg=nperseg)
-    freq_mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
-
-    for pair in channel_groups:
-        try:
-            indices = [ch_names.index(ch) for ch in pair]
-        except ValueError:
-            skipped.append("-".join(pair))
-            continue
-
-        group_data = epoch[indices]
-
-        max_pairwise_coh = 0.0
-        for i, j in combinations(range(len(pair)), 2):
-            _, c = scipy_coherence(group_data[i], group_data[j],
-                                   fs=sfreq, nperseg=nperseg)
-            max_pairwise_coh = max(max_pairwise_coh, np.max(c[freq_mask]))
-        if max_pairwise_coh < coh_threshold:
-            skipped.append("-".join(pair))
-            continue
-
-        _, S = estimate_cross_psd(group_data, sfreq, nperseg)
-        pair_key = "-".join(pair)
-
-        group_filters: dict[str, np.ndarray] = {}
-        group_unstable = False
-        for local_idx, ch in enumerate(pair):
-            h = compute_zerophase_filter(
-                S,
-                target_idx=local_idx,
-                phase_gate_threshold_rad=phase_gate_threshold,
-            )
-            if np.max(np.abs(h)) > mag_threshold:
-                group_unstable = True
-                break
-            group_filters[ch] = h
-
-        if group_unstable:
-            skipped.append(pair_key)
-            continue
-
-        filters[pair_key] = {}
-        for local_idx, (ch, global_idx) in enumerate(zip(pair, indices)):
-            h = group_filters[ch]
-            sp, co = apply_wiener_filter(group_data, h, local_idx, n_times)
-            specific[global_idx] = sp
-            coherent[global_idx] = co
-            filters[pair_key][ch] = h
-
-    return WienerResult(
+    return decompose_epoch_with_fusion(
+        epoch,
+        ch_names,
+        cfg,
         subject_id=subject_id,
         epoch_idx=epoch_idx,
-        raw=epoch,
-        specific=specific,
-        coherent=coherent,
-        filters=filters,
-        freqs=freqs,
-        ch_names=ch_names,
-        skipped_pairs=skipped,
+        candidate_fn=candidate_fn,
     )
 
 

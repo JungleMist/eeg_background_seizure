@@ -235,10 +235,12 @@ The output of every decomposition call.
 | `raw` | ndarray | `(n_ch, n_times)` | Original signal in µV |
 | `specific` | ndarray | `(n_ch, n_times)` | Source-specific (local cortical) component |
 | `coherent` | ndarray | `(n_ch, n_times)` | Coherent (shared physical interference) component |
-| `filters` | dict | — | `{pair_key: {ch_name: h}}` where `h` is `(n_ref, n_freqs)` complex |
+| `filters` | dict | — | `{group_key: {ch_name: h}}` for accepted target-channel candidates |
 | `freqs` | ndarray | `(n_freqs,)` | Frequency axis from Welch estimation |
 | `ch_names` | list[str] | — | Channel names for this epoch |
-| `skipped_pairs` | list[str] | — | Pairs skipped due to low coherence or missing channels |
+| `skipped_pairs` | list[str] | — | Channel groups skipped due to missing channels or no accepted targets |
+| `channel_sources` | dict[str, list[str]] | — | Accepted source groups contributing to each output channel |
+| `channel_weights` | dict[str, dict[str, float]] | — | Normalised coherence-fusion weights by channel and source group |
 
 **Identity guarantee:** `result.specific + result.coherent == result.raw` (up to float64 precision) for all channels, regardless of `nperseg`.
 
@@ -297,13 +299,14 @@ specific, coherent = apply_wiener_filter(group_data, h, target_idx=0, n_times=10
 
 #### `decompose_epoch(epoch, ch_names, cfg, subject_id="", epoch_idx=0) -> WienerResult`
 
-Top-level function for decomposing a single epoch. Processes each channel group from `cfg["channels"]["channel_groups"]` (G1–G6) in sequence:
+Top-level function for decomposing a single epoch. Processes each channel group from `cfg["channels"]["channel_groups"]` (G1–G6), but writes the final output once after target-level candidate fusion:
 
 1. **Channel lookup** — skip group if any channel is missing from `ch_names`
-2. **Coherence gate** — skip group if `max pairwise coherence in freq_band < coherence_threshold`
+2. **Target coherence gate** — for each target channel, skip that target if its max target-reference coherence in `freq_band` is below `coherence_threshold`
 3. **Cross-PSD estimation** — call `estimate_cross_psd`
-4. **Filter computation** — call `compute_wiener_filter` for each channel in the group
-5. **Filter application** — call `apply_wiener_filter`, write back to `specific` and `coherent` arrays
+4. **Filter computation** — call `compute_wiener_filter` for each accepted target channel in the group
+5. **Overlap fusion** — combine multiple candidates for the same output channel using normalised target-reference coherence weights
+6. **Final split** — set `specific[channel] = raw[channel] - coherent[channel]`, so the identity guarantee holds
 
 Passthrough channels (`F3`, `F4`, `C3`, `C4`, `P3`, `P4`, `Fz`, `Cz`, `Pz`) belong to no group and are not modified: their `specific = raw`, `coherent = 0`.
 

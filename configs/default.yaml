@@ -221,9 +221,15 @@ wiener:
   freq_resolution_hz: 0.5     # Hz; controls V1 coherence window independently
                               #   of nperseg.  Constraint: must be >
                               #   target_sfreq / epoch_samples = 0.05 Hz.
-  coherence_threshold: 0.15   # groups whose max pairwise coherence (over
-                              #   freq_band) falls below this value are skipped
-                              #   — no filtering applied to that group
+  coherence_threshold: 0.15   # target channels whose max target-reference
+                              #   coherence (over freq_band) falls below this
+                              #   value are skipped. This is a Tier 2 setting:
+                              #   changing it requires rebuilding Wiener cache
+                              #   and downstream features/models.
+  overlap_policy: "coherence_weighted"  # default and only supported policy.
+                              #   Overlapping channel-group candidates are
+                              #   fused by target-reference coherence instead
+                              #   of being overwritten by later groups.
   filter_magnitude_threshold: 50.0  # max allowed |h(f)| across all frequency
                                     #   bins and reference channels.  Groups
                                     #   whose regularised filter still exceeds
