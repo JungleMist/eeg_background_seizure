@@ -1,0 +1,5 @@
+# exp_wiener_phase_baseline.yaml - shared raw/ICA baseline for exp_wiener_phase.
+extends: default.yaml
+
+paths:
+  results_dir: "results/exp_wiener_phase/baseline"

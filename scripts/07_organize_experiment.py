@@ -48,6 +48,7 @@ import matplotlib
 matplotlib.use("Agg")          # non-interactive backend — must precede pyplot
 
 import pandas as pd
+import yaml
 
 from eeg_bg.config.settings import load_config
 from eeg_bg.ml.shap_analysis import plot_shap_comparison
@@ -480,8 +481,13 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
         exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot, has_shap,
     )
 
-    # ── Copy config ───────────────────────────────────────────────────────────
-    shutil.copy2(config_path, exp_dir / "config.yaml")
+    # ── Write resolved config ─────────────────────────────────────────────────
+    # Experiment configs may inherit from default.yaml; archive the fully
+    # resolved config so the experiment folder is self-contained.
+    (exp_dir / "config.yaml").write_text(
+        yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
 
     print(f"\nDone. Experiment archived to:\n  {exp_dir}")
 

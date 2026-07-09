@@ -1,0 +1,11 @@
+# exp_wiener_phase_3.yaml - threshold/phase ablation
+# Exp 3: frequency Wiener, coherence threshold 0.75, phase gate pi.
+extends: default.yaml
+
+paths:
+  results_dir: "results/exp_wiener_phase/exp3"
+
+wiener:
+  mode: "frequency"
+  coherence_threshold: 0.75
+  phase_gate_threshold_rad: 3.141592653589793

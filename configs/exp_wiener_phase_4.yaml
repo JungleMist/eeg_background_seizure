@@ -1,0 +1,11 @@
+# exp_wiener_phase_4.yaml - threshold/phase ablation
+# Exp 4: phase-gated Wiener, coherence threshold 0.15, phase gate pi/2.
+extends: default.yaml
+
+paths:
+  results_dir: "results/exp_wiener_phase/exp4"
+
+wiener:
+  mode: "phasegated"
+  coherence_threshold: 0.15
+  phase_gate_threshold_rad: 1.5707963267948966
