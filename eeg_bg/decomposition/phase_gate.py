@@ -64,3 +64,28 @@ def phase_gate_weights(
     cross = S[target_idx, ref_indices, :]
     phase_dist = np.abs(np.angle(cross))
     return (phase_dist <= threshold).astype(np.float64)
+
+
+def phase_gate_pass_fraction(
+    S: np.ndarray,
+    target_idx: int,
+    threshold_rad: float,
+    freq_mask: np.ndarray,
+) -> float:
+    """Fraction of reference×frequency-bin combos passing the phase gate.
+
+    Restricts the computation to frequency bins where ``freq_mask`` is True so
+    that it captures only the target band.  Returns 1.0 when the threshold is
+    pi (passes all phases) and 0.0 when there are no references or no bins in
+    the mask.
+    """
+    threshold = validate_phase_gate_threshold(threshold_rad)
+    if threshold == np.pi:
+        return 1.0
+    ref_indices = [i for i in range(S.shape[0]) if i != target_idx]
+    if not ref_indices or not np.any(freq_mask):
+        return 0.0
+    cross = S[target_idx, ref_indices, :][:, freq_mask]
+    phase_dist = np.abs(np.angle(cross))
+    weights = (phase_dist <= threshold).astype(np.float64)
+    return float(weights.mean())

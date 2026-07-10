@@ -43,6 +43,7 @@ results/xgboost/
     shap_comparison.png    — 2×5 publication figure (after --condition all)
 """
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -87,28 +88,58 @@ def _load_or_extract_features(
     nperseg: int,
     freq_band: tuple[float, float],
     force: bool,
+    feature_set: str = "base211",
+    connectivity_nperseg: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Return (X, y, subject_ids), using a feature-level NPZ cache."""
-    feat_file = feature_cache_dir / f"{condition}_{split}.npz"
+    """Return (X, y, subject_ids), using a profile-aware feature-level NPZ cache."""
+    from eeg_bg.features.profiles import PROFILES
+    profile = PROFILES[feature_set]
+
+    # Profile-aware cache path: base211 uses the legacy flat path for backward
+    # compatibility; other profiles nest under features/{profile_name}/.
+    if feature_set == "base211":
+        feat_file = feature_cache_dir / f"{condition}_{split}.npz"
+    else:
+        feat_file = feature_cache_dir / feature_set / f"{condition}_{split}.npz"
+
+    # Schema hash covers feature names, sfreq, nperseg, freq_band.
+    schema_hash = hashlib.sha256(
+        f"{profile.names}|{sfreq}|{nperseg}|{freq_band}|{connectivity_nperseg}".encode()
+    ).hexdigest()[:16]
+
     if feat_file.exists() and not force:
         data = np.load(feat_file, allow_pickle=True)
+        saved_hash = str(data.get("schema_hash", ""))
+        if saved_hash and saved_hash != schema_hash:
+            raise ValueError(
+                f"Feature cache schema hash mismatch ({saved_hash} vs "
+                f"{schema_hash}) for {feature_set}/{condition}_{split}. "
+                f"Re-run script 06 with --force."
+            )
         X    = data["X"].astype(np.float64)
         y    = data["y"].astype(np.int64)
         sids = list(data["subject_ids"])
-        if X.shape[1] != len(FEATURE_NAMES):
+        if X.shape[1] != profile.dim:
             raise ValueError(
-                f"Feature cache has {X.shape[1]} dims but FEATURE_NAMES has "
-                f"{len(FEATURE_NAMES)}. Re-run script 06 with --force."
+                f"Feature cache has {X.shape[1]} dims but profile "
+                f"{feature_set!r} expects {profile.dim}. "
+                f"Re-run script 06 with --force."
             )
         return X, y, sids
 
-    X, y, sids = build_dataset(
+    from eeg_bg.features.extraction import build_dataset_with_profile
+    X, y, sids = build_dataset_with_profile(
         cache_root, condition, split,
         sfreq=sfreq, nperseg=nperseg, freq_band=freq_band,
+        profile_name=feature_set, connectivity_nperseg=connectivity_nperseg,
     )
     if len(X):
         feat_file.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(feat_file, X=X, y=y, subject_ids=np.array(sids, dtype=object))
+        np.savez(
+            feat_file,
+            X=X, y=y, subject_ids=np.array(sids, dtype=object),
+            schema_hash=schema_hash,
+        )
     return X, y, sids
 
 
@@ -157,32 +188,38 @@ def run_condition(
     feature_cache_dir: Path,
     out_root: Path,
     force: bool,
+    feature_set: str = "base211",
 ) -> dict:
     """Full pipeline for one condition.  Returns metrics + SHAP aggregates."""
     sfreq      = float(cfg["preprocessing"]["target_sfreq"])
     nperseg    = int(cfg["wiener"]["nperseg"])
+    connectivity_nperseg = int(cfg.get("ml", {}).get("features", {})
+                               .get("connectivity", {}).get("nperseg", nperseg))
     freq_band  = tuple(cfg["wiener"]["freq_band"])
     shap_cfg   = cfg["ml"]["shap"]
     out_dir    = out_root / condition
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'='*60}")
-    print(f"  Condition: {condition.upper()}")
+    print(f"  Condition: {condition.upper()}  |  Feature set: {feature_set}")
     print(f"{'='*60}")
 
     # ── Feature extraction ────────────────────────────────────────────────────
     print("Loading features...")
     X_train, y_train, sids_train = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "train",
-        sfreq, nperseg, freq_band, force,
+        sfreq, nperseg, freq_band, force, feature_set,
+        connectivity_nperseg,
     )
     X_val,   y_val,   sids_val   = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "val",
-        sfreq, nperseg, freq_band, force,
+        sfreq, nperseg, freq_band, force, feature_set,
+        connectivity_nperseg,
     )
     X_test,  y_test,  sids_test  = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "test",
-        sfreq, nperseg, freq_band, force,
+        sfreq, nperseg, freq_band, force, feature_set,
+        connectivity_nperseg,
     )
 
     if len(X_train) == 0:
@@ -195,6 +232,7 @@ def run_condition(
         "train": _split_stats(X_train, y_train, sids_train),
         "val":   _split_stats(X_val,   y_val,   sids_val),
         "test":  _split_stats(X_test,  y_test,  sids_test),
+        "feature_set": feature_set,
     }
     _save_json(data_stats, out_dir / "data_stats.json")
 
@@ -248,18 +286,20 @@ def run_condition(
 
     # ── SHAP analysis ─────────────────────────────────────────────────────────
     if len(X_test):
+        from eeg_bg.features.profiles import PROFILES
+        feat_names = PROFILES[feature_set].names
         print("Computing SHAP values...")
-        shap_vals = compute_shap_values(model, X_test_sc, FEATURE_NAMES)
+        shap_vals = compute_shap_values(model, X_test_sc, feat_names)
         np.save(out_dir / "shap_values_test.npy", shap_vals)
 
-        band_agg = aggregate_shap_by_band(shap_vals, FEATURE_NAMES)
-        ch_agg   = aggregate_shap_by_channel(shap_vals, FEATURE_NAMES)
+        band_agg = aggregate_shap_by_band(shap_vals, feat_names)
+        ch_agg   = aggregate_shap_by_channel(shap_vals, feat_names)
         _save_json(band_agg, out_dir / "shap_by_band.json")
         _save_json(ch_agg,   out_dir / "shap_by_channel.json")
 
         plot_shap_summary(
-            shap_vals, X_test_sc, FEATURE_NAMES,
-            title=f"SHAP Summary — {condition.capitalize()} (test set)",
+            shap_vals, X_test_sc, feat_names,
+            title=f"SHAP Summary — {condition.capitalize()} [{feature_set}] (test set)",
             output_path=out_dir / "shap_summary.png",
             max_display=int(shap_cfg["max_display"]),
             dpi=int(shap_cfg["dpi"]),
@@ -286,7 +326,8 @@ XGB_CONDITIONS = [
 ]
 
 
-def main(config_path: str, condition: str, force: bool) -> None:
+def main(config_path: str, condition: str, force: bool,
+         feature_set: str = "base211") -> None:
     cfg         = load_config(config_path)
     cache_root  = Path(cfg["paths"]["cache_dir"])
     results_dir = Path(cfg["paths"]["results_dir"])
@@ -299,6 +340,7 @@ def main(config_path: str, condition: str, force: bool) -> None:
     for cond in conditions:
         result = run_condition(
             cond, cfg, cache_root, feat_cache, out_root, force,
+            feature_set=feature_set,
         )
         if result:
             all_results[cond] = result
@@ -361,5 +403,12 @@ if __name__ == "__main__":
         "--force", action="store_true",
         help="Re-extract features even if feature cache exists",
     )
+    parser.add_argument(
+        "--feature-set",
+        choices=["base211", "base211_conn80"],
+        default="base211",
+        help="Feature profile to use (default: base211, 211-dim); "
+             "base211_conn80 adds 80-dim connectivity → 291-dim total.",
+    )
     args = parser.parse_args()
-    main(args.config, args.condition, args.force)
+    main(args.config, args.condition, args.force, feature_set=args.feature_set)

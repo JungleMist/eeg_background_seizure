@@ -6,6 +6,15 @@ import numpy as np
 from scipy.signal import csd, welch, coherence as scipy_coherence
 
 
+# Status codes for per-candidate diagnostics added to WienerResult.
+CANDIDATE_PROCESSED       = 0
+CANDIDATE_BELOW_COHERENCE = 1
+CANDIDATE_UNSTABLE_FILTER = 2
+CANDIDATE_SOLVE_FAILED    = 3
+CANDIDATE_MISSING_CHANNEL = 4
+CANDIDATE_UNUSED          = 255
+
+
 @dataclass
 class WienerResult:
     subject_id: str
@@ -19,6 +28,14 @@ class WienerResult:
     skipped_pairs: list[str] = field(default_factory=list)
     channel_sources: dict[str, list[str]] = field(default_factory=dict)
     channel_weights: dict[str, dict[str, float]] = field(default_factory=dict)
+    # ── target-level diagnostics (added 2026-07-10) ────────────────────────
+    # Fixed-size arrays padded to max_candidates = sum(len(pair) for pair in
+    # channel_groups).  Keys are "group::channel" e.g. "FP1-FP2::FP1".
+    candidate_keys: list[str] | None = None
+    candidate_status: np.ndarray | None = None         # uint8 (n_candidates,)
+    candidate_coherence: np.ndarray | None = None       # float64 (n_candidates,)
+    candidate_max_abs_h: np.ndarray | None = None       # float64 (n_candidates,)
+    phase_gate_pass_fraction: np.ndarray | None = None  # float64 (n_candidates,)
 
 
 def estimate_cross_psd(
@@ -159,10 +176,10 @@ def _frequency_candidate(
     target_idx: int,
     freq_mask: np.ndarray,
     n_times: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, dict]:
     h = compute_wiener_filter(S, target_idx=target_idx)
     _, coherent = apply_wiener_filter(group_data, h, target_idx, n_times)
-    return h, coherent
+    return h, coherent, {}
 
 
 def decompose_epoch_with_fusion(
@@ -173,7 +190,7 @@ def decompose_epoch_with_fusion(
     epoch_idx: int = 0,
     candidate_fn: Callable[
         [np.ndarray, np.ndarray, int, np.ndarray, int],
-        tuple[np.ndarray, np.ndarray],
+        tuple[np.ndarray, np.ndarray, dict],
     ] = _frequency_candidate,
 ) -> WienerResult:
     """Decompose one epoch using target-level gating and overlap fusion.
@@ -200,6 +217,13 @@ def decompose_epoch_with_fusion(
     skipped: list[str] = []
     candidates_by_channel: dict[int, list[tuple[str, float, np.ndarray]]] = {}
 
+    # ── Per-candidate diagnostic tracking ─────────────────────────────────
+    _candidate_keys: list[str] = []
+    _candidate_status: list[int] = []
+    _candidate_coherence: list[float] = []
+    _candidate_max_abs_h: list[float] = []
+    _candidate_phase_pass: list[float] = []
+
     freqs, _ = welch(epoch[0], fs=sfreq, nperseg=nperseg, window="boxcar")
     freq_mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
 
@@ -208,10 +232,23 @@ def decompose_epoch_with_fusion(
         try:
             indices = [ch_names.index(ch) for ch in pair]
         except ValueError:
+            # Record all targets as missing_channel, then skip the group.
+            for ch in pair:
+                _candidate_keys.append(f"{pair_key}::{ch}")
+                _candidate_status.append(CANDIDATE_MISSING_CHANNEL)
+                _candidate_coherence.append(0.0)
+                _candidate_max_abs_h.append(0.0)
+                _candidate_phase_pass.append(0.0)
             skipped.append(pair_key)
             continue
 
         if len(indices) < 2:
+            for ch in pair:
+                _candidate_keys.append(f"{pair_key}::{ch}")
+                _candidate_status.append(CANDIDATE_MISSING_CHANNEL)
+                _candidate_coherence.append(0.0)
+                _candidate_max_abs_h.append(0.0)
+                _candidate_phase_pass.append(0.0)
             skipped.append(pair_key)
             continue
 
@@ -228,17 +265,37 @@ def decompose_epoch_with_fusion(
                 freq_mask=freq_mask,
             )
             if score < coh_threshold:
+                _candidate_keys.append(f"{pair_key}::{ch}")
+                _candidate_status.append(CANDIDATE_BELOW_COHERENCE)
+                _candidate_coherence.append(score)
+                _candidate_max_abs_h.append(0.0)
+                _candidate_phase_pass.append(0.0)
                 continue
 
-            h, candidate_coherent = candidate_fn(
+            h, candidate_coherent, diagnostics = candidate_fn(
                 group_data,
                 S,
                 local_idx,
                 freq_mask,
                 n_times,
             )
-            if h.size and np.max(np.abs(h)) > mag_threshold:
+            max_abs_h = float(np.max(np.abs(h))) if h.size else 0.0
+            pass_frac = float(diagnostics.get("pass_fraction", 1.0))
+
+            if h.size and max_abs_h > mag_threshold:
+                _candidate_keys.append(f"{pair_key}::{ch}")
+                _candidate_status.append(CANDIDATE_UNSTABLE_FILTER)
+                _candidate_coherence.append(score)
+                _candidate_max_abs_h.append(max_abs_h)
+                _candidate_phase_pass.append(pass_frac)
                 continue
+
+            # ── Candidate accepted ─────────────────────────────────────────
+            _candidate_keys.append(f"{pair_key}::{ch}")
+            _candidate_status.append(CANDIDATE_PROCESSED)
+            _candidate_coherence.append(score)
+            _candidate_max_abs_h.append(max_abs_h)
+            _candidate_phase_pass.append(pass_frac)
 
             pair_filters[ch] = h
             candidates_by_channel.setdefault(global_idx, []).append(
@@ -249,6 +306,14 @@ def decompose_epoch_with_fusion(
             filters[pair_key] = pair_filters
         else:
             skipped.append(pair_key)
+
+    # ── Build fixed-size diagnostic arrays ───────────────────────────────
+    n_candidates = len(_candidate_keys)
+    candidate_keys: list[str] = _candidate_keys
+    candidate_status = np.array(_candidate_status, dtype=np.uint8) if n_candidates else None
+    candidate_coherence = np.array(_candidate_coherence, dtype=np.float64) if n_candidates else None
+    candidate_max_abs_h = np.array(_candidate_max_abs_h, dtype=np.float64) if n_candidates else None
+    phase_gate_pass_fraction = np.array(_candidate_phase_pass, dtype=np.float64) if n_candidates else None
 
     channel_sources: dict[str, list[str]] = {}
     channel_weights: dict[str, dict[str, float]] = {}
@@ -286,6 +351,11 @@ def decompose_epoch_with_fusion(
         skipped_pairs=skipped,
         channel_sources=channel_sources,
         channel_weights=channel_weights,
+        candidate_keys=candidate_keys,
+        candidate_status=candidate_status,
+        candidate_coherence=candidate_coherence,
+        candidate_max_abs_h=candidate_max_abs_h,
+        phase_gate_pass_fraction=phase_gate_pass_fraction,
     )
 
 

@@ -35,7 +35,7 @@ def decompose_epoch(
         ]
         ref_data = group_data[ref_indices]  # (n_ref, n_times)
         coherent_signal = np.sum(h_scalar.real * ref_data, axis=0)
-        return h_scalar, coherent_signal
+        return h_scalar, coherent_signal, {}
 
     return decompose_epoch_with_fusion(
         epoch,

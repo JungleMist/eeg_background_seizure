@@ -139,6 +139,7 @@ clean_condition_cache() {
     cache_dir="$(config_value "$cfg" "paths.cache_dir")"
     safe_clear_dir "$cache_dir/$cache_subdir" "$cache_subdir cache"
     rm -f "$cache_dir/features/${condition}_"*.npz
+    rm -f "$cache_dir/features/base211_conn80/${condition}_"*.npz
 }
 
 prepare_condition_results() {
@@ -233,10 +234,25 @@ for IDX in 1 2 3 4 5 6 7 8; do
             --force \
             --workers "$WORKERS"
 
-    run_step "exp$IDX - 06 XGBoost $CONDITION" \
+    run_step "exp$IDX - 04 verification $MODE" \
+        $CONDA_RUN python scripts/04_run_verification.py \
+            --config "$CFG" \
+            --source cache \
+            --mode "$MODE" \
+            --checks v1,gate,connectivity
+
+    run_step "exp$IDX - 06 XGBoost $CONDITION (base211)" \
         $CONDA_RUN python scripts/06_train_xgboost.py \
             --config "$CFG" \
             --condition "$CONDITION" \
+            --feature-set base211 \
+            --force
+
+    run_step "exp$IDX - 06 XGBoost $CONDITION (base211_conn80)" \
+        $CONDA_RUN python scripts/06_train_xgboost.py \
+            --config "$CFG" \
+            --condition "$CONDITION" \
+            --feature-set base211_conn80 \
             --force
 
     clean_condition_cache "$CFG" "$CONDITION" "$CACHE_SUBDIR"

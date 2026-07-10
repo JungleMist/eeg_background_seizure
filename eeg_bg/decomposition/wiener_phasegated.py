@@ -14,6 +14,7 @@ import numpy as np
 from eeg_bg.decomposition.phase_gate import (
     phase_gate_threshold_from_config,
     phase_gate_weights,
+    phase_gate_pass_fraction,
 )
 from eeg_bg.decomposition.wiener import (
     WienerResult,
@@ -53,7 +54,10 @@ def decompose_epoch(
         _, coherent = apply_wiener_filter(
             group_data, h, target_idx, n_times
         )
-        return h, coherent
+        pass_frac = phase_gate_pass_fraction(
+            S, target_idx, phase_gate_threshold, freq_mask,
+        )
+        return h, coherent, {"pass_fraction": pass_frac}
 
     return decompose_epoch_with_fusion(
         epoch,

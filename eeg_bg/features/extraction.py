@@ -261,3 +261,84 @@ def build_dataset(
     return (np.vstack(X_list).astype(np.float64),
             np.asarray(y_list, dtype=np.int64),
             sid_list)
+
+
+def build_dataset_with_profile(
+    cache_root: Path,
+    condition: str,
+    split: str,
+    sfreq: float,
+    nperseg: int,
+    freq_band: tuple[float, float],
+    profile_name: str = "base211",
+    connectivity_nperseg: int | None = None,
+    max_workers: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Like ``build_dataset`` but uses a named feature profile.
+
+    Parameters are identical to ``build_dataset`` with one addition:
+
+    profile_name : str
+        Key into ``eeg_bg.features.profiles.PROFILES``.  ``"base211"`` is the
+        default (backward-compatible 211-dim vector).
+    """
+    from eeg_bg.features.profiles import PROFILES
+    profile = PROFILES[profile_name]
+
+    if condition not in _CONDITION_TO_SUBDIR:
+        raise ValueError(
+            f"Unknown condition {condition!r}. "
+            f"Expected one of {list(_CONDITION_TO_SUBDIR)}."
+        )
+
+    subdir = cache_root / _CONDITION_TO_SUBDIR[condition]
+    if not subdir.exists():
+        raise FileNotFoundError(
+            f"Cache directory not found: {subdir}.  "
+            f"Run the corresponding preprocessing script first."
+        )
+
+    array_key = _CONDITION_TO_KEY[condition]
+    npz_files = sorted(subdir.rglob("*.npz"))
+
+    X_list: list[np.ndarray] = []
+    y_list: list[int] = []
+    sid_list: list[str] = []
+
+    for npz_path in tqdm(npz_files, desc=f"Features [{profile.name}/{condition}/{split}]",
+                         leave=False):
+        try:
+            data = np.load(npz_path, allow_pickle=True)
+            if data.get("split", "") != split:
+                continue
+            epochs_arr = data[array_key]
+            ch_names = list(data.get("ch_names", []))
+            if not ch_names:
+                ch_names = list(_STANDARD_19)
+            label = int(data["label"])
+            subject_id = str(data["subject_id"])
+
+            for epoch in epochs_arr:
+                feats = profile.extract_fn(
+                    epoch, ch_names, sfreq, nperseg, freq_band,
+                    connectivity_nperseg,
+                )
+                if len(feats) != profile.dim:
+                    raise ValueError(
+                        f"Profile {profile.name!r} extract_fn returned "
+                        f"{len(feats)} dims, expected {profile.dim}."
+                    )
+                X_list.append(feats)
+                y_list.append(label)
+                sid_list.append(subject_id)
+        except Exception:
+            continue
+
+    if not X_list:
+        return (np.empty((0, profile.dim), dtype=np.float64),
+                np.empty((0,), dtype=np.int64),
+                [])
+
+    return (np.vstack(X_list).astype(np.float64),
+            np.asarray(y_list, dtype=np.int64),
+            sid_list)

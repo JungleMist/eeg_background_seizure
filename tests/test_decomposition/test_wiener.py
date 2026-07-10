@@ -224,8 +224,8 @@ def test_unstable_filter_skips_only_that_target_candidate():
 
     def candidate_fn(group_data, S, target_idx, freq_mask, n_times):
         if target_idx == 1:
-            return np.array([[100.0]]), np.ones(n_times)
-        return np.array([[0.5]]), np.ones(n_times)
+            return np.array([[100.0]]), np.ones(n_times), {}
+        return np.array([[0.5]]), np.ones(n_times), {}
 
     result = decompose_epoch_with_fusion(
         epoch,

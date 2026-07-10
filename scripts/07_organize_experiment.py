@@ -82,6 +82,16 @@ _CNN_CONDITION_FILES = [
     "test_predictions.csv",
 ]
 
+# Files to copy from results/verification/ into the experiment archive.
+# Subject-level CSVs are omitted (too large); only summaries + metadata.
+_VERIFICATION_FILES = [
+    "verification_metadata.json",
+    "v1_summary.csv",
+    "gate_summary.csv",
+    "skipped_pairs_summary.csv",
+    "connectivity_summary.csv",
+]
+
 # Config keys extracted into the snapshot (flat display name → nested path).
 _SNAPSHOT_KEYS: list[tuple[str, list[str]]] = [
     ("target_sfreq",            ["preprocessing", "target_sfreq"]),
@@ -103,6 +113,7 @@ _SNAPSHOT_KEYS: list[tuple[str, list[str]]] = [
     ("ml.cv_folds",             ["ml", "xgboost", "cv_folds"]),
     ("ml.early_stopping_rounds", ["ml", "xgboost", "early_stopping_rounds"]),
     ("ml.param_grid",           ["ml", "xgboost", "param_grid"]),
+    ("ml.features.connectivity.nperseg", ["ml", "features", "connectivity", "nperseg"]),
 ]
 
 
@@ -168,6 +179,36 @@ def _copy_cnn_condition_files(
             shutil.copy2(src, dst_dir / fname)
 
 
+def _copy_verification_files(
+    verif_root: Path, exp_dir: Path
+) -> bool:
+    """Copy verification summary files into the experiment archive.
+
+    Returns True if the verification metadata file existed (i.e. script 04
+    was run), False otherwise.
+    """
+    meta = verif_root / "verification_metadata.json"
+    if not meta.exists():
+        return False
+    dst_dir = exp_dir / "verification"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for fname in _VERIFICATION_FILES:
+        src = verif_root / fname
+        if src.exists():
+            shutil.copy2(src, dst_dir / fname)
+    return True
+
+
+def _discover_feature_profile(exp_dir: Path, found: list[str]) -> str:
+    """Read the feature_set key from the first available data_stats.json."""
+    for cond in found:
+        fpath = exp_dir / cond / "data_stats.json"
+        if fpath.exists():
+            stats = json.loads(fpath.read_text(encoding="utf-8"))
+            return str(stats.get("feature_set", "base211"))
+    return "base211"
+
+
 def _derive_comparison_csv(exp_dir: Path, found: list[str]) -> None:
     """Re-build comparison_summary.csv from the archived per-condition metrics."""
     rows = []
@@ -227,6 +268,8 @@ def _write_experiment_json(
     found: list[str],
     found_cnn: list[str],
     snapshot: dict,
+    feature_profile: str = "base211",
+    has_verification: bool = False,
 ) -> None:
     """Write experiment.json."""
     results: dict[str, dict] = {}
@@ -254,6 +297,8 @@ def _write_experiment_json(
         "conditions_found":     found,
         "cnn_conditions_found": found_cnn,
         "config_snapshot":      snapshot,
+        "feature_profile":      feature_profile,
+        "has_verification":     has_verification,
         "results":              results,
         "results_cnn":          results_cnn,
     }
@@ -271,6 +316,8 @@ def _write_report_md(
     found_cnn: list[str],
     snapshot: dict,
     has_shap_comparison: bool,
+    feature_profile: str = "base211",
+    has_verification: bool = False,
 ) -> None:
     """Write report.md."""
     lines: list[str] = []
@@ -375,6 +422,32 @@ def _write_report_md(
             )
         lines.append("")
 
+    # Feature profile info
+    lines += [
+        "## Feature Profile",
+        "",
+        f"**Profile:** `{feature_profile}`",
+        "",
+    ]
+
+    # Verification summary
+    if has_verification:
+        verif_meta = exp_dir / "verification" / "verification_metadata.json"
+        if verif_meta.exists():
+            vm = json.loads(verif_meta.read_text(encoding="utf-8"))
+            lines += [
+                "## Verification",
+                "",
+                f"- **Mode:** {vm.get('mode', '—')}",
+                f"- **Checks:** {', '.join(vm.get('checks', []))}",
+                f"- **Subjects:** {vm.get('n_subjects', '—')}",
+                f"- **Recordings:** {vm.get('n_recordings', '—')}",
+                "",
+                "See `verification/` for per-band V1 coherence, gate diagnostics,",
+                "and lagged connectivity (imaginary coherence, wPLI) summaries.",
+                "",
+            ]
+
     # SHAP comparison figure
     if has_shap_comparison:
         lines += [
@@ -454,6 +527,17 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     else:
         print("[INFO] No CNN results found — skipping CNN archiving.")
 
+    # ── Copy verification files ──────────────────────────────────────────────
+    verif_root = results_dir / "verification"
+    has_verification = _copy_verification_files(verif_root, exp_dir)
+    if has_verification:
+        print("  Verification files archived.")
+    else:
+        print("[INFO] No verification results found — skipping verification archiving.")
+
+    # ── Feature profile discovery ────────────────────────────────────────────
+    feature_profile = _discover_feature_profile(exp_dir, found)
+
     # ── Re-derive cross-condition summary CSV ─────────────────────────────────
     print("Re-deriving comparison_summary.csv...")
     _derive_comparison_csv(exp_dir, found)
@@ -473,12 +557,14 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     print("Writing experiment.json...")
     _write_experiment_json(
         exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot,
+        feature_profile=feature_profile, has_verification=has_verification,
     )
 
     # ── Write report.md ───────────────────────────────────────────────────────
     print("Writing report.md...")
     _write_report_md(
-        exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot, has_shap,
+        exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot,
+        has_shap, feature_profile=feature_profile, has_verification=has_verification,
     )
 
     # ── Write resolved config ─────────────────────────────────────────────────

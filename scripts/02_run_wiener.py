@@ -16,6 +16,13 @@ def _process_wiener_file(args):
     out_path = Path(out_root_str) / npz_path.relative_to(Path(epoch_root_str))
 
     if out_path.exists() and not force:
+        data = np.load(out_path, allow_pickle=True)
+        sv = data.get("schema_version", None)
+        if sv is None or int(sv) < 1:
+            raise ValueError(
+                f"Old Wiener cache without target-level diagnostics "
+                f"(schema_version={sv}). Re-run script 02 with --force."
+            )
         return (npz_path.name, "cached", None)
 
     from eeg_bg.decomposition import (
@@ -43,7 +50,39 @@ def _process_wiener_file(args):
     results = []
     for i, epoch in enumerate(epochs):
         r = decompose(epoch, ch_names, cfg, subject_id=subject_id, epoch_idx=i)
-        results.append({"specific": r.specific, "coherent": r.coherent})
+        results.append(
+            {"specific": r.specific, "coherent": r.coherent,
+             "candidate_keys": r.candidate_keys,
+             "candidate_status": r.candidate_status,
+             "candidate_coherence": r.candidate_coherence,
+             "candidate_max_abs_h": r.candidate_max_abs_h,
+             "phase_gate_pass_fraction": r.phase_gate_pass_fraction,
+             "skipped_pairs": r.skipped_pairs,
+             }
+        )
+
+    # ── Build diagnostic arrays from per-epoch dicts ──────────────────────
+    _diag_keys = ["candidate_status", "candidate_coherence",
+                  "candidate_max_abs_h", "phase_gate_pass_fraction"]
+    _diag_arrays: dict[str, np.ndarray] = {}
+    for k in _diag_keys:
+        arrs = [r[k] for r in results]
+        # All None → skip this key; all ndarray → stack; mix → error.
+        if all(a is None for a in arrs):
+            continue
+        elif all(isinstance(a, np.ndarray) for a in arrs):
+            _diag_arrays[k] = np.stack(arrs, axis=0)
+        else:
+            _diag_arrays[k] = np.array(arrs, dtype=object)
+
+    skipped_arr = np.empty(len(results), dtype=object)
+    for i, r in enumerate(results):
+        skipped_arr[i] = list(r.get("skipped_pairs") or [])
+
+    # candidate_keys are identical across epochs — take from first result.
+    _first = results[0] if results else {}
+    ck = _first.get("candidate_keys")
+    _ck_arr = np.array(ck, dtype=object) if ck else np.array([], dtype=object)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -53,6 +92,10 @@ def _process_wiener_file(args):
         label=data["label"],
         subject_id=data["subject_id"],
         split=data["split"],
+        schema_version=1,
+        candidate_keys=_ck_arr,
+        skipped_pairs=skipped_arr,
+        **_diag_arrays,
     )
     return (npz_path.name, "done", None)
 
