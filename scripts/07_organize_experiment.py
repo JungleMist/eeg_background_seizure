@@ -161,16 +161,18 @@ def _discover_conditions(xgb_root: Path) -> list[str]:
 
 
 def _discover_profiles(xgb_root: Path) -> dict[str, list[str]]:
-    """Discover profile-aware results, with legacy flat-tree fallback."""
-    profile_results = {}
+    """Discover profile-aware and legacy results, merging both layouts."""
+    profile_results: dict[str, list[str]] = {}
     for profile in XGB_FEATURE_PROFILES:
         found = _discover_conditions(xgb_root / profile)
         if found:
             profile_results[profile] = found
-    if profile_results:
-        return profile_results
-    found = _discover_conditions(xgb_root)
-    return {"base211": found} if found else {}
+    legacy = _discover_conditions(xgb_root)
+    if legacy:
+        profile_results["base211"] = sorted(
+            set(profile_results.get("base211", [])) | set(legacy)
+        )
+    return profile_results
 
 
 def _discover_cnn_conditions(cnn_root: Path) -> list[str]:
