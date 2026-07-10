@@ -241,6 +241,7 @@ The output of every decomposition call.
 | `skipped_pairs` | list[str] | — | Channel groups skipped due to missing channels or no accepted targets |
 | `channel_sources` | dict[str, list[str]] | — | Accepted source groups contributing to each output channel |
 | `channel_weights` | dict[str, dict[str, float]] | — | Normalised coherence-fusion weights by channel and source group |
+| `candidate_fusion_weight` | ndarray | `(n_candidates,)` | Weights aligned with `candidate_keys`; rejected candidates are zero |
 
 **Identity guarantee:** `result.specific + result.coherent == result.raw` (up to float64 precision) for all channels, regardless of `nperseg`.
 

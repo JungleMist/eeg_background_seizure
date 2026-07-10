@@ -332,7 +332,10 @@ def main(config_path: str, condition: str, force: bool,
     cache_root  = Path(cfg["paths"]["cache_dir"])
     results_dir = Path(cfg["paths"]["results_dir"])
     feat_cache  = cache_root / "features"
-    out_root    = results_dir / "xgboost"
+    # Keep feature profiles isolated.  A profile-aware tree prevents the
+    # connectivity readout from overwriting the backward-compatible 211-dim
+    # results when both are trained for the same preprocessing condition.
+    out_root    = results_dir / "xgboost" / feature_set
 
     conditions = XGB_CONDITIONS if condition == "all" else [condition]
     all_results: dict[str, dict] = {}

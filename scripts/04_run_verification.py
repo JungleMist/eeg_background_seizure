@@ -32,6 +32,8 @@ results/verification/
     v1_summary.csv                 — pair × band × role (mean, Wilcoxon p, Cohen d)
     gate_subject.csv               — subject × candidate_key
     gate_summary.csv               — candidate_key summary
+    fusion_subject.csv             — subject × overlapping channel/source
+    fusion_summary.csv             — overlap fusion rates and weights
     connectivity_subject.csv       — subject × pair × band × role × metric (pre/post)
     connectivity_summary.csv       — pair × band × role × metric summary
 """
@@ -159,6 +161,46 @@ def _verify_recording_cache(args: tuple) -> dict:
             })
         rec["gate"] = gate_rows
 
+    # ── Overlap fusion diagnostics (from cache) ───────────────────────────
+    if "gate" in checks and "candidate_fusion_weight" in wdata:
+        ck = [str(x) for x in list(wdata["candidate_keys"])]
+        fw = np.asarray(wdata["candidate_fusion_weight"], dtype=float)
+        fusion_rows = []
+        candidate_channels = [key.split("::", 1)[1] for key in ck if "::" in key]
+        overlap_channels = sorted({ch for ch in candidate_channels if candidate_channels.count(ch) > 1})
+        for channel in overlap_channels:
+            indices = [i for i, key in enumerate(ck) if key.endswith(f"::{channel}")]
+            if not indices or fw.ndim != 2:
+                continue
+            weights = fw[:, indices]
+            n_sources = np.sum(weights > 0.0, axis=1)
+            multi = n_sources >= 2
+            effective = np.divide(
+                1.0, np.sum(weights * weights, axis=1),
+                out=np.zeros(weights.shape[0], dtype=float),
+                where=np.sum(weights * weights, axis=1) > 0.0,
+            )
+            for local_idx, candidate_idx in enumerate(indices):
+                active = weights[:, local_idx] > 0.0
+                active_multi = active & multi
+                fusion_rows.append({
+                    "subject_id": subject_id,
+                    "recording_id": recording_id,
+                    "split": split,
+                    "label": label,
+                    "channel": channel,
+                    "source_key": ck[candidate_idx].split("::", 1)[0],
+                    "n_epochs": n_epochs,
+                    "n_no_source": int(np.sum(n_sources == 0)),
+                    "n_single_source": int(np.sum(n_sources == 1)),
+                    "n_multi_source": int(np.sum(multi)),
+                    "multi_source_rate": float(np.mean(multi)) if n_epochs else 0.0,
+                    "mean_weight_when_active": float(np.mean(weights[active, local_idx])) if np.any(active) else 0.0,
+                    "mean_weight_when_multisource": float(np.mean(weights[active_multi, local_idx])) if np.any(active_multi) else 0.0,
+                    "mean_effective_source_count": float(np.mean(effective)),
+                })
+        rec["fusion"] = fusion_rows
+
     # ── V1 per-band coherence ─────────────────────────────────────────────
     v1_rows: list[dict] = []
     conn_rows: list[dict] = []
@@ -269,6 +311,22 @@ def _cohens_d(values: np.ndarray, threshold: float = 0.0) -> float:
     return float(np.mean(diffs) / sd)
 
 
+def _bh_qvalues(values: pd.Series) -> pd.Series:
+    """Benjamini-Hochberg q-values for a Series that may contain NaN."""
+    arr = values.to_numpy(dtype=float)
+    valid = np.isfinite(arr)
+    out = np.full(len(arr), np.nan)
+    if valid.any():
+        order = np.argsort(arr[valid])
+        ranked = arr[valid][order]
+        q = ranked * len(ranked) / np.arange(1, len(ranked) + 1)
+        q = np.minimum.accumulate(q[::-1])[::-1]
+        restored = np.empty(len(ranked))
+        restored[order] = np.minimum(q, 1.0)
+        out[valid] = restored
+    return pd.Series(out, index=values.index)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Subject-level aggregation
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -307,7 +365,10 @@ def _aggregate_v1_summary(subj_df: pd.DataFrame) -> pd.DataFrame:
             "n_subjects": n, "mean_reduction": mean_red,
             "wilcoxon_p": wilc_p, "cohens_d": cd,
         })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["q_value"] = _bh_qvalues(out["wilcoxon_p"])
+    return out
 
 
 def _aggregate_gate_subject(recs: list[dict]) -> pd.DataFrame:
@@ -333,7 +394,37 @@ def _aggregate_gate_summary(subj_df: pd.DataFrame) -> pd.DataFrame:
             "mean_coherence": float(g["mean_coherence"].mean()),
             "mean_pass_fraction": float(g["mean_pass_fraction"].mean()),
         })
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    return out
+
+
+def _aggregate_fusion_subject(recs: list[dict]) -> pd.DataFrame:
+    """Aggregate per-recording overlap fusion diagnostics to subject rows."""
+    rows = [row for rec in recs for row in rec.get("fusion", [])]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    group_cols = ["subject_id", "channel", "source_key", "split", "label"]
+    numeric = [
+        "n_epochs", "n_no_source", "n_single_source", "n_multi_source",
+        "multi_source_rate", "mean_weight_when_active",
+        "mean_weight_when_multisource", "mean_effective_source_count",
+    ]
+    return df.groupby(group_cols, as_index=False)[numeric].mean()
+
+
+def _aggregate_fusion_summary(subj_df: pd.DataFrame) -> pd.DataFrame:
+    if subj_df.empty:
+        return pd.DataFrame()
+    group_cols = ["channel", "source_key"]
+    out = subj_df.groupby(group_cols, as_index=False).agg(
+        n_subjects=("subject_id", "nunique"),
+        mean_multi_source_rate=("multi_source_rate", "mean"),
+        mean_weight_when_active=("mean_weight_when_active", "mean"),
+        mean_weight_when_multisource=("mean_weight_when_multisource", "mean"),
+        mean_effective_source_count=("mean_effective_source_count", "mean"),
+    )
+    return out
 
 
 def _aggregate_skipped_summary(recs: list[dict]) -> pd.DataFrame:
@@ -377,7 +468,11 @@ def _aggregate_conn_summary(subj_df: pd.DataFrame) -> pd.DataFrame:
             row[f"{m}_wilcoxon_p"] = _paired_wilcoxon_paired(d, 0.0) if len(d) >= 3 else np.nan
             row[f"{m}_cohens_d"] = _cohens_d(d, 0.0) if len(d) >= 3 else np.nan
         rows.append(row)
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        for metric in metrics:
+            out[f"{metric}_q_value"] = _bh_qvalues(out[f"{metric}_wilcoxon_p"])
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -505,6 +600,12 @@ def _write_cache_outputs(verif_dir: Path, recordings: list[dict],
     if "v1" in checks:
         v1_subj = _aggregate_v1_subject(recordings)
         v1_subj.to_csv(verif_dir / "v1_subject.csv", index=False)
+        if not v1_subj.empty:
+            (v1_subj.groupby(
+                ["subject_id", "pair_role", "band", "split", "label"],
+                as_index=False,
+            )[["mean_coh_pre", "mean_coh_post", "mean_reduction", "n_epochs"]]
+             .mean().to_csv(verif_dir / "v1_role_subject.csv", index=False))
         v1_sum = _aggregate_v1_summary(v1_subj)
         v1_sum.to_csv(verif_dir / "v1_summary.csv", index=False)
         print(f"V1: {len(v1_subj)} subject rows → {verif_dir / 'v1_subject.csv'}")
@@ -515,6 +616,12 @@ def _write_cache_outputs(verif_dir: Path, recordings: list[dict],
         gate_sum = _aggregate_gate_summary(gate_subj)
         gate_sum.to_csv(verif_dir / "gate_summary.csv", index=False)
         print(f"Gate: {len(gate_subj)} subject rows → {verif_dir / 'gate_subject.csv'}")
+
+        fusion_subj = _aggregate_fusion_subject(recordings)
+        fusion_subj.to_csv(verif_dir / "fusion_subject.csv", index=False)
+        fusion_sum = _aggregate_fusion_summary(fusion_subj)
+        fusion_sum.to_csv(verif_dir / "fusion_summary.csv", index=False)
+        print(f"Fusion: {len(fusion_subj)} subject rows → {verif_dir / 'fusion_subject.csv'}")
 
     if "gate" in checks:
         skipped = [row for rec in recordings for row in rec.get("skipped_pairs", [])]
@@ -532,6 +639,11 @@ def _write_cache_outputs(verif_dir: Path, recordings: list[dict],
                           if c not in grp_cols + ["recording_id", "epoch_idx"]]
             subj_agg = conn_raw.groupby(grp_cols, dropna=False)[metric_cols].mean().reset_index()
             subj_agg.to_csv(verif_dir / "connectivity_subject.csv", index=False)
+            role_cols = ["subject_id", "pair_role", "band", "split", "label"]
+            metric_cols = [c for c in subj_agg.columns if c not in role_cols + ["ch_i", "ch_j"]]
+            subj_agg.groupby(role_cols, as_index=False)[metric_cols].mean().to_csv(
+                verif_dir / "connectivity_role_subject.csv", index=False
+            )
             conn_sum = _aggregate_conn_summary(subj_agg)
             conn_sum.to_csv(verif_dir / "connectivity_summary.csv", index=False)
             print(f"Connectivity: {len(subj_agg)} subject rows → {verif_dir / 'connectivity_subject.csv'}")

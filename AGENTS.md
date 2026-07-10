@@ -61,6 +61,9 @@ conda run -n eeg_pipeline python scripts/07_organize_experiment.py [--name LABEL
 
 # 08 — EEGNet CNN training directly on raw epoch tensors → results/cnn/
 conda run -n eeg_pipeline python scripts/08_train_cnn.py [--condition raw|ica|wiener|all] [--config PATH] [--force] [--workers N]
+
+# 09 — Aggregate the fixed 8-cell phase/coherence grid → results/exp_wiener_phase/grid_summary/
+conda run -n eeg_pipeline python scripts/09_analyze_wiener_phase_grid.py [--results-root PATH]
 ```
 
 Script 08 has no dependency on script 06 — it reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly and trains an independent EEGNet model per condition. It can run any time after 01 (+02/03 for the wiener/ica conditions).
@@ -74,7 +77,7 @@ Changing a `configs/default.yaml` key requires re-running all scripts at or afte
 | 1 | `01+` (all scripts) | `paths`, `dataset`, `split`, `preprocessing`, `channels.standard_19` |
 | 2 | `02+` | `channels.channel_groups`, `channels.passthrough`, `wiener` |
 | 3 | `03+` | `ica` |
-| 4 | `06` only | `ml.xgboost`, `ml.shap` (`ml.features` is currently dead config — see "Feature vector layout" below) |
+| 4 | `06` only | `ml.xgboost`, `ml.shap`, and feature-profile settings used by `base211_conn80` |
 | 5 | `08` only | `ml.cnn` |
 
 Scripts 04 and 05 produce no cache and always re-run from existing caches — changing `verification` or `visualization` keys requires no `--force`. This includes `visualization.export_edf`/`export_edf_max_epochs` — plain output-gating flags for script 05's optional `.edf` export step, not cache keys. `export_edf_max_epochs` must be a positive integer (`>=1`). Script 06 additionally has a **shape guard**: if a cached `cache/features/{condition}_{split}.npz` has a different column count than the current `FEATURE_NAMES` (e.g. after a feature-engineering code change bumped the vector length), `_load_or_extract_features` raises `ValueError` naming `--force` rather than silently training on a stale/misaligned feature matrix.
@@ -191,7 +194,10 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 
 **This vector is positionally stable** — reordering `standard_19` or `SYMMETRIC_PAIRS` invalidates saved SHAP `.npy` arrays (indexed by position, not name). A wavelet DWT + connectivity + complexity + multi-scale temporal-stats expansion (up to 1070 dims) was integrated on top of this vector and later reverted back to it; `eeg_bg/features/{wavelet,connectivity,complexity,temporal_stats}.py` and their unit tests still exist in the codebase (see the module table above) but are not called from `extraction.py`. `aggregate_shap_by_band` in `eeg_bg/ml/shap_analysis.py` still reports `"wavelet"`/`"connectivity"`/`"complexity"`/`"temporal"` keys in `shap_by_band.json` — these will correctly show `0.0` under this 211-dim vector since no matching feature names exist (pattern-matching degrades gracefully; not a bug).
 
-**`ml.features` in `configs/default.yaml` is fully dead config** — it documents hyperparameters for the disconnected blocks (`wavelet.wavelet`/`wavelet.level`, `connectivity.nperseg`, `complexity.m`/`complexity.r_factor`, `temporal.scales`), but nothing in the codebase reads `cfg["ml"]["features"]`, and `extraction.py` no longer calls `wavelet_features()`, `connectivity_features()`, `complexity_features()`, or `epoch_temporal_stats()` at all. `ml.shap.pruning_threshold` is likewise now dead config — script 06 no longer has a SHAP-pruning code path. The only feature-extraction params actually threaded through from config are `preprocessing.target_sfreq`, `wiener.nperseg`, and `wiener.freq_band` (passed into `build_dataset`/`extract_epoch_features` from `scripts/06_train_xgboost.py`), which drive the per-channel block.
+The wavelet, complexity, and temporal-stat blocks remain disconnected. The
+`base211_conn80` profile now calls `connectivity_features()` and uses
+`ml.features.connectivity.nperseg`; `base211` remains the original 211-dim
+vector. `ml.shap.pruning_threshold` remains unused.
 
 ### Label encoding
 
@@ -226,7 +232,8 @@ results/
 │   ├── v2_transitivity.csv
 │   └── v3_frequency_variation.csv
 ├── xgboost/
-│   ├── {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
+│   ├── {base211,base211_conn80}/
+│   │   ├── {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
 │   │   ├── model.joblib              — fitted XGBClassifier
 │   │   ├── scaler.joblib             — StandardScaler (fit on train)
 │   │   ├── best_params.json          — GridSearchCV best hyperparameters
@@ -236,8 +243,8 @@ results/
 │   │   ├── shap_summary.png          — beeswarm plot (top 20 features)
 │   │   ├── shap_by_band.json         — mean |SHAP| per feature-type group
 │   │   └── shap_by_channel.json      — mean |SHAP| per EEG channel
-│   ├── comparison_summary.csv        — 5 conditions × {val_auroc, test_auroc, f1, acc}
-│   └── shap_comparison.png           — 2×5 publication comparison figure
+│   │   ├── comparison_summary.csv    — profile-specific condition summary
+│   │   └── shap_comparison.png       — profile-specific comparison figure
 ├── cnn/
 │   ├── {raw,ica,wiener}/
 │   │   ├── best_model.pt             — EEGNet state_dict
@@ -247,7 +254,7 @@ results/
 │   └── comparison_summary.csv        — written when all 3 conditions have been trained
 └── exp_chgroups/                     — output of scripts/run_chgroups_experiment.sh
     ├── runtime_<timestamp>.log
-    └── {1..5}/xgboost/{raw,ica,wiener}/  — per-channel-group-config results
+    └── {1..5}/xgboost/base211/{raw,ica,wiener}/  — per-channel-group-config results
 ```
 
 ### Experiment archive layout (script 07)
@@ -259,9 +266,9 @@ experiments/<timestamp>_<name>/
 ├── config.yaml              — copy of the config used
 ├── experiment.json          — metadata + full metrics for all conditions (xgboost + cnn)
 ├── report.md                — human-readable summary table(s), including a CNN results table if any CNN results are found
-├── comparison_summary.csv   — re-derived from results/xgboost/
-├── shap_comparison.png      — re-generated from per-condition SHAP data
-├── {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/  — per-condition XGBoost JSON files (metrics, SHAP by band/channel, best_params)
+├── xgboost/{base211,base211_conn80}/{raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
+│   └── per-profile metrics, predictions, SHAP data, and best_params
+├── verification/             — V1, gate, skip, fusion, and connectivity summaries
 └── cnn/{raw,ica,wiener}/    — per-condition CNN result files (only for conditions with a test_metrics.json)
 ```
 

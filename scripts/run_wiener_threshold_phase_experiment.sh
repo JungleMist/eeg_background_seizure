@@ -147,7 +147,9 @@ prepare_condition_results() {
     local condition="$2"
     local results_dir
     results_dir="$(config_value "$cfg" "paths.results_dir")"
-    safe_clear_dir "$results_dir/xgboost/$condition" "$condition results"
+    for profile in base211 base211_conn80; do
+        safe_clear_dir "$results_dir/xgboost/$profile/$condition" "$profile/$condition results"
+    done
 }
 
 clean_baseline_cache_and_results() {
@@ -159,8 +161,12 @@ clean_baseline_cache_and_results() {
     safe_clear_dir "$cache_dir/ica" "ica cache"
     rm -f "$cache_dir/features/raw_"*.npz
     rm -f "$cache_dir/features/ica_"*.npz
-    safe_clear_dir "$results_dir/xgboost/raw" "baseline raw results"
-    safe_clear_dir "$results_dir/xgboost/ica" "baseline ica results"
+    rm -f "$cache_dir/features/base211_conn80/raw_"*.npz
+    rm -f "$cache_dir/features/base211_conn80/ica_"*.npz
+    for profile in base211 base211_conn80; do
+        safe_clear_dir "$results_dir/xgboost/$profile/raw" "$profile baseline raw results"
+        safe_clear_dir "$results_dir/xgboost/$profile/ica" "$profile baseline ica results"
+    done
 }
 
 copy_baseline_results() {
@@ -170,16 +176,17 @@ copy_baseline_results() {
     results_dir="$(config_value "$cfg" "paths.results_dir")"
     baseline_dir="$(config_value "configs/exp_wiener_phase_baseline.yaml" "paths.results_dir")"
 
-    if [[ ! -d "$baseline_dir/xgboost/raw" || ! -d "$baseline_dir/xgboost/ica" ]]; then
-        echo "Missing baseline raw/ica results in $baseline_dir/xgboost"
-        exit 1
-    fi
-
-    mkdir -p "$results_dir/xgboost"
-    safe_clear_dir "$results_dir/xgboost/raw" "exp${idx} raw baseline copy"
-    safe_clear_dir "$results_dir/xgboost/ica" "exp${idx} ica baseline copy"
-    cp -R "$baseline_dir/xgboost/raw" "$results_dir/xgboost/"
-    cp -R "$baseline_dir/xgboost/ica" "$results_dir/xgboost/"
+    for profile in base211 base211_conn80; do
+        if [[ ! -d "$baseline_dir/xgboost/$profile/raw" || ! -d "$baseline_dir/xgboost/$profile/ica" ]]; then
+            echo "Missing $profile baseline raw/ica results in $baseline_dir/xgboost"
+            exit 1
+        fi
+        mkdir -p "$results_dir/xgboost/$profile"
+        safe_clear_dir "$results_dir/xgboost/$profile/raw" "exp${idx} $profile raw baseline copy"
+        safe_clear_dir "$results_dir/xgboost/$profile/ica" "exp${idx} $profile ica baseline copy"
+        cp -R "$baseline_dir/xgboost/$profile/raw" "$results_dir/xgboost/$profile/"
+        cp -R "$baseline_dir/xgboost/$profile/ica" "$results_dir/xgboost/$profile/"
+    done
 }
 
 echo "# run_wiener_threshold_phase_experiment.sh started $(date)" | tee "$LOG_FILE"
@@ -241,19 +248,14 @@ for IDX in 1 2 3 4 5 6 7 8; do
             --mode "$MODE" \
             --checks v1,gate,connectivity
 
-    run_step "exp$IDX - 06 XGBoost $CONDITION (base211)" \
-        $CONDA_RUN python scripts/06_train_xgboost.py \
-            --config "$CFG" \
-            --condition "$CONDITION" \
-            --feature-set base211 \
-            --force
-
-    run_step "exp$IDX - 06 XGBoost $CONDITION (base211_conn80)" \
-        $CONDA_RUN python scripts/06_train_xgboost.py \
-            --config "$CFG" \
-            --condition "$CONDITION" \
-            --feature-set base211_conn80 \
-            --force
+    for FEATURE_SET in base211 base211_conn80; do
+        run_step "exp$IDX - 06 XGBoost $CONDITION ($FEATURE_SET)" \
+            $CONDA_RUN python scripts/06_train_xgboost.py \
+                --config "$CFG" \
+                --condition "$CONDITION" \
+                --feature-set "$FEATURE_SET" \
+                --force
+    done
 
     clean_condition_cache "$CFG" "$CONDITION" "$CACHE_SUBDIR"
 done
@@ -275,17 +277,21 @@ else
             --force \
             --workers "$WORKERS"
 
-    run_step "06 - XGBoost raw baseline" \
-        $CONDA_RUN python scripts/06_train_xgboost.py \
-            --config configs/exp_wiener_phase_baseline.yaml \
-            --condition raw \
-            --force
+    for FEATURE_SET in base211 base211_conn80; do
+        run_step "06 - XGBoost raw baseline ($FEATURE_SET)" \
+            $CONDA_RUN python scripts/06_train_xgboost.py \
+                --config configs/exp_wiener_phase_baseline.yaml \
+                --condition raw \
+                --feature-set "$FEATURE_SET" \
+                --force
 
-    run_step "06 - XGBoost ica baseline" \
-        $CONDA_RUN python scripts/06_train_xgboost.py \
-            --config configs/exp_wiener_phase_baseline.yaml \
-            --condition ica \
-            --force
+        run_step "06 - XGBoost ica baseline ($FEATURE_SET)" \
+            $CONDA_RUN python scripts/06_train_xgboost.py \
+                --config configs/exp_wiener_phase_baseline.yaml \
+                --condition ica \
+                --feature-set "$FEATURE_SET" \
+                --force
+    done
 fi
 
 echo ""
@@ -320,7 +326,7 @@ for IDX in 1 2 3 4 5 6 7 8; do
     CONDITION="${CONDITIONS[$IDX]}"
     RESULTS_DIR="$(config_value "$CFG" "paths.results_dir")"
     get_auroc() {
-        local f="$RESULTS_DIR/xgboost/$1/test_metrics.json"
+        local f="$RESULTS_DIR/xgboost/base211/$1/test_metrics.json"
         [[ -f "$f" ]] && $CONDA_RUN python -c "import json; print(f\"{json.load(open('$f'))['auroc']:.4f}\")" || echo "n/a"
     }
     RAW=$(get_auroc raw)

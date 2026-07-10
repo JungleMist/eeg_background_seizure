@@ -36,6 +36,7 @@ class WienerResult:
     candidate_coherence: np.ndarray | None = None       # float64 (n_candidates,)
     candidate_max_abs_h: np.ndarray | None = None       # float64 (n_candidates,)
     phase_gate_pass_fraction: np.ndarray | None = None  # float64 (n_candidates,)
+    candidate_fusion_weight: np.ndarray | None = None   # float64 (n_candidates,)
 
 
 def estimate_cross_psd(
@@ -314,6 +315,7 @@ def decompose_epoch_with_fusion(
     candidate_coherence = np.array(_candidate_coherence, dtype=np.float64) if n_candidates else None
     candidate_max_abs_h = np.array(_candidate_max_abs_h, dtype=np.float64) if n_candidates else None
     phase_gate_pass_fraction = np.array(_candidate_phase_pass, dtype=np.float64) if n_candidates else None
+    candidate_fusion_weight = np.zeros(n_candidates, dtype=np.float64) if n_candidates else None
 
     channel_sources: dict[str, list[str]] = {}
     channel_weights: dict[str, dict[str, float]] = {}
@@ -332,6 +334,15 @@ def decompose_epoch_with_fusion(
             fused = fused + weight * candidate_coherent
             sources.append(pair_key)
             weights_by_source[pair_key] = float(weight)
+            if candidate_fusion_weight is not None:
+                key = f"{pair_key}::{ch_names[global_idx]}"
+                try:
+                    candidate_fusion_weight[candidate_keys.index(key)] = float(weight)
+                except ValueError:
+                    # Defensive guard: candidate keys are expected to be
+                    # aligned, but a missing diagnostic must not affect the
+                    # decomposed signal.
+                    pass
 
         coherent[global_idx] = fused
         specific[global_idx] = epoch[global_idx] - fused
@@ -356,6 +367,7 @@ def decompose_epoch_with_fusion(
         candidate_coherence=candidate_coherence,
         candidate_max_abs_h=candidate_max_abs_h,
         phase_gate_pass_fraction=phase_gate_pass_fraction,
+        candidate_fusion_weight=candidate_fusion_weight,
     )
 
 

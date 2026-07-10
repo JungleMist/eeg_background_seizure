@@ -161,6 +161,15 @@ def test_overlapping_channel_uses_weighted_fusion():
     np.testing.assert_allclose(result.coherent[b_idx], expected, atol=1e-8)
     assert not np.allclose(result.coherent[b_idx], right_only.coherent[b_idx])
 
+    assert result.candidate_fusion_weight is not None
+    keys = list(result.candidate_keys or [])
+    b_weights = [
+        result.candidate_fusion_weight[i]
+        for i, key in enumerate(keys)
+        if key.endswith("::B")
+    ]
+    np.testing.assert_allclose(sum(b_weights), 1.0, atol=1e-12)
+
 
 def test_overlapping_channel_fusion_is_group_order_independent():
     ch_names = ["A", "B", "C"]

@@ -18,7 +18,7 @@ def _process_wiener_file(args):
     if out_path.exists() and not force:
         data = np.load(out_path, allow_pickle=True)
         sv = data.get("schema_version", None)
-        if sv is None or int(sv) < 1:
+        if sv is None or int(sv) < 2:
             raise ValueError(
                 f"Old Wiener cache without target-level diagnostics "
                 f"(schema_version={sv}). Re-run script 02 with --force."
@@ -57,13 +57,15 @@ def _process_wiener_file(args):
              "candidate_coherence": r.candidate_coherence,
              "candidate_max_abs_h": r.candidate_max_abs_h,
              "phase_gate_pass_fraction": r.phase_gate_pass_fraction,
+             "candidate_fusion_weight": r.candidate_fusion_weight,
              "skipped_pairs": r.skipped_pairs,
              }
         )
 
     # ── Build diagnostic arrays from per-epoch dicts ──────────────────────
     _diag_keys = ["candidate_status", "candidate_coherence",
-                  "candidate_max_abs_h", "phase_gate_pass_fraction"]
+                  "candidate_max_abs_h", "phase_gate_pass_fraction",
+                  "candidate_fusion_weight"]
     _diag_arrays: dict[str, np.ndarray] = {}
     for k in _diag_keys:
         arrs = [r[k] for r in results]
@@ -92,7 +94,7 @@ def _process_wiener_file(args):
         label=data["label"],
         subject_id=data["subject_id"],
         split=data["split"],
-        schema_version=1,
+        schema_version=2,
         candidate_keys=_ck_arr,
         skipped_pairs=skipped_arr,
         **_diag_arrays,

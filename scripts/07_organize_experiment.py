@@ -27,7 +27,8 @@ experiments/YYYY-MM-DD_HHMMSS[_<name>]/
     report.md                   — human-readable summary
     comparison_summary.csv      — re-derived from per-condition metrics JSONs
     shap_comparison.png         — re-generated via plot_shap_comparison()
-    {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
+    xgboost/{base211,base211_conn80}/
+        {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
         — present only when that condition has results
         val_metrics.json
         test_metrics.json
@@ -59,6 +60,7 @@ from eeg_bg.ml.shap_analysis import plot_shap_comparison
 XGB_CONDITIONS = [
     "raw", "ica", "wiener", "wiener_phasegated", "wiener_zerophase",
 ]
+XGB_FEATURE_PROFILES = ["base211", "base211_conn80"]
 CNN_CONDITIONS = ["raw", "ica", "wiener"]
 
 # Files to copy from results/xgboost/{condition}/ into the experiment archive.
@@ -70,6 +72,8 @@ _CONDITION_FILES = [
     "shap_by_channel.json",   # needed to regenerate comparison figure
     "shap_summary.png",
     "data_stats.json",        # subject + epoch counts per split
+    "val_predictions.csv",
+    "test_predictions.csv",
 ]
 
 # Files to copy from results/cnn/{condition}/ into the experiment archive.
@@ -87,9 +91,17 @@ _CNN_CONDITION_FILES = [
 _VERIFICATION_FILES = [
     "verification_metadata.json",
     "v1_summary.csv",
+    "v1_role_subject.csv",
+    "v1_subject.csv",
     "gate_summary.csv",
+    "gate_subject.csv",
+    "fusion_summary.csv",
+    "fusion_subject.csv",
     "skipped_pairs_summary.csv",
+    "skipped_pairs_subject.csv",
     "connectivity_summary.csv",
+    "connectivity_role_subject.csv",
+    "connectivity_subject.csv",
 ]
 
 # Config keys extracted into the snapshot (flat display name → nested path).
@@ -107,6 +119,9 @@ _SNAPSHOT_KEYS: list[tuple[str, list[str]]] = [
     ("wiener.nperseg",          ["wiener", "nperseg"]),
     ("wiener.freq_resolution_hz", ["wiener", "freq_resolution_hz"]),
     ("wiener.coherence_threshold", ["wiener", "coherence_threshold"]),
+    ("wiener.overlap_policy", ["wiener", "overlap_policy"]),
+    ("wiener.filter_magnitude_threshold", ["wiener", "filter_magnitude_threshold"]),
+    ("wiener.freq_band", ["wiener", "freq_band"]),
     ("wiener.phase_gate_threshold_rad", ["wiener", "phase_gate_threshold_rad"]),
     ("ica.n_components",        ["ica", "n_components"]),
     ("ica.artifact_corr_threshold", ["ica", "artifact_corr_threshold"]),
@@ -145,6 +160,19 @@ def _discover_conditions(xgb_root: Path) -> list[str]:
     ]
 
 
+def _discover_profiles(xgb_root: Path) -> dict[str, list[str]]:
+    """Discover profile-aware results, with legacy flat-tree fallback."""
+    profile_results = {}
+    for profile in XGB_FEATURE_PROFILES:
+        found = _discover_conditions(xgb_root / profile)
+        if found:
+            profile_results[profile] = found
+    if profile_results:
+        return profile_results
+    found = _discover_conditions(xgb_root)
+    return {"base211": found} if found else {}
+
+
 def _discover_cnn_conditions(cnn_root: Path) -> list[str]:
     """Return CNN conditions that have a test_metrics.json (i.e. are complete)."""
     return [
@@ -154,11 +182,13 @@ def _discover_cnn_conditions(cnn_root: Path) -> list[str]:
 
 
 def _copy_condition_files(
-    xgb_root: Path, exp_dir: Path, condition: str
+    xgb_root: Path, exp_dir: Path, profile: str, condition: str
 ) -> None:
     """Copy per-condition XGBoost result files into the experiment archive."""
-    src_dir = xgb_root / condition
-    dst_dir = exp_dir / condition
+    src_dir = xgb_root / profile / condition
+    if not src_dir.exists() and profile == "base211":
+        src_dir = xgb_root / condition  # legacy flat layout
+    dst_dir = exp_dir / "xgboost" / profile / condition
     dst_dir.mkdir(parents=True, exist_ok=True)
     for fname in _CONDITION_FILES:
         src = src_dir / fname
@@ -199,28 +229,20 @@ def _copy_verification_files(
     return True
 
 
-def _discover_feature_profile(exp_dir: Path, found: list[str]) -> str:
-    """Read the feature_set key from the first available data_stats.json."""
-    for cond in found:
-        fpath = exp_dir / cond / "data_stats.json"
-        if fpath.exists():
-            stats = json.loads(fpath.read_text(encoding="utf-8"))
-            return str(stats.get("feature_set", "base211"))
-    return "base211"
-
-
-def _derive_comparison_csv(exp_dir: Path, found: list[str]) -> None:
+def _derive_comparison_csv(
+    exp_dir: Path, profile: str, found: list[str]
+) -> None:
     """Re-build comparison_summary.csv from the archived per-condition metrics."""
     rows = []
     for cond in found:
         row: dict = {"condition": cond}
         for prefix in ("val", "test"):
-            metrics_file = exp_dir / cond / f"{prefix}_metrics.json"
+            metrics_file = exp_dir / "xgboost" / profile / cond / f"{prefix}_metrics.json"
             if metrics_file.exists():
                 metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
                 for k, v in metrics.items():
                     row[f"{prefix}_{k}"] = v
-        stats_file = exp_dir / cond / "data_stats.json"
+        stats_file = exp_dir / "xgboost" / profile / cond / "data_stats.json"
         if stats_file.exists():
             stats = json.loads(stats_file.read_text(encoding="utf-8"))
             for split in ("train", "val", "test"):
@@ -230,12 +252,12 @@ def _derive_comparison_csv(exp_dir: Path, found: list[str]) -> None:
         rows.append(row)
     if rows:
         pd.DataFrame(rows).to_csv(
-            exp_dir / "comparison_summary.csv", index=False
+            exp_dir / "xgboost" / profile / "comparison_summary.csv", index=False
         )
 
 
 def _regenerate_shap_comparison(
-    exp_dir: Path, found: list[str], dpi: int
+    exp_dir: Path, profile: str, found: list[str], dpi: int
 ) -> bool:
     """Re-generate shap_comparison.png from archived JSON data.
 
@@ -243,8 +265,8 @@ def _regenerate_shap_comparison(
     """
     shap_results: dict[str, dict] = {}
     for cond in found:
-        band_file = exp_dir / cond / "shap_by_band.json"
-        ch_file   = exp_dir / cond / "shap_by_channel.json"
+        band_file = exp_dir / "xgboost" / profile / cond / "shap_by_band.json"
+        ch_file   = exp_dir / "xgboost" / profile / cond / "shap_by_channel.json"
         if band_file.exists() and ch_file.exists():
             shap_results[cond] = {
                 "shap_by_band":    json.loads(band_file.read_text(encoding="utf-8")),
@@ -254,7 +276,7 @@ def _regenerate_shap_comparison(
         return False
     plot_shap_comparison(
         shap_results,
-        output_path=exp_dir / "shap_comparison.png",
+        output_path=exp_dir / "xgboost" / profile / "shap_comparison.png",
         dpi=dpi,
     )
     return True
@@ -265,21 +287,23 @@ def _write_experiment_json(
     folder_name: str,
     timestamp: str,
     config_path: str,
-    found: list[str],
+    found_by_profile: dict[str, list[str]],
     found_cnn: list[str],
     snapshot: dict,
-    feature_profile: str = "base211",
     has_verification: bool = False,
 ) -> None:
     """Write experiment.json."""
-    results: dict[str, dict] = {}
-    for cond in found:
-        entry: dict = {}
-        for key in ("val_metrics", "test_metrics", "best_params", "data_stats"):
-            fpath = exp_dir / cond / f"{key}.json"
-            if fpath.exists():
-                entry[key] = json.loads(fpath.read_text(encoding="utf-8"))
-        results[cond] = entry
+    results_by_profile: dict[str, dict] = {}
+    for profile, found in found_by_profile.items():
+        results: dict[str, dict] = {}
+        for cond in found:
+            entry: dict = {}
+            for key in ("val_metrics", "test_metrics", "best_params", "data_stats"):
+                fpath = exp_dir / "xgboost" / profile / cond / f"{key}.json"
+                if fpath.exists():
+                    entry[key] = json.loads(fpath.read_text(encoding="utf-8"))
+            results[cond] = entry
+        results_by_profile[profile] = results
 
     results_cnn: dict[str, dict] = {}
     for cond in found_cnn:
@@ -294,12 +318,14 @@ def _write_experiment_json(
         "name":                 folder_name,
         "timestamp":            timestamp,
         "config_path":          config_path,
-        "conditions_found":     found,
+        "conditions_found":     sorted({c for xs in found_by_profile.values() for c in xs}),
+        "conditions_found_by_profile": found_by_profile,
         "cnn_conditions_found": found_cnn,
         "config_snapshot":      snapshot,
-        "feature_profile":      feature_profile,
         "has_verification":     has_verification,
-        "results":              results,
+        "results_xgboost":      results_by_profile,
+        # Keep the legacy key for consumers that expect a single profile.
+        "results":              results_by_profile.get("base211", {}),
         "results_cnn":          results_cnn,
     }
     (exp_dir / "experiment.json").write_text(
@@ -312,11 +338,10 @@ def _write_report_md(
     folder_name: str,
     timestamp: str,
     config_path: str,
-    found: list[str],
+    found_by_profile: dict[str, list[str]],
     found_cnn: list[str],
     snapshot: dict,
-    has_shap_comparison: bool,
-    feature_profile: str = "base211",
+    has_shap_comparison: dict[str, bool],
     has_verification: bool = False,
 ) -> None:
     """Write report.md."""
@@ -328,7 +353,7 @@ def _write_report_md(
         "",
         f"**Date:** {timestamp.replace('T', ' ')}  ",
         f"**Config:** {config_path}  ",
-        f"**Conditions found:** {', '.join(found) if found else '*(none)*'}",
+        f"**Profiles found:** {', '.join(found_by_profile) if found_by_profile else '*(none)*'}",
         "",
     ]
 
@@ -353,9 +378,12 @@ def _write_report_md(
         return f"{v:.3f}" if isinstance(v, float) else str(v)
 
     # XGBoost results summary table
-    if found:
+    for profile, found in found_by_profile.items():
+        if not found:
+            continue
+        profile_base = exp_dir / "xgboost" / profile
         lines += [
-            "## XGBoost Results Summary",
+            f"## XGBoost Results Summary — `{profile}`",
             "",
             "| Condition | Val AUROC | Val F1 | Val Acc | Test AUROC | Test F1 | Test Acc |",
             "|---|---|---|---|---|---|---|",
@@ -363,12 +391,12 @@ def _write_report_md(
         for cond in found:
             lines.append(
                 f"| {cond} "
-                f"| {_read_metric(exp_dir, cond, 'val', 'auroc')} "
-                f"| {_read_metric(exp_dir, cond, 'val', 'f1')} "
-                f"| {_read_metric(exp_dir, cond, 'val', 'accuracy')} "
-                f"| {_read_metric(exp_dir, cond, 'test', 'auroc')} "
-                f"| {_read_metric(exp_dir, cond, 'test', 'f1')} "
-                f"| {_read_metric(exp_dir, cond, 'test', 'accuracy')} |"
+                f"| {_read_metric(profile_base, cond, 'val', 'auroc')} "
+                f"| {_read_metric(profile_base, cond, 'val', 'f1')} "
+                f"| {_read_metric(profile_base, cond, 'val', 'accuracy')} "
+                f"| {_read_metric(profile_base, cond, 'test', 'auroc')} "
+                f"| {_read_metric(profile_base, cond, 'test', 'f1')} "
+                f"| {_read_metric(profile_base, cond, 'test', 'accuracy')} |"
             )
         lines.append("")
 
@@ -394,12 +422,14 @@ def _write_report_md(
         lines.append("")
 
     # Dataset statistics (read from first available condition — splits are shared)
+    first_profile = next(iter(found_by_profile), None)
     first_stats_cond = next(
-        (c for c in found if (exp_dir / c / "data_stats.json").exists()), None
-    )
-    if first_stats_cond:
+        (c for c in found_by_profile.get(first_profile, [])
+         if (exp_dir / "xgboost" / first_profile / c / "data_stats.json").exists()), None
+    ) if first_profile else None
+    if first_stats_cond and first_profile:
         stats = json.loads(
-            (exp_dir / first_stats_cond / "data_stats.json")
+            (exp_dir / "xgboost" / first_profile / first_stats_cond / "data_stats.json")
             .read_text(encoding="utf-8")
         )
         lines += [
@@ -422,13 +452,7 @@ def _write_report_md(
             )
         lines.append("")
 
-    # Feature profile info
-    lines += [
-        "## Feature Profile",
-        "",
-        f"**Profile:** `{feature_profile}`",
-        "",
-    ]
+    lines += ["## Feature Profiles", "", ", ".join(f"`{p}`" for p in found_by_profile), ""]
 
     # Verification summary
     if has_verification:
@@ -449,29 +473,27 @@ def _write_report_md(
             ]
 
     # SHAP comparison figure
-    if has_shap_comparison:
-        lines += [
-            "## SHAP Comparison",
-            "",
-            "![SHAP Comparison](shap_comparison.png)",
-            "",
-        ]
+    for profile, has_shap in has_shap_comparison.items():
+        if has_shap:
+            lines += [
+                f"## SHAP Comparison — `{profile}`", "",
+                f"![SHAP Comparison](xgboost/{profile}/shap_comparison.png)", "",
+            ]
 
     # Per-condition SHAP summaries
-    conds_with_shap = [
-        c for c in found
-        if (exp_dir / c / "shap_summary.png").exists()
-    ]
-    if conds_with_shap:
-        lines += ["## Per-Condition SHAP Summaries", ""]
-        for cond in conds_with_shap:
-            label = cond.capitalize()
-            lines += [
-                f"### {label}",
-                "",
-                f"![{label} SHAP]({cond}/shap_summary.png)",
-                "",
-            ]
+    for profile, found in found_by_profile.items():
+        conds_with_shap = [
+            c for c in found
+            if (exp_dir / "xgboost" / profile / c / "shap_summary.png").exists()
+        ]
+        if conds_with_shap:
+            lines += [f"## Per-Condition SHAP Summaries — `{profile}`", ""]
+            for cond in conds_with_shap:
+                label = cond.capitalize()
+                lines += [
+                    f"### {label}", "",
+                    f"![{label} SHAP](xgboost/{profile}/{cond}/shap_summary.png)", "",
+                ]
 
     (exp_dir / "report.md").write_text(
         "\n".join(lines), encoding="utf-8"
@@ -491,15 +513,17 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     exp_root     = project_root / "experiments"
 
     # ── Discover conditions ───────────────────────────────────────────────────
-    found = _discover_conditions(xgb_root)
-    if not found:
+    found_by_profile = _discover_profiles(xgb_root)
+    if not found_by_profile:
         print(
             "[WARNING] No completed condition results found in "
             f"{xgb_root}. Run script 06 first.",
             file=sys.stderr,
         )
         sys.exit(1)
-    print(f"Conditions found: {', '.join(found)}")
+    print("Profiles found: " + ", ".join(
+        f"{p}({','.join(cs)})" for p, cs in found_by_profile.items()
+    ))
 
     # ── Create experiment folder ──────────────────────────────────────────────
     now          = datetime.now()
@@ -512,9 +536,10 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     print(f"Creating experiment archive: {exp_dir}")
 
     # ── Copy XGBoost per-condition files ─────────────────────────────────────
-    for cond in found:
-        print(f"  Copying {cond}/...")
-        _copy_condition_files(xgb_root, exp_dir, cond)
+    for profile, found in found_by_profile.items():
+        for cond in found:
+            print(f"  Copying xgboost/{profile}/{cond}/...")
+            _copy_condition_files(xgb_root, exp_dir, profile, cond)
 
     # ── Copy CNN per-condition files ──────────────────────────────────────────
     cnn_root  = results_dir / "cnn"
@@ -536,19 +561,19 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
         print("[INFO] No verification results found — skipping verification archiving.")
 
     # ── Feature profile discovery ────────────────────────────────────────────
-    feature_profile = _discover_feature_profile(exp_dir, found)
-
-    # ── Re-derive cross-condition summary CSV ─────────────────────────────────
-    print("Re-deriving comparison_summary.csv...")
-    _derive_comparison_csv(exp_dir, found)
+    # ── Re-derive profile-specific cross-condition summaries ──────────────────
+    print("Re-deriving profile-specific comparison_summary.csv files...")
+    for profile, found in found_by_profile.items():
+        _derive_comparison_csv(exp_dir, profile, found)
 
     # ── Re-generate SHAP comparison figure ────────────────────────────────────
-    print("Re-generating shap_comparison.png...")
+    print("Re-generating profile-specific shap_comparison.png files...")
     dpi = int(cfg["ml"]["shap"]["dpi"])
-    has_shap = _regenerate_shap_comparison(exp_dir, found, dpi)
-    if not has_shap:
-        print("  [INFO] No shap_by_band/channel JSON found — "
-              "skipping shap_comparison.png")
+    has_shap: dict[str, bool] = {}
+    for profile, found in found_by_profile.items():
+        has_shap[profile] = _regenerate_shap_comparison(exp_dir, profile, found, dpi)
+        if not has_shap[profile]:
+            print(f"  [INFO] No SHAP JSON found for {profile}")
 
     # ── Extract config snapshot ───────────────────────────────────────────────
     snapshot = _extract_config_snapshot(cfg)
@@ -556,15 +581,15 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
     # ── Write experiment.json ─────────────────────────────────────────────────
     print("Writing experiment.json...")
     _write_experiment_json(
-        exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot,
-        feature_profile=feature_profile, has_verification=has_verification,
+        exp_dir, folder_name, ts_iso, config_path, found_by_profile, found_cnn,
+        snapshot, has_verification=has_verification,
     )
 
     # ── Write report.md ───────────────────────────────────────────────────────
     print("Writing report.md...")
     _write_report_md(
-        exp_dir, folder_name, ts_iso, config_path, found, found_cnn, snapshot,
-        has_shap, feature_profile=feature_profile, has_verification=has_verification,
+        exp_dir, folder_name, ts_iso, config_path, found_by_profile, found_cnn,
+        snapshot, has_shap, has_verification=has_verification,
     )
 
     # ── Write resolved config ─────────────────────────────────────────────────
@@ -574,6 +599,7 @@ def main(config_path: str, name: str | None, results_dir_override: str | None) -
         yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
+    shutil.copy2(exp_dir / "config.yaml", exp_dir / "config_resolved.yaml")
 
     print(f"\nDone. Experiment archived to:\n  {exp_dir}")
 

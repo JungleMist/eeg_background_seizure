@@ -7,5 +7,6 @@ paths:
 
 wiener:
   mode: "frequency"
+  overlap_policy: "coherence_weighted"
   coherence_threshold: 0.45
   phase_gate_threshold_rad: 3.141592653589793

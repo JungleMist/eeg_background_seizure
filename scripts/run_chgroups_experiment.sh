@@ -7,13 +7,13 @@
 #   01 — Extract epochs          (key-based cache; instant cache hit on replay)
 #   03 — ICA decomposition       (independent of channel_groups)
 #   06 raw + ica                 (features and models are channel_groups-independent;
-#                                 raw/ica results land in results/exp_chgroups/1/xgboost/)
+#                                 raw/ica results land in results/exp_chgroups/1/xgboost/base211/)
 #
 # PER-EXPERIMENT (×5):
 #   Clear cache/wiener_frequency/ and cache/features/wiener_*.npz only.
 #   02 — Wiener decomposition    (varies by channel_groups)
 #   06 wiener only               (reads shared raw/ica feature cache; writes to
-#                                 results/exp_chgroups/N/xgboost/wiener/)
+#                                 results/exp_chgroups/N/xgboost/base211/wiener/)
 #   Copy raw/ and ica/ results from exp 1 → exp N  (so 07 archives all three)
 #   07 — Archive experiment
 #
@@ -93,7 +93,7 @@ if (( FROM == 1 )); then
     echo "============================================================"
     echo "  PRE-STEPS: epochs + ICA + XGBoost raw/ica (run once)"
     echo "  Using config: configs/exp_chgroups_1.yaml"
-    echo "  Results land in: results/exp_chgroups/1/xgboost/{raw,ica}/"
+    echo "  Results land in: results/exp_chgroups/1/xgboost/base211/{raw,ica}/"
     echo "============================================================"
 
     run_step "01 — Extract epochs" \
@@ -170,9 +170,9 @@ print(cfg['paths']['cache_dir'])
     if (( IDX > 1 )); then
         echo ""
         echo "  Copying raw/ica results from exp 1 → exp $IDX..."
-        mkdir -p "results/exp_chgroups/$IDX/xgboost"
-        cp -r "results/exp_chgroups/1/xgboost/raw" "results/exp_chgroups/$IDX/xgboost/"
-        cp -r "results/exp_chgroups/1/xgboost/ica" "results/exp_chgroups/$IDX/xgboost/"
+        mkdir -p "results/exp_chgroups/$IDX/xgboost/base211"
+        cp -r "results/exp_chgroups/1/xgboost/base211/raw" "results/exp_chgroups/$IDX/xgboost/base211/"
+        cp -r "results/exp_chgroups/1/xgboost/base211/ica" "results/exp_chgroups/$IDX/xgboost/base211/"
     fi
 
     run_step "07 — Archive experiment" \
@@ -197,7 +197,7 @@ for IDX in 1 2 3 4 5; do
     ENTRY="${CONFIGS[$IDX]}"
     LABEL="${ENTRY##*|}"
     get_auroc() {
-        local f="results/exp_chgroups/$IDX/xgboost/$1/test_metrics.json"
+        local f="results/exp_chgroups/$IDX/xgboost/base211/$1/test_metrics.json"
         [[ -f "$f" ]] && python -c "import json; print(f\"{json.load(open('$f'))['auroc']:.4f}\")" || echo "n/a"
     }
     RAW=$(get_auroc raw)
