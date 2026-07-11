@@ -22,6 +22,12 @@ python scripts/06_train_xgboost.py --condition wiener
 # Ignore feature cache and re-extract
 python scripts/06_train_xgboost.py --force
 
+# Re-extract with four feature worker processes
+python scripts/06_train_xgboost.py --force --workers 4
+
+``--workers`` controls file-level feature-extraction processes only. Conditions
+still run sequentially, and cached features are loaded without starting workers.
+
 Output
 ------
 results/xgboost/{condition}/
@@ -90,6 +96,7 @@ def _load_or_extract_features(
     force: bool,
     feature_set: str = "base211",
     connectivity_nperseg: int | None = None,
+    max_workers: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return (X, y, subject_ids), using a profile-aware feature-level NPZ cache."""
     from eeg_bg.features.profiles import PROFILES
@@ -132,6 +139,7 @@ def _load_or_extract_features(
         cache_root, condition, split,
         sfreq=sfreq, nperseg=nperseg, freq_band=freq_band,
         profile_name=feature_set, connectivity_nperseg=connectivity_nperseg,
+        max_workers=max_workers,
     )
     if len(X):
         feat_file.parent.mkdir(parents=True, exist_ok=True)
@@ -200,6 +208,7 @@ def run_condition(
     out_root: Path,
     force: bool,
     feature_set: str = "base211",
+    max_workers: int | None = None,
 ) -> dict:
     """Full pipeline for one condition.  Returns metrics + SHAP aggregates."""
     sfreq      = float(cfg["preprocessing"]["target_sfreq"])
@@ -220,17 +229,17 @@ def run_condition(
     X_train, y_train, sids_train = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "train",
         sfreq, nperseg, freq_band, force, feature_set,
-        connectivity_nperseg,
+        connectivity_nperseg, max_workers,
     )
     X_val,   y_val,   sids_val   = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "val",
         sfreq, nperseg, freq_band, force, feature_set,
-        connectivity_nperseg,
+        connectivity_nperseg, max_workers,
     )
     X_test,  y_test,  sids_test  = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "test",
         sfreq, nperseg, freq_band, force, feature_set,
-        connectivity_nperseg,
+        connectivity_nperseg, max_workers,
     )
 
     if len(X_train) == 0:
@@ -334,8 +343,17 @@ XGB_CONDITIONS = [
 ]
 
 
+def _positive_int(value: str) -> int:
+    """Argparse type for strictly positive worker counts."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("workers must be a positive integer")
+    return parsed
+
+
 def main(config_path: str, condition: str, force: bool,
-         feature_set: str = "base211") -> None:
+         feature_set: str = "base211",
+         max_workers: int | None = None) -> None:
     cfg         = load_config(config_path)
     cache_root  = Path(cfg["paths"]["cache_dir"])
     results_dir = Path(cfg["paths"]["results_dir"])
@@ -351,7 +369,7 @@ def main(config_path: str, condition: str, force: bool,
     for cond in conditions:
         result = run_condition(
             cond, cfg, cache_root, feat_cache, out_root, force,
-            feature_set=feature_set,
+            feature_set=feature_set, max_workers=max_workers,
         )
         if result:
             all_results[cond] = result
@@ -421,5 +439,13 @@ if __name__ == "__main__":
         help="Feature profile to use (default: base211, 211-dim); "
              "base211_conn80 adds 80-dim connectivity → 291-dim total.",
     )
+    parser.add_argument(
+        "--workers", type=_positive_int, default=None,
+        help="Feature extraction worker processes "
+             "(default: ProcessPoolExecutor default)",
+    )
     args = parser.parse_args()
-    main(args.config, args.condition, args.force, feature_set=args.feature_set)
+    main(
+        args.config, args.condition, args.force,
+        feature_set=args.feature_set, max_workers=args.workers,
+    )

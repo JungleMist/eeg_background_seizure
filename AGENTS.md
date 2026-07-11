@@ -54,7 +54,7 @@ conda run -n eeg_pipeline python scripts/04_run_verification.py [--workers N]
 conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N] [--epoch-idx I] [--channels "FP1,FP2,T3"] [--export-edf] [--export-edf-max-epochs N]
 
 # 06 — XGBoost + SHAP for all five conditions → results/xgboost/
-conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|wiener_phasegated|wiener_zerophase|all] [--force]
+conda run -n eeg_pipeline python scripts/06_train_xgboost.py [--condition raw|ica|wiener|wiener_phasegated|wiener_zerophase|all] [--feature-set base211|base211_conn80] [--force] [--workers N]
 
 # 07 — Archive experiment config + results (xgboost AND cnn, whichever are present) → experiments/<timestamp>/
 conda run -n eeg_pipeline python scripts/07_organize_experiment.py [--name LABEL] [--config PATH] [--results-dir PATH]

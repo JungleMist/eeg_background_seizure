@@ -5,6 +5,7 @@ import pytest
 from eeg_bg.features.extraction import (
     extract_epoch_features,
     build_dataset,
+    build_dataset_with_profile,
     FEATURE_NAMES,
     _STANDARD_19,
 )
@@ -229,3 +230,51 @@ def test_build_dataset_stale_cache_raises(tmp_path):
                 f"Feature cache has {X.shape[1]} dims but FEATURE_NAMES has "
                 f"{len(FEATURE_NAMES)}. Re-run script 06 with --force."
             )
+
+
+def test_build_dataset_with_profile_parallel_preserves_order(tmp_path):
+    """Parallel profile extraction keeps sorted-file and epoch ordering."""
+    rng = np.random.default_rng(8)
+    epochs_a = rng.standard_normal((2, 19, 256)).astype(np.float64)
+    epochs_b = rng.standard_normal((1, 19, 256)).astype(np.float64)
+    _write_fake_npz(
+        tmp_path / "epochs" / "z_subject" / "b.npz",
+        epochs_b, "train", 1, "s002",
+    )
+    _write_fake_npz(
+        tmp_path / "epochs" / "a_subject" / "a.npz",
+        epochs_a, "train", 0, "s001",
+    )
+
+    X, y, sids = build_dataset_with_profile(
+        tmp_path, "raw", "train",
+        sfreq=125.0, nperseg=64, freq_band=(0.5, 40.0),
+        profile_name="base211", max_workers=2,
+    )
+
+    assert X.shape == (3, 211)
+    assert np.all(np.isfinite(X))
+    assert y.tolist() == [0, 0, 1]
+    assert sids == ["s001", "s001", "s002"]
+
+
+def test_build_dataset_with_connectivity_profile_parallel(tmp_path):
+    """The 291-dim connectivity profile works in worker processes."""
+    rng = np.random.default_rng(9)
+    epochs = rng.standard_normal((1, 19, 256)).astype(np.float64)
+    _write_fake_npz(
+        tmp_path / "epochs" / "s001" / "data.npz",
+        epochs, "train", 0, "s001",
+    )
+
+    X, y, sids = build_dataset_with_profile(
+        tmp_path, "raw", "train",
+        sfreq=125.0, nperseg=64, freq_band=(0.5, 40.0),
+        profile_name="base211_conn80", connectivity_nperseg=64,
+        max_workers=2,
+    )
+
+    assert X.shape == (1, 291)
+    assert np.all(np.isfinite(X))
+    assert y.tolist() == [0]
+    assert sids == ["s001"]

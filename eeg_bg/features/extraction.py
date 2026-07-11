@@ -281,6 +281,9 @@ def build_dataset_with_profile(
     profile_name : str
         Key into ``eeg_bg.features.profiles.PROFILES``.  ``"base211"`` is the
         default (backward-compatible 211-dim vector).
+    max_workers : int | None
+        Worker processes for parallel file processing. ``None`` uses the
+        executor default.
     """
     from eeg_bg.features.profiles import PROFILES
     profile = PROFILES[profile_name]
@@ -301,38 +304,35 @@ def build_dataset_with_profile(
     array_key = _CONDITION_TO_KEY[condition]
     npz_files = sorted(subdir.rglob("*.npz"))
 
+    args_list = [
+        (
+            file_index, str(npz_path), array_key, split, sfreq, nperseg,
+            freq_band, profile_name, connectivity_nperseg,
+        )
+        for file_index, npz_path in enumerate(npz_files)
+    ]
+
+    results: dict[int, tuple[list[np.ndarray], list[int], list[str]]] = {}
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_extract_one_file_with_profile, args): args[0]
+            for args in args_list
+        }
+        for future in tqdm(
+            as_completed(futures), total=len(futures),
+            desc=f"Features [{profile.name}/{condition}/{split}]", leave=False,
+        ):
+            file_index, rows, labels, subject_ids = future.result()
+            results[file_index] = (rows, labels, subject_ids)
+
     X_list: list[np.ndarray] = []
     y_list: list[int] = []
     sid_list: list[str] = []
-
-    for npz_path in tqdm(npz_files, desc=f"Features [{profile.name}/{condition}/{split}]",
-                         leave=False):
-        try:
-            data = np.load(npz_path, allow_pickle=True)
-            if data.get("split", "") != split:
-                continue
-            epochs_arr = data[array_key]
-            ch_names = list(data.get("ch_names", []))
-            if not ch_names:
-                ch_names = list(_STANDARD_19)
-            label = int(data["label"])
-            subject_id = str(data["subject_id"])
-
-            for epoch in epochs_arr:
-                feats = profile.extract_fn(
-                    epoch, ch_names, sfreq, nperseg, freq_band,
-                    connectivity_nperseg,
-                )
-                if len(feats) != profile.dim:
-                    raise ValueError(
-                        f"Profile {profile.name!r} extract_fn returned "
-                        f"{len(feats)} dims, expected {profile.dim}."
-                    )
-                X_list.append(feats)
-                y_list.append(label)
-                sid_list.append(subject_id)
-        except Exception:
-            continue
+    for file_index in sorted(results):
+        rows, labels, subject_ids = results[file_index]
+        X_list.extend(rows)
+        y_list.extend(labels)
+        sid_list.extend(subject_ids)
 
     if not X_list:
         return (np.empty((0, profile.dim), dtype=np.float64),
@@ -342,3 +342,44 @@ def build_dataset_with_profile(
     return (np.vstack(X_list).astype(np.float64),
             np.asarray(y_list, dtype=np.int64),
             sid_list)
+
+
+def _extract_one_file_with_profile(
+    args: tuple,
+) -> tuple[int, list[np.ndarray], list[int], list[str]]:
+    """Worker: extract one NPZ file with a named feature profile."""
+    (
+        file_index, npz_path_str, array_key, target_split, sfreq, nperseg,
+        freq_band, profile_name, connectivity_nperseg,
+    ) = args
+
+    try:
+        from eeg_bg.features.profiles import PROFILES
+        profile = PROFILES[profile_name]
+        data = np.load(npz_path_str, allow_pickle=True)
+        if str(data.get("split", "")) != target_split:
+            return file_index, [], [], []
+
+        epochs_arr = data[array_key]
+        ch_names = list(data.get("ch_names", []))
+        if not ch_names:
+            ch_names = list(_STANDARD_19)
+        label = int(data["label"])
+        subject_id = str(data["subject_id"])
+
+        rows = []
+        for epoch in epochs_arr:
+            feats = profile.extract_fn(
+                epoch, ch_names, sfreq, nperseg, freq_band,
+                connectivity_nperseg,
+            )
+            if len(feats) != profile.dim:
+                raise ValueError(
+                    f"Profile {profile.name!r} extract_fn returned "
+                    f"{len(feats)} dims, expected {profile.dim}."
+                )
+            rows.append(feats)
+        n_rows = len(rows)
+        return file_index, rows, [label] * n_rows, [subject_id] * n_rows
+    except Exception:
+        return file_index, [], [], []

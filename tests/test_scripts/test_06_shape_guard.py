@@ -1,4 +1,6 @@
 """Test that script 06 shape-guard raises on stale feature cache."""
+import argparse
+
 import numpy as np
 import pytest
 from pathlib import Path
@@ -36,3 +38,18 @@ def test_shape_guard_raises_on_wrong_dim(tmp_path, monkeypatch):
             freq_band=(0.5, 40.0),
             force=False,
         )
+
+
+def test_workers_must_be_positive():
+    """Script 06 rejects invalid process counts before extraction."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "script06_workers", Path("scripts/06_train_xgboost.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod._positive_int("2") == 2
+    with pytest.raises(argparse.ArgumentTypeError, match="positive integer"):
+        mod._positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError, match="positive integer"):
+        mod._positive_int("-1")
