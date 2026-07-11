@@ -150,6 +150,10 @@ prepare_condition_results() {
     for profile in base211 base211_conn80; do
         safe_clear_dir "$results_dir/xgboost/$profile/$condition" "$profile/$condition results"
     done
+    # Script 04 is intentionally skipped for this experiment. Remove any
+    # stale verification output so script 07 cannot archive results from an
+    # earlier run as if they belonged to the current condition.
+    safe_clear_dir "$results_dir/verification" "stale verification results"
 }
 
 clean_baseline_cache_and_results() {
