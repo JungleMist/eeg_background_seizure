@@ -21,6 +21,10 @@ python scripts/04_run_verification.py --source cache --mode phasegated
 # Run only gate diagnostics + connectivity
 python scripts/04_run_verification.py --checks gate,connectivity
 
+# Fast exploratory verification: at most 10 deterministic epochs per recording
+python scripts/04_run_verification.py --checks v1,gate,connectivity \
+    --max-epochs-per-recording 10 --sample-seed 42 --workers 4
+
 # Legacy recompute mode, single-threaded
 python scripts/04_run_verification.py --source recompute --workers 1
 
@@ -36,6 +40,10 @@ results/verification/
     fusion_summary.csv             — overlap fusion rates and weights
     connectivity_subject.csv       — subject × pair × band × role × metric (pre/post)
     connectivity_summary.csv       — pair × band × role × metric summary
+
+With ``--max-epochs-per-recording K``, all cache-mode checks use the same
+deterministic K-epoch sample per recording. The sampling cap and seed are
+recorded in ``verification_metadata.json``; omit the option for full data.
 """
 from __future__ import annotations
 
@@ -79,7 +87,15 @@ def _verify_recording_cache(args: tuple) -> dict:
 
     Returns a dict of recording-level aggregates keyed by subject_id.
     """
-    (wiener_npz_str, epoch_root_str, wiener_root_str, cfg, checks) = args
+    (
+        wiener_npz_str,
+        epoch_root_str,
+        wiener_root_str,
+        cfg,
+        checks,
+        max_epochs_per_recording,
+        sample_seed,
+    ) = args
     wiener_path = Path(wiener_npz_str)
     epoch_path = Path(epoch_root_str) / wiener_path.relative_to(Path(wiener_root_str))
 
@@ -105,20 +121,26 @@ def _verify_recording_cache(args: tuple) -> dict:
     specific = wdata["specific"]   # (n_epochs, n_ch, n_times)
     raw_epochs = edata["epochs"]   # (n_epochs, n_ch, n_times)
     n_epochs = specific.shape[0]
+    epoch_indices = _sample_epoch_indices(
+        n_epochs, max_epochs_per_recording, sample_seed, recording_id
+    )
+    n_sampled = len(epoch_indices)
 
     rec = {
         "subject_id":   subject_id,
         "recording_id": recording_id,
         "split":        split,
         "label":        label,
-        "n_epochs":     n_epochs,
+        "n_epochs":     n_sampled,
+        "n_epochs_total": n_epochs,
     }
 
     # Preserve group-level skip semantics separately from target diagnostics.
     skipped_counts: dict[str, int] = defaultdict(int)
     if "skipped_pairs" in wdata:
         skipped_arr = wdata["skipped_pairs"]
-        for epoch_items in skipped_arr:
+        for epoch_idx in epoch_indices:
+            epoch_items = skipped_arr[epoch_idx]
             for pair_key in list(epoch_items or []):
                 skipped_counts[str(pair_key)] += 1
     rec["skipped_pairs"] = [
@@ -138,12 +160,12 @@ def _verify_recording_cache(args: tuple) -> dict:
         gate_rows = []
         for ci, key in enumerate(ck):
             if cs is not None and ci < cs.shape[1]:
-                status_epochs = cs[:, ci]
+                status_epochs = cs[epoch_indices, ci]
                 n_acc = int(np.sum(status_epochs == 0))
                 n_below = int(np.sum(status_epochs == 1))
                 n_unstable = int(np.sum(status_epochs == 2))
-                mean_coh = float(cc[:, ci].mean()) if cc is not None and ci < cc.shape[1] else 0.0
-                mean_pf = float(pf[:, ci].mean()) if pf is not None and ci < pf.shape[1] else 1.0
+                mean_coh = float(cc[epoch_indices, ci].mean()) if cc is not None and ci < cc.shape[1] else 0.0
+                mean_pf = float(pf[epoch_indices, ci].mean()) if pf is not None and ci < pf.shape[1] else 1.0
             else:
                 n_acc = n_below = n_unstable = 0
                 mean_coh = 0.0
@@ -151,11 +173,11 @@ def _verify_recording_cache(args: tuple) -> dict:
 
             gate_rows.append({
                 "candidate_key":     key,
-                "n_epochs":          n_epochs,
+                "n_epochs":          n_sampled,
                 "n_accepted":        n_acc,
                 "n_below_coherence": n_below,
                 "n_unstable_filter": n_unstable,
-                "acceptance_rate":   n_acc / n_epochs if n_epochs else 0.0,
+                "acceptance_rate":   n_acc / n_sampled if n_sampled else 0.0,
                 "mean_coherence":    mean_coh,
                 "mean_pass_fraction": mean_pf,
             })
@@ -172,7 +194,7 @@ def _verify_recording_cache(args: tuple) -> dict:
             indices = [i for i, key in enumerate(ck) if key.endswith(f"::{channel}")]
             if not indices or fw.ndim != 2:
                 continue
-            weights = fw[:, indices]
+            weights = fw[epoch_indices][:, indices]
             n_sources = np.sum(weights > 0.0, axis=1)
             multi = n_sources >= 2
             effective = np.divide(
@@ -206,7 +228,7 @@ def _verify_recording_cache(args: tuple) -> dict:
     conn_rows: list[dict] = []
 
     if "v1" in checks or "connectivity" in checks:
-        for ei in range(n_epochs):
+        for ei in epoch_indices:
             raw_ep = raw_epochs[ei]
             spc_ep = specific[ei]
 
@@ -278,6 +300,33 @@ def _verify_recording_cache(args: tuple) -> dict:
         rec["connectivity"] = conn_rows
 
     return rec
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Deterministic epoch sampling
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _sample_epoch_indices(
+    n_epochs: int,
+    max_epochs_per_recording: int | None,
+    sample_seed: int,
+    recording_id: str,
+) -> np.ndarray:
+    """Return deterministic, recording-specific epoch indices.
+
+    SHA-256 is used instead of Python's process-randomised ``hash()`` so all
+    worker processes and Wiener conditions select the same epochs.
+    """
+    if max_epochs_per_recording is None or max_epochs_per_recording >= n_epochs:
+        return np.arange(n_epochs, dtype=int)
+    if max_epochs_per_recording < 1:
+        raise ValueError("max_epochs_per_recording must be >= 1")
+    digest = hashlib.sha256(
+        f"{sample_seed}:{recording_id}".encode("utf-8")
+    ).digest()
+    seed = int.from_bytes(digest[:8], byteorder="little", signed=False)
+    rng = np.random.default_rng(seed)
+    return np.sort(rng.choice(n_epochs, size=max_epochs_per_recording, replace=False))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -497,7 +546,9 @@ def _decompose_one_file(args):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main(config_path: str, source: str, mode: str, checks: list[str],
-         max_workers: int | None = None) -> None:
+         max_workers: int | None = None,
+         max_epochs_per_recording: int | None = None,
+         sample_seed: int = 42) -> None:
     cfg = load_config(config_path)
     cache_dir  = Path(cfg["paths"]["cache_dir"])
     results_dir = Path(cfg["paths"]["results_dir"])
@@ -508,6 +559,8 @@ def main(config_path: str, source: str, mode: str, checks: list[str],
     config_hash = hashlib.sha256(
         json.dumps({
             "source": source, "mode": mode, "checks": checks,
+            "max_epochs_per_recording": max_epochs_per_recording,
+            "sample_seed": sample_seed,
             "wiener": cfg.get("wiener", {}),
             "preprocessing": cfg.get("preprocessing", {}),
         }, sort_keys=True, default=str).encode()
@@ -526,7 +579,10 @@ def main(config_path: str, source: str, mode: str, checks: list[str],
         epoch_root = cache_dir / "epochs"
         wiener_paths = sorted(wiener_root.rglob("*.npz"))
         args_list = [
-            (str(p), str(epoch_root), str(wiener_root), cfg, all_checks)
+            (
+                str(p), str(epoch_root), str(wiener_root), cfg, all_checks,
+                max_epochs_per_recording, sample_seed,
+            )
             for p in wiener_paths
         ]
 
@@ -547,8 +603,12 @@ def main(config_path: str, source: str, mode: str, checks: list[str],
 
         # ── Metadata ─────────────────────────────────────────────────────
         n_subjects = len({r["subject_id"] for r in recordings})
-        _write_metadata(verif_dir, source, mode, checks, config_hash, n_subjects,
-                        n_recordings=len(recordings))
+        _write_metadata(
+            verif_dir, source, mode, checks, config_hash, n_subjects,
+            n_recordings=len(recordings),
+            max_epochs_per_recording=max_epochs_per_recording,
+            sample_seed=sample_seed,
+        )
 
         print(f"Verification complete. Results saved to {verif_dir}")
 
@@ -653,7 +713,9 @@ def _write_cache_outputs(verif_dir: Path, recordings: list[dict],
 
 def _write_metadata(verif_dir: Path, source: str, mode: str,
                     checks: list[str], config_hash: str,
-                    n_subjects: int, n_recordings: int) -> None:
+                    n_subjects: int, n_recordings: int,
+                    max_epochs_per_recording: int | None = None,
+                    sample_seed: int = 42) -> None:
     meta = {
         "source": source,
         "mode": mode,
@@ -661,6 +723,8 @@ def _write_metadata(verif_dir: Path, source: str, mode: str,
         "config_hash": config_hash,
         "n_subjects": n_subjects,
         "n_recordings": n_recordings,
+        "max_epochs_per_recording": max_epochs_per_recording,
+        "sample_seed": sample_seed,
     }
     with open(verif_dir / "verification_metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
@@ -689,6 +753,20 @@ if __name__ == "__main__":
         "--workers", type=int, default=None,
         help="Number of parallel worker processes (default: os.cpu_count())",
     )
+    parser.add_argument(
+        "--max-epochs-per-recording", type=int, default=None,
+        help="Randomly sample at most this many epochs per recording; "
+             "default processes all epochs",
+    )
+    parser.add_argument(
+        "--sample-seed", type=int, default=42,
+        help="Seed for deterministic per-recording epoch sampling (default: 42)",
+    )
     args = parser.parse_args()
-    main(args.config, args.source, args.mode,
-         [c.strip() for c in args.checks.split(",")], args.workers)
+    main(
+        args.config, args.source, args.mode,
+        [c.strip() for c in args.checks.split(",")],
+        args.workers,
+        args.max_epochs_per_recording,
+        args.sample_seed,
+    )

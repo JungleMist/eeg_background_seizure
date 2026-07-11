@@ -63,3 +63,18 @@ def test_grid_paired_delta_rejects_label_mismatch():
 
     with pytest.raises(ValueError, match="inconsistent true_label"):
         script09._bootstrap_delta(left, right, repeats=10, seed=42)
+
+
+def test_verification_epoch_sampling_is_deterministic_and_bounded():
+    script04 = _load_script("04_run_verification")
+    first = script04._sample_epoch_indices(20, 5, 42, "recording-a")
+    second = script04._sample_epoch_indices(20, 5, 42, "recording-a")
+    other = script04._sample_epoch_indices(20, 5, 42, "recording-b")
+
+    assert len(first) == 5
+    assert len(set(first)) == 5
+    assert (first == second).all()
+    assert not (first == other).all()
+    assert len(script04._sample_epoch_indices(3, 5, 42, "recording-a")) == 3
+    with pytest.raises(ValueError, match="must be >= 1"):
+        script04._sample_epoch_indices(3, 0, 42, "recording-a")
