@@ -78,3 +78,30 @@ def test_verification_epoch_sampling_is_deterministic_and_bounded():
     assert len(script04._sample_epoch_indices(3, 5, 42, "recording-a")) == 3
     with pytest.raises(ValueError, match="must be >= 1"):
         script04._sample_epoch_indices(3, 0, 42, "recording-a")
+
+
+def test_xgboost_stats_printer_ignores_feature_profile_metadata(capsys):
+    script06 = _load_script("06_train_xgboost")
+    stats = {
+        "train": {
+            "n_subjects": 2, "n_epochs": 8,
+            "n_subjects_epilepsy": 1, "n_subjects_control": 1,
+        },
+        "val": {
+            "n_subjects": 1, "n_epochs": 4,
+            "n_subjects_epilepsy": 1, "n_subjects_control": 0,
+        },
+        "test": {
+            "n_subjects": 1, "n_epochs": 4,
+            "n_subjects_epilepsy": 0, "n_subjects_control": 1,
+        },
+        "feature_set": "base211",
+    }
+
+    script06._print_data_stats(stats)
+
+    output = capsys.readouterr().out
+    assert "Train" in output
+    assert "Val" in output
+    assert "Test" in output
+    assert "Feature_set" not in output

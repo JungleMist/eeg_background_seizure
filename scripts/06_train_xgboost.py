@@ -179,6 +179,17 @@ def _split_stats(
     }
 
 
+def _print_data_stats(data_stats: dict) -> None:
+    """Print split statistics without treating metadata as a split."""
+    for split in ("train", "val", "test"):
+        s = data_stats.get(split)
+        if not isinstance(s, dict):
+            continue
+        print(f"  {split.capitalize():5}: {s['n_subjects']:4d} subjects / "
+              f"{s['n_epochs']:5d} epochs  "
+              f"({s['n_subjects_epilepsy']}E + {s['n_subjects_control']}C subjects)")
+
+
 # ── Per-condition pipeline ────────────────────────────────────────────────────
 
 def run_condition(
@@ -236,10 +247,7 @@ def run_condition(
     }
     _save_json(data_stats, out_dir / "data_stats.json")
 
-    for split, s in data_stats.items():
-        print(f"  {split.capitalize():5}: {s['n_subjects']:4d} subjects / "
-              f"{s['n_epochs']:5d} epochs  "
-              f"({s['n_subjects_epilepsy']}E + {s['n_subjects_control']}C subjects)")
+    _print_data_stats(data_stats)
 
     # ── Feature scaling ───────────────────────────────────────────────────────
     scaler    = StandardScaler()
