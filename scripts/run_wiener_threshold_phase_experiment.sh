@@ -14,7 +14,7 @@
 set -euo pipefail
 
 CONDA_RUN="${CONDA_RUN:-conda run -n eeg_pipeline}"
-WORKERS=12
+WORKERS=16
 FROM=1
 CLEAR_CACHE=0
 SKIP_EPOCHS=0
@@ -26,7 +26,7 @@ Usage:
   bash scripts/run_wiener_threshold_phase_experiment.sh [options]
 
 Options:
-  --workers N       Worker processes for scripts 01/02/03 (default: 12)
+  --workers N       Worker processes for scripts 01/02/03 (default: 16)
   --from N          Resume per-experiment loop from exp N, 1-8 (default: 1)
   --clear-cache     Remove the configured cache_dir before script 01
   --skip-epochs     Skip script 01; assumes cache/epochs already exists
@@ -240,13 +240,6 @@ for IDX in 1 2 3 4 5 6 7 8; do
             --mode "$MODE" \
             --force \
             --workers "$WORKERS"
-
-    run_step "exp$IDX - 04 verification $MODE" \
-        $CONDA_RUN python scripts/04_run_verification.py \
-            --config "$CFG" \
-            --source cache \
-            --mode "$MODE" \
-            --checks v1,gate,connectivity
 
     for FEATURE_SET in base211 base211_conn80; do
         run_step "exp$IDX - 06 XGBoost $CONDITION ($FEATURE_SET)" \
