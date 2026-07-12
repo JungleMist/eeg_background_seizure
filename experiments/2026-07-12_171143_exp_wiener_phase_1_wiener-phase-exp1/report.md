@@ -1,0 +1,97 @@
+# Experiment: 2026-07-12_171143_exp_wiener_phase_1_wiener-phase-exp1
+
+**Date:** 2026-07-12 17:11:43  
+**Config:** configs/exp_wiener_phase_1.yaml  
+**Profiles found:** base211, base211_conn80
+
+## Configuration Snapshot
+
+| Parameter | Value |
+|---|---|
+| `target_sfreq` | 125 |
+| `bandpass` | [0.5, 40.0] |
+| `epoch_length_sec` | 20.0 |
+| `artifact_threshold_uv` | 200.0 |
+| `seizure_buffer_sec` | 30.0 |
+| `split.train` | 0.7 |
+| `split.val` | 0.1 |
+| `split.test` | 0.2 |
+| `split.random_seed` | 42 |
+| `wiener.mode` | frequency |
+| `wiener.nperseg` | 500 |
+| `wiener.freq_resolution_hz` | 0.5 |
+| `wiener.coherence_threshold` | 0.15 |
+| `wiener.overlap_policy` | coherence_weighted |
+| `wiener.filter_magnitude_threshold` | 50.0 |
+| `wiener.freq_band` | [0.5, 40.0] |
+| `wiener.phase_gate_threshold_rad` | 3.141592653589793 |
+| `ica.n_components` | 19 |
+| `ica.artifact_corr_threshold` | 0.8 |
+| `ml.cv_folds` | 5 |
+| `ml.early_stopping_rounds` | 30 |
+| `ml.param_grid` | {"max_depth": [3, 4, 5, 6], "learning_rate": [0.01, 0.05, 0.1, 0.3], "n_estimators": [100, 200, 500], "subsample": [0.8, 1.0], "colsample_bytree": [0.8, 1.0], "reg_alpha": [0.0, 0.1], "reg_lambda": [1.0, 5.0]} |
+| `ml.features.connectivity.nperseg` | 250 |
+
+## XGBoost Results Summary — `base211`
+
+| Condition | Val AUROC | Val F1 | Val Acc | Test AUROC | Test F1 | Test Acc |
+|---|---|---|---|---|---|---|
+| raw | 0.583 | 0.588 | 0.588 | 0.759 | 0.699 | 0.703 |
+| ica | 0.597 | 0.636 | 0.647 | 0.650 | 0.621 | 0.649 |
+| wiener | 0.542 | 0.636 | 0.647 | 0.753 | 0.728 | 0.730 |
+
+## XGBoost Results Summary — `base211_conn80`
+
+| Condition | Val AUROC | Val F1 | Val Acc | Test AUROC | Test F1 | Test Acc |
+|---|---|---|---|---|---|---|
+| raw | 0.597 | 0.646 | 0.647 | 0.785 | 0.679 | 0.703 |
+| ica | 0.583 | 0.636 | 0.647 | 0.732 | 0.644 | 0.676 |
+| wiener | 0.722 | 0.702 | 0.706 | 0.759 | 0.704 | 0.730 |
+
+## Dataset Statistics
+
+| Split | Subjects | Epochs | Epilepsy Subj | Control Subj | Epilepsy Ep | Control Ep |
+|---|---|---|---|---|---|---|
+| train | 124 | 54592 | 67 | 57 | 43404 | 11188 |
+| val | 17 | 2063 | 9 | 8 | 1407 | 656 |
+| test | 37 | 9343 | 20 | 17 | 7707 | 1636 |
+
+## Feature Profiles
+
+`base211`, `base211_conn80`
+
+## SHAP Comparison — `base211`
+
+![SHAP Comparison](xgboost/base211/shap_comparison.png)
+
+## SHAP Comparison — `base211_conn80`
+
+![SHAP Comparison](xgboost/base211_conn80/shap_comparison.png)
+
+## Per-Condition SHAP Summaries — `base211`
+
+### Raw
+
+![Raw SHAP](xgboost/base211/raw/shap_summary.png)
+
+### Ica
+
+![Ica SHAP](xgboost/base211/ica/shap_summary.png)
+
+### Wiener
+
+![Wiener SHAP](xgboost/base211/wiener/shap_summary.png)
+
+## Per-Condition SHAP Summaries — `base211_conn80`
+
+### Raw
+
+![Raw SHAP](xgboost/base211_conn80/raw/shap_summary.png)
+
+### Ica
+
+![Ica SHAP](xgboost/base211_conn80/ica/shap_summary.png)
+
+### Wiener
+
+![Wiener SHAP](xgboost/base211_conn80/wiener/shap_summary.png)
