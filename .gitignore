@@ -13,3 +13,4 @@ __pycache__/
 configs/local*.yaml
 environment_macos.yaml
 
+/paper
