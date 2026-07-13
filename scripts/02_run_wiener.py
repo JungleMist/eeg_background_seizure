@@ -8,6 +8,7 @@ import numpy as np
 from tqdm import tqdm
 
 from eeg_bg.config.settings import load_config
+from eeg_bg.io.cache import copy_cache_metadata
 
 
 def _process_wiener_file(args):
@@ -91,12 +92,11 @@ def _process_wiener_file(args):
         out_path,
         specific=np.stack([r["specific"] for r in results]),
         coherent=np.stack([r["coherent"] for r in results]),
-        label=data["label"],
-        subject_id=data["subject_id"],
-        split=data["split"],
+        ch_names=data["ch_names"],
         schema_version=2,
         candidate_keys=_ck_arr,
         skipped_pairs=skipped_arr,
+        **copy_cache_metadata(data),
         **_diag_arrays,
     )
     return (npz_path.name, "done", None)

@@ -98,12 +98,13 @@ def main(config_path: str, n_subjects: int | None, epoch_idx: int | None, channe
             continue
 
         npz_path     = npz_files[0]          # first session .npz
-        subj_id      = subj_dir.name
+        edata        = np.load(npz_path, allow_pickle=True)
+        legacy_id    = str(edata.get("subject_id", subj_dir.name))
+        subj_id      = str(edata.get("evaluation_id", legacy_id))
         subj_fig_dir = fig_dir / subj_id
         subj_fig_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Raw epoch ────────────────────────────────────────────────────────
-        edata    = np.load(npz_path, allow_pickle=True)
         epochs   = edata["epochs"]            # (n_epochs, n_ch, n_times)
         ch_names = list(edata["ch_names"])
         ei       = min(epoch_idx, len(epochs) - 1)

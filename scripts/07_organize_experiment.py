@@ -106,6 +106,9 @@ _VERIFICATION_FILES = [
 
 # Config keys extracted into the snapshot (flat display name → nested path).
 _SNAPSHOT_KEYS: list[tuple[str, list[str]]] = [
+    ("dataset.active",            ["dataset", "active"]),
+    ("dataset.tuab.max_recording_sec", ["dataset", "tuab", "max_recording_sec"]),
+    ("dataset.tuab.validation_fraction", ["dataset", "tuab", "validation_fraction"]),
     ("target_sfreq",            ["preprocessing", "target_sfreq"]),
     ("bandpass",                ["preprocessing", "bandpass"]),
     ("epoch_length_sec",        ["preprocessing", "epoch_length_sec"]),
@@ -434,23 +437,32 @@ def _write_report_md(
             (exp_dir / "xgboost" / first_profile / first_stats_cond / "data_stats.json")
             .read_text(encoding="utf-8")
         )
+        dataset_name = stats.get("dataset_name", "tuep")
+        class_zero, class_one = (
+            ("abnormal", "normal") if dataset_name == "tuab"
+            else ("epilepsy", "control")
+        )
+        unit_name = stats.get("aggregation_unit", "patient")
         lines += [
             "## Dataset Statistics",
             "",
-            "| Split | Subjects | Epochs | Epilepsy Subj | Control Subj |"
-            " Epilepsy Ep | Control Ep |",
-            "|---|---|---|---|---|---|---|",
+            f"Dataset: `{dataset_name}`; evaluation unit: `{unit_name}`.",
+            "",
+            f"| Split | Evaluation units | Patients | Epochs | {class_zero.title()} units |"
+            f" {class_one.title()} units | {class_zero.title()} epochs | {class_one.title()} epochs |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for split in ("train", "val", "test"):
             s = stats.get(split, {})
             lines.append(
                 f"| {split} "
-                f"| {s.get('n_subjects', '—')} "
+                f"| {s.get('n_evaluations', s.get('n_subjects', '—'))} "
+                f"| {s.get('n_patients', '—')} "
                 f"| {s.get('n_epochs', '—')} "
-                f"| {s.get('n_subjects_epilepsy', '—')} "
-                f"| {s.get('n_subjects_control', '—')} "
-                f"| {s.get('n_epochs_epilepsy', '—')} "
-                f"| {s.get('n_epochs_control', '—')} |"
+                f"| {s.get(f'n_evaluations_{class_zero}', '—')} "
+                f"| {s.get(f'n_evaluations_{class_one}', '—')} "
+                f"| {s.get(f'n_epochs_{class_zero}', '—')} "
+                f"| {s.get(f'n_epochs_{class_one}', '—')} |"
             )
         lines.append("")
 

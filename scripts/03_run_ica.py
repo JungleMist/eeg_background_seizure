@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from eeg_bg.config.settings import load_config
 from eeg_bg.decomposition.ica import apply_ica, fit_ica
+from eeg_bg.io.cache import copy_cache_metadata
 
 
 def _init_worker():
@@ -42,9 +43,8 @@ def _process_ica_file(args):
         out_path,
         specific=cleaned,
         n_artifacts_removed=np.array(len(artifact_idx)),
-        label=data["label"],
-        subject_id=data["subject_id"],
-        split=data["split"],
+        ch_names=data["ch_names"],
+        **copy_cache_metadata(data),
     )
     return (npz_path.name, "done", None)
 

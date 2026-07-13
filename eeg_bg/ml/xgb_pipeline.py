@@ -12,15 +12,15 @@ Design notes
      refitted on the full training set with ``eval_set=[(X_val, y_val)]``
      and early stopping, which determines the final number of trees.
 
-* Evaluation is always at **subject level**: the N epoch-level ``predict_proba``
-  outputs for each subject are averaged before computing metrics.
+* Evaluation uses a dataset-specific unit: TUEP patient or TUAB recording. The
+  N epoch-level ``predict_proba`` outputs for that unit are averaged first.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedGroupKFold, StratifiedKFold
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score
 
 
@@ -60,6 +60,7 @@ def train_xgboost(
     X_val: np.ndarray,
     y_val: np.ndarray,
     cfg: dict,
+    groups: list[str] | np.ndarray | None = None,
 ) -> xgb.XGBClassifier:
     """Train an XGBoost classifier using grid search + early-stopping refit.
 
@@ -100,8 +101,23 @@ def train_xgboost(
                      if k != "n_estimators"}
     phase1_params["n_estimators"] = [500]        # fix for search
 
-    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True,
-                          random_state=fixed_params.get("random_state", 42))
+    if groups is None:
+        cv = StratifiedKFold(
+            n_splits=cv_folds, shuffle=True,
+            random_state=fixed_params.get("random_state", 42),
+        )
+    else:
+        if len(groups) != len(y_train):
+            raise ValueError("groups must contain one patient ID per training epoch")
+        if len(set(groups)) < cv_folds:
+            raise ValueError(
+                f"XGBoost CV needs at least {cv_folds} training patients; "
+                f"found {len(set(groups))}"
+            )
+        cv = StratifiedGroupKFold(
+            n_splits=cv_folds, shuffle=True,
+            random_state=fixed_params.get("random_state", 42),
+        )
 
     # GPU context cannot be shared across sklearn parallel workers; run folds
     # sequentially when CUDA is the compute device.
@@ -118,7 +134,10 @@ def train_xgboost(
         verbose=0,
         refit=False,           # we do the final fit ourselves
     )
-    grid.fit(X_train, y_train)
+    if groups is None:
+        grid.fit(X_train, y_train)
+    else:
+        grid.fit(X_train, y_train, groups=np.asarray(groups))
     best_params = grid.best_params_
     best_params.pop("n_estimators", None)  # will be determined by early stopping
 
@@ -176,6 +195,60 @@ def subject_level_predict(
           .reset_index()
     )
     return subject_df
+
+
+def evaluation_level_predict(
+    model: xgb.XGBClassifier,
+    X: np.ndarray,
+    labels: np.ndarray,
+    evaluation_ids: list[str],
+    patient_ids: list[str],
+    recording_ids: list[str],
+    dataset_names: list[str],
+) -> pd.DataFrame:
+    """Average label-1 epoch probabilities within each evaluation unit."""
+    n_rows = len(X)
+    metadata = {
+        "evaluation_ids": evaluation_ids,
+        "patient_ids": patient_ids,
+        "recording_ids": recording_ids,
+        "dataset_names": dataset_names,
+    }
+    for name, values in metadata.items():
+        if len(values) != n_rows:
+            raise ValueError(f"{name} must contain one value per epoch")
+
+    epoch_proba = model.predict_proba(X)[:, 1]
+    epoch_df = pd.DataFrame({
+        "dataset_name": dataset_names,
+        "evaluation_id": evaluation_ids,
+        "patient_id": patient_ids,
+        "recording_id": recording_ids,
+        "epoch_proba": epoch_proba,
+        "true_label": labels,
+    })
+    for evaluation_id, group in epoch_df.groupby("evaluation_id"):
+        if group["true_label"].nunique() != 1:
+            raise ValueError(f"evaluation_id {evaluation_id!r} has multiple labels")
+        if group["patient_id"].nunique() != 1:
+            raise ValueError(f"evaluation_id {evaluation_id!r} has multiple patients")
+
+    result = (
+        epoch_df.groupby("evaluation_id", sort=True)
+        .agg(
+            dataset_name=("dataset_name", "first"),
+            patient_id=("patient_id", "first"),
+            recording_id=("recording_id", "first"),
+            n_epochs=("epoch_proba", "size"),
+            pred_proba=("epoch_proba", "mean"),
+            true_label=("true_label", "first"),
+        )
+        .reset_index()
+    )
+    result.insert(1, "subject_id", result["evaluation_id"])
+    # TUEP aggregation may span several recordings for one patient.
+    result.loc[result["dataset_name"] == "tuep", "recording_id"] = ""
+    return result
 
 
 def evaluate_subject_level(

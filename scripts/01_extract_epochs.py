@@ -1,4 +1,4 @@
-"""Extract background epochs from all EDF files and cache to disk."""
+"""Extract dataset-specific background epochs from EDF files."""
 import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -8,12 +8,15 @@ import numpy as np
 from tqdm import tqdm
 
 from eeg_bg.config.settings import load_config
-from eeg_bg.io.annotation import extract_bckg_intervals
-from eeg_bg.io.cache import make_cache_key
-from eeg_bg.io.dataset import assign_splits, build_subject_index
+from eeg_bg.io.cache import build_cache_metadata, make_cache_key
+from eeg_bg.io.dataset import (
+    active_dataset_name,
+    assign_dataset_splits,
+    build_recording_index,
+    get_recording_intervals,
+)
 from eeg_bg.io.edf_reader import load_edf
 from eeg_bg.preprocessing.epoch import slice_epochs
-from eeg_bg.preprocessing.reference import filter_by_reference
 
 
 def _init_worker():
@@ -22,78 +25,94 @@ def _init_worker():
 
 
 def _process_one_row(args):
-    row_dict, cfg, cache_root_str, force = args
-    edf_path = Path(row_dict["edf_path"])
-    csv_bi_path = edf_path.with_suffix(".csv_bi")
-
+    row, cfg, cache_root_str, force = args
+    edf_path = Path(row["edf_path"])
     cache_key = make_cache_key(edf_path, 0.0, cfg)
-    label_prefix = "00" if row_dict["label"] == 0 else "01"
-    prefixed_sid = f"{label_prefix}_{row_dict['subject_id']}"
-    cache_path = Path(cache_root_str) / prefixed_sid / f"{cache_key}.npz"
+    cache_path = Path(cache_root_str) / row["evaluation_id"] / f"{cache_key}.npz"
 
     if cache_path.exists() and not force:
-        return (edf_path.name, "cached", None)
+        return edf_path.name, "cached", None, 0
 
     try:
         data, ch_names, sfreq = load_edf(edf_path, cfg)
-    except Exception as e:
-        return (edf_path.name, "skip", str(e))
-
-    duration = data.shape[1] / sfreq
-    intervals = (
-        extract_bckg_intervals(csv_bi_path, cfg, recording_duration=duration)
-        if csv_bi_path.exists()
-        else [(0.0, duration)]
-    )
-
-    epochs = slice_epochs(
-        data, sfreq, intervals,
-        cfg["preprocessing"]["epoch_length_sec"],
-        cfg["preprocessing"]["artifact_threshold_uv"],
-    )
+        duration = data.shape[1] / sfreq
+        intervals = get_recording_intervals(row, cfg, duration)
+        epochs = slice_epochs(
+            data,
+            sfreq,
+            intervals,
+            cfg["preprocessing"]["epoch_length_sec"],
+            cfg["preprocessing"]["artifact_threshold_uv"],
+        )
+    except Exception as exc:
+        return edf_path.name, "skip", str(exc), 0
 
     if epochs.shape[0] == 0:
-        return (edf_path.name, "skip", "no valid epochs")
+        return edf_path.name, "skip", "no valid epochs", 0
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         cache_path,
         epochs=epochs,
-        ch_names=np.array(ch_names),
-        label=np.array(row_dict["label"]),
-        subject_id=np.array(prefixed_sid),
-        split=np.array(row_dict["split"]),
+        ch_names=np.asarray(ch_names),
+        **build_cache_metadata(row, len(epochs)),
     )
-    return (edf_path.name, "done", None)
+    return edf_path.name, "done", None, len(epochs)
+
+
+def _print_index_warnings(index, dataset_name: str) -> None:
+    if index.empty:
+        print("[WARNING] No EDF recordings found for the active dataset.")
+        return
+    if dataset_name == "tuab":
+        for partition in ("train", "test"):
+            if not (index["split"] == partition).any():
+                print(f"[WARNING] TUAB index contains no {partition} recordings.")
+        for class_name in ("abnormal", "normal"):
+            if not (index["class_name"] == class_name).any():
+                print(f"[WARNING] TUAB index contains no {class_name} recordings.")
 
 
 def main(config_path: str, force: bool = False, max_workers: int | None = None) -> None:
     cfg = load_config(config_path)
+    dataset_name = active_dataset_name(cfg)
     cache_root = Path(cfg["paths"]["cache_dir"]) / "epochs"
     cache_root.mkdir(parents=True, exist_ok=True)
 
-    index = build_subject_index(cfg)
-    index = filter_by_reference(index, cfg["dataset"]["reference_scheme"])
-    index = assign_splits(index, cfg)
+    index = assign_dataset_splits(build_recording_index(cfg), cfg)
     index.to_csv(cache_root / "index.csv", index=False)
-    print(f"Found {len(index)} EDF files across {index['subject_id'].nunique()} subjects.")
+    _print_index_warnings(index, dataset_name)
+    print(
+        f"Found {len(index)} {dataset_name.upper()} EDF files across "
+        f"{index['patient_id'].nunique() if not index.empty else 0} patients and "
+        f"{index['evaluation_id'].nunique() if not index.empty else 0} evaluation units."
+    )
+    if index.empty:
+        return
 
     args_list = [
         (row.to_dict(), cfg, str(cache_root), force)
         for _, row in index.iterrows()
     ]
-
+    status_counts = {"done": 0, "cached": 0, "skip": 0}
+    total_epochs = 0
     n_workers = max_workers or os.cpu_count()
     with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_worker) as executor:
         futures = {executor.submit(_process_one_row, args): args for args in args_list}
         with tqdm(total=len(futures), desc="Extracting epochs") as pbar:
             for future in as_completed(futures):
-                fname, status, msg = future.result()
+                fname, status, msg, n_epochs = future.result()
+                status_counts[status] += 1
+                total_epochs += n_epochs
                 if status == "skip":
                     tqdm.write(f"  SKIP {fname}: {msg}")
                 pbar.update(1)
 
-    print("Done.")
+    print(
+        "Done. "
+        f"processed={status_counts['done']}, cached={status_counts['cached']}, "
+        f"skipped={status_counts['skip']}, new_epochs={total_epochs}."
+    )
 
 
 if __name__ == "__main__":

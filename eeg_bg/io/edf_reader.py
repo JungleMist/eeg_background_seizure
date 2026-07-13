@@ -2,6 +2,8 @@ import mne
 import numpy as np
 from pathlib import Path
 
+from eeg_bg.io.dataset import active_dataset_name
+
 
 def normalize_channel_name(raw_name: str) -> str:
     """Normalise a raw EDF channel name to a bare electrode label (uppercase).
@@ -57,8 +59,16 @@ def load_edf(
             f"Available: {raw.ch_names}"
         )
 
+    missing = [ch for ch in standard_19 if ch not in name_map.values()]
+    if active_dataset_name(cfg) == "tuab" and missing:
+        raise ValueError(
+            f"TUAB recording is missing standard channels {missing}: {edf_path}"
+        )
+
     raw.pick(list(name_map.keys()))
     raw.rename_channels(name_map)   # raw.ch_names now uses canonical names
+    ordered_channels = [ch for ch in standard_19 if ch in raw.ch_names]
+    raw.reorder_channels(ordered_channels)
     raw.filter(low, high, method="iir",
                iir_params=dict(order=5, ftype="butter"),
                verbose=False)

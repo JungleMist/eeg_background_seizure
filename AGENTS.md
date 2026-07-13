@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This file provides guidance to ZCode / Claude Code agents working with this repository.
-Last updated: 2026-07-07.
+Last updated: 2026-07-13.
 
 ## Environment
 
@@ -66,7 +66,7 @@ conda run -n eeg_pipeline python scripts/08_train_cnn.py [--condition raw|ica|wi
 conda run -n eeg_pipeline python scripts/09_analyze_wiener_phase_grid.py [--results-root PATH]
 ```
 
-Script 08 has no dependency on script 06 — it reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly and trains an independent EEGNet model per condition. It can run any time after 01 (+02/03 for the wiener/ica conditions).
+Scripts 01–07 support TUEP and TUAB. Use `configs/default.yaml` for TUEP and `configs/tuab.yaml` for TUAB. Script 08 is explicitly **TUEP-only** and fails fast when `dataset.active: tuab`; it has no dependency on script 06 for supported TUEP runs.
 
 ### Cache invalidation tiers
 
@@ -113,7 +113,7 @@ EDF files (TUEP v3.1.0, /root/autodl-tmp/EEGdata/TUEP/v3.1.0)
   → verification/           — V1 coherence, V2 transitivity, V3 frequency variation
   → visualization/          — matplotlib figures returned as plt.Figure (never call plt.show())
   → features/extraction.py  — extract_epoch_features() → 211-dim vector per epoch (per-channel + asymmetry)
-  → ml/xgb_pipeline.py      — GridSearchCV + early stopping; subject-level aggregation
+  → ml/xgb_pipeline.py      — patient-grouped CV; TUEP patient / TUAB recording aggregation
   → ml/shap_analysis.py     — TreeExplainer SHAP; band/channel aggregation; comparison plot
   → results/xgboost/        — model.joblib, metrics JSON, SHAP plots
   → ml/cnn_pipeline.py      — parallel path: EEGNet trained directly on raw (19, 2500) epoch tensors (no hand-crafted features)
@@ -140,8 +140,8 @@ EDF files (TUEP v3.1.0, /root/autodl-tmp/EEGdata/TUEP/v3.1.0)
 | `eeg_bg/visualization/psd_plots.py` | `plot_psd_comparison`: PSD overlay (raw / Wiener-specific / ICA-cleaned) for target channels. Channels default to `cfg["visualization"]["psd_target_channels"]` (FP1, FP2). Uses boxcar Welch consistent with decomposition. |
 | `eeg_bg/visualization/waveform_plots.py` | `plot_multichannel_comparison`: stacked all-channel waveform with up to 3 panels (raw / Wiener / ICA). |
 | `eeg_bg/preprocessing/reference.py` | `detect_reference` infers AR/LE from montage dir name; `filter_by_reference` subsets the subject index to one scheme. |
-| `eeg_bg/io/dataset.py` | Traverses TUEP directory tree → subject index DataFrame; `assign_splits` splits by subject (not recording), stratified by label. |
-| `eeg_bg/io/cache.py` | `load_or_compute` wraps any `compute_fn` with `.npz` on-disk caching; cache key = SHA-256 of `edf_path|start_sec|sfreq|bandpass`. |
+| `eeg_bg/io/dataset.py` | Dataset adapter for TUEP/TUAB recording discovery, patient-safe split assignment, and dataset-specific eligible intervals. TUAB official eval is test; official train produces patient-grouped train/val. |
+| `eeg_bg/io/cache.py` | Cache fingerprinting plus shared dataset/patient/recording/evaluation metadata helpers. |
 | `eeg_bg/features/_constants.py` | `_STANDARD_19` — the canonical 19-channel order. Extracted to its own module (not `extraction.py`) purely to avoid a circular import: `connectivity.py` needs the channel list to build `ALL_PAIRS` at import time, but `extraction.py` imports `connectivity.py`. |
 | `eeg_bg/features/asymmetry.py` | `hemispheric_asymmetry(epoch, ch_names, sfreq)` → `(40,)` vector; `ASYMMETRY_NAMES` — 40 strings (`"asym_{left}_{right}_{band}"`). Order is fixed; reordering invalidates saved SHAP `.npy` arrays. 8 symmetric pairs × 5 bands, formula: `(P_left − P_right) / (P_left + P_right + ε)`. |
 | `eeg_bg/features/wavelet.py` | `wavelet_features(signal)` → `(27,)` per channel (513 total across 19 channels). PyWavelets `db4`, 6-level DWT (`level 1` ≈ 32–62 Hz γ … `level 6` ≈ 0.5–2 Hz δ). 27 features/channel: detail energy per level (6), modulus-maxima mean per level (6), reconstructed-band signal stats (15). Cut from an original 66/channel (7 subgroups) on 2026-07-01 — entropy, coefficient stats, approximation-coefficient stats, modulus-maxima counts, and scale-energy ratios were dropped as redundant with existing Welch-based features and absent from SHAP top-20s. `WAVELET_NAMES` built at import time. **Not called from `extraction.py`** — `master` was reverted to the original 211-dim vector (per-channel + asymmetry only); this module and its own unit tests remain in the codebase, untouched, for potential future use. |
@@ -201,7 +201,7 @@ vector. `ml.shap.pruning_threshold` remains unused.
 
 ### Label encoding
 
-`label = 0` → epilepsy (`00_` prefix in cache dirs); `label = 1` → control (`01_` prefix). This is the TUEP convention preserved throughout the pipeline.
+Label 1 is always the probability returned by `predict_proba[:, 1]`. TUEP uses 0=epilepsy and 1=control, aggregated per patient. TUAB uses 0=abnormal and 1=normal, aggregated per recording. A TUAB patient may have recordings of both labels; those recordings stay separate, while patient-grouped splitting/CV prevents leakage.
 
 ### Cache directory layout
 
@@ -305,7 +305,7 @@ Changes to the pipeline (new scripts, new config keys, new output directories, o
 
 ## Non-obvious constraints and gotchas
 
-- **Paired config keys**: `dataset.reference_scheme` and `dataset.montage_dir` must always change together (`"ar"` ↔ `"01_tcp_ar"`, `"le"` ↔ `"02_tcp_le"`). Mismatching them produces zero EDF files for one class. Similarly, `wiener.freq_band` must be a subset of `preprocessing.bandpass`, and `wiener.nperseg` must be ≤ `target_sfreq × epoch_length_sec`.
+- **Dataset selection**: `dataset.active` selects `dataset.tuep` or `dataset.tuab`. Inside the active block, `reference_scheme` and `montage_dir` must agree (`"ar"` ↔ `"01_tcp_ar"`, `"le"` ↔ `"02_tcp_le"`). TUAB reads only the first `max_recording_sec` (1200 s by default), requires all 19 standard channels, and must use cache/results paths separate from TUEP.
 - **`bandpass_filter()` in `epoch.py` is not used in the pipeline**: `load_edf` in `edf_reader.py` applies MNE's `raw.filter()` on the continuous signal before resampling. The standalone `bandpass_filter()` function in `epoch.py` (5th-order `sosfiltfilt`) is available for ad-hoc use but is never called by any script.
 - **XGBoost `n_estimators` in `param_grid` is ignored during Phase 1**: `xgb_pipeline.py` overrides it to 500 for the grid search and uses early stopping in Phase 2 to find the final tree count. The entry in `configs/default.yaml` is documentation only.
 - **`device="cuda"` automatically sets `n_jobs=1`**: `xgb_pipeline.py` detects the CUDA device setting and overrides GridSearchCV's `n_jobs` to avoid CUDA context conflicts across parallel workers. No manual change needed.
@@ -313,7 +313,7 @@ Changes to the pipeline (new scripts, new config keys, new output directories, o
 - **`FEATURE_NAMES` (211 entries) must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 211)` are indexed by position against `FEATURE_NAMES`. Any reordering of channels in `configs/default.yaml` `standard_19`, of pairs in `asymmetry.SYMMETRIC_PAIRS`, or of the block order in `eeg_bg/features/extraction.py` invalidates saved SHAP arrays. Script 06 guards against a stale feature-dim mismatch and raises `ValueError` pointing at `--force`.
 - **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
 - **Scripts 01–04, 06, and 08 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers; script 08 uses PyTorch `DataLoader(num_workers=...)` instead). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 04 additionally runs V1/V2/V3 concurrently via `ThreadPoolExecutor` in Phase 2 after decomposition. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition. Script 08 defaults `num_workers=0` (main-process loading) because it's Windows-safe by default; override via `ml.cnn.num_workers` or `--workers`.
-- **Cache key composition for script 01**: the SHA-256 key is derived from `edf_path`, `target_sfreq`, and `bandpass` only. Changing `epoch_length_sec`, `artifact_threshold_uv`, or `seizure_buffer_sec` does NOT generate a new key — the existing `.npz` is silently reused unless you pass `--force`. Scripts 02 and 03 have no key-based invalidation at all; any config change to `wiener.*` or `ica.*` requires `--force` for those scripts.
+- **Cache key composition for script 01**: the SHA-256 fingerprint covers the EDF path, active dataset, sample rate, bandpass, canonical channels, epoch length, artifact threshold, TUEP seizure buffer, and TUAB recording-duration cap. Scripts 02 and 03 still require `--force` after their own method settings change.
 - **`--force` does not cascade and does not clean up orphaned files**: running `01_extract_epochs.py --force` does not force-rerun scripts 02–08; each script must be passed `--force` independently. Old `.npz` files at old key paths are orphaned on disk (not deleted). For script 06, `--force` only bypasses the feature-extraction cache (`cache/features/`); model training, SHAP computation, and all output files always regenerate regardless. Script 08's `--force` behaves analogously: it re-trains and rewrites `results/cnn/{condition}/` even if metrics already exist there.
 - **`create_smoke_data.py` writes to a hardcoded Windows-style path** (`D:/EEGdata/TUEP/v3.1.0`) — edit `DATA_ROOT` at the top of the script if generating smoke data on a non-Windows machine or a different data root, and make sure `configs/smoke_test.yaml`'s `paths.data_root` matches.
 

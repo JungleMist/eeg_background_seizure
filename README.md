@@ -1,6 +1,6 @@
 # EEG Background Seizure — Wiener Feature Engineering Framework
 
-A research framework for studying **physical point-source Wiener decomposition** of background EEG as a feature engineering method for epilepsy classification. Built on the [TUH EEG Epilepsy Corpus (TUEP) v3.1.0](https://isip.piconepress.com/projects/tuh_eeg/).
+A research framework for studying **physical point-source Wiener decomposition** of background EEG as a feature engineering method. Scripts 01–07 support both the TUH EEG Epilepsy Corpus (TUEP) and TUH Abnormal EEG Corpus (TUAB).
 
 ---
 
@@ -17,6 +17,21 @@ A research framework for studying **physical point-source Wiener decomposition**
 9. [Visualization](#visualization)
 10. [Testing](#testing)
 11. [Package API](#package-api)
+
+---
+
+## Dataset Support
+
+| Dataset | Labels | Evaluation unit | Split policy | Supported path |
+|---------|--------|-----------------|--------------|----------------|
+| TUEP | 0 epilepsy, 1 control | patient | stratified patient split | scripts 01–08 |
+| TUAB | 0 abnormal, 1 normal | recording | official eval = test; official train is patient-grouped into train/val | scripts 01–07 |
+
+For TUAB, script 01 extracts non-overlapping 20-second epochs from at most the first 20 minutes of each recording. Script 06 trains at epoch level, averages `P(normal)` within each `recording_id`, selects the record-level threshold on validation recordings, and applies that fixed threshold to official eval recordings. If one patient has both normal and abnormal recordings, they remain separate labeled evaluation units but are assigned together to train or validation.
+
+**CNN scope:** script 08 and the `eeg_bg/ml/cnn_*` modules are currently **TUEP-only**. `scripts/08_train_cnn.py --config configs/tuab.yaml` exits with a clear error; no TUAB CNN compatibility is implied by the shared epoch cache.
+
+Use `configs/default.yaml` for TUEP and `configs/tuab.yaml` for TUAB. The two configs use different cache and result roots.
 
 ---
 
@@ -368,7 +383,7 @@ cache/wiener_frequency/   cache/wiener_scalar/   cache/ica/                    �
                                          shap_comparison.png
 ```
 
-**Script 08** (not shown above to keep the diagram readable) runs independently in parallel with script 06: it reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly via `EEGEpochDataset` (raw `(19, 1000)` tensors, no hand-crafted features), trains an EEGNet CNN per condition, and writes `results/cnn/{condition}/{best_model.pt, metrics JSONs, predictions CSVs}` plus a top-level `results/cnn/comparison_summary.csv`.
+**Script 08 is TUEP-only.** For TUEP it runs independently in parallel with script 06, reads the same `cache/{epochs,wiener_frequency,ica}/` trees via `EEGEpochDataset`, and trains an EEGNet CNN per condition. TUAB users should stop at script 07.
 
 ### Cache File Schema
 
@@ -381,6 +396,8 @@ Every `.npz` at `cache/epochs/{subject_id}/{cache_key}.npz` contains:
 | `label` | scalar | int | 0 = epilepsy, 1 = control |
 | `subject_id` | scalar | str | Anonymized patient ID |
 | `split` | scalar | str | `train` / `val` / `test` |
+
+New caches also carry `dataset_name`, `patient_id`, `recording_id`, `evaluation_id`, `class_name`, `source_partition`, and `n_epochs`. `subject_id` remains a compatibility alias of `evaluation_id`: a label-prefixed patient ID for TUEP and the EDF recording stem for TUAB.
 
 Wiener/ICA output `.npz` files have the same structure but replace `epochs` with `specific` (and `coherent` for Wiener).
 
@@ -397,8 +414,24 @@ paths:
   results_dir: "results"
 
 dataset:
-  reference_scheme: "ar"          # only process 01_tcp_ar montages
-  montage_dir:      "01_tcp_ar"
+  active: "tuep"                  # tuep | tuab
+  tuep:
+    reference_scheme: "ar"
+    montage_dir: "01_tcp_ar"
+    classes:
+      epilepsy: {folder: "00_epilepsy", label: 0}
+      control: {folder: "01_no_epilepsy", label: 1}
+  tuab:
+    edf_dir: "edf"
+    reference_scheme: "ar"
+    montage_dir: "01_tcp_ar"
+    train_partition: "train"
+    eval_partition: "eval"
+    validation_fraction: 0.10
+    max_recording_sec: 1200.0
+    classes:
+      abnormal: {folder: "abnormal", label: 0}
+      normal: {folder: "normal", label: 1}
 
 split:
   train: 0.70
@@ -570,9 +603,10 @@ does not yet exist):
 Extracts 211 handcrafted features per epoch — 171 per-channel features (relative
 band power × 5 bands, Hjorth parameters × 3, spectral entropy, for each of 19
 channels) plus 40 hemispheric asymmetry features (8 symmetric pairs × 5 bands) —
-under three preprocessing conditions, trains an XGBoost classifier per condition
+under the configured preprocessing conditions, trains an XGBoost classifier per condition
 via 5-fold GridSearchCV + early-stopping refit on the validation set, evaluates
-at subject level, and generates SHAP feature importance comparison figures.
+at patient level for TUEP or recording level for TUAB, and generates SHAP
+feature importance comparison figures.
 
 *History:* this 211-dim vector is the original feature set. It was later expanded
 to 1070 dims (adding wavelet DWT, connectivity, complexity, and multi-scale

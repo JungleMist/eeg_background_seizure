@@ -5,6 +5,7 @@ import pytest
 import xgboost as xgb
 
 from eeg_bg.ml.xgb_pipeline import (
+    evaluation_level_predict,
     subject_level_predict,
     evaluate_subject_level,
 )
@@ -42,6 +43,30 @@ def test_subject_level_predict_proba_in_range(tiny_xgb_model):
 
     df = subject_level_predict(tiny_xgb_model, X, ids, y)
     assert df["pred_proba"].between(0.0, 1.0).all()
+
+
+def test_evaluation_level_predict_keeps_mixed_patient_recordings_separate(
+    tiny_xgb_model,
+):
+    rng = np.random.default_rng(3)
+    X = rng.standard_normal((4, 10)).astype(np.float32)
+    df = evaluation_level_predict(
+        tiny_xgb_model,
+        X,
+        np.array([0, 0, 1, 1]),
+        ["patient1_s001_t000"] * 2 + ["patient1_s002_t000"] * 2,
+        ["patient1"] * 4,
+        ["patient1_s001_t000"] * 2 + ["patient1_s002_t000"] * 2,
+        ["tuab"] * 4,
+    )
+
+    assert len(df) == 2
+    assert set(df["true_label"]) == {0, 1}
+    assert set(df["patient_id"]) == {"patient1"}
+    assert set(df["n_epochs"]) == {2}
+    assert set(df["recording_id"]) == {
+        "patient1_s001_t000", "patient1_s002_t000",
+    }
 
 
 # ── evaluate_subject_level ───────────────────────────────────────────────────

@@ -32,6 +32,7 @@ train_cnn : callable
 from eeg_bg.ml.xgb_pipeline import (
     train_xgboost,
     subject_level_predict,
+    evaluation_level_predict,
     evaluate_subject_level,
     find_optimal_threshold,
 )
@@ -53,6 +54,7 @@ __all__ = [
     # XGBoost pipeline
     "train_xgboost",
     "subject_level_predict",
+    "evaluation_level_predict",
     "evaluate_subject_level",
     "find_optimal_threshold",
     # SHAP analysis

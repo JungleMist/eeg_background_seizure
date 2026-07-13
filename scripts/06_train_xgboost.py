@@ -5,7 +5,7 @@ wiener_zerophase), the script:
   1. Loads or extracts handcrafted features (see FEATURE_NAMES) from the NPZ caches.
   2. Scales features with ``StandardScaler`` (fit on train, applied to val/test).
   3. Trains an ``XGBClassifier`` via 5-fold GridSearchCV + early-stopping refit.
-  4. Evaluates at subject level (mean of per-epoch ``predict_proba``).
+  4. Evaluates by dataset unit: TUEP patient or TUAB recording (mean epoch probability).
   5. Computes SHAP values on the test set and saves per-condition analysis files.
 
 When all five XGBoost conditions have been processed (``--condition all``), a
@@ -36,8 +36,8 @@ results/xgboost/{condition}/
     best_params.json       — GridSearchCV best hyperparameters
     val_metrics.json       — {auroc, f1, accuracy} on validation set
     test_metrics.json      — {auroc, f1, accuracy} on test set
-    val_predictions.csv    — subject_id, pred_proba, true_label
-    test_predictions.csv   — subject_id, pred_proba, true_label
+    val_predictions.csv    — evaluation/patient/recording IDs, probabilities, labels
+    test_predictions.csv   — evaluation/patient/recording IDs, probabilities, labels
     shap_values_test.npy   — (n_test_epochs, len(FEATURE_NAMES)) raw SHAP values
     shap_summary.png       — SHAP beeswarm plot (top 20 features)
     shap_by_band.json      — mean |SHAP| per feature-type group
@@ -64,13 +64,11 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from eeg_bg.config.settings import load_config
-from eeg_bg.features.extraction import (
-    build_dataset,
-    FEATURE_NAMES,
-)
+from eeg_bg.features.extraction import FeatureDataset
+from eeg_bg.io.dataset import active_dataset_config, active_dataset_name
 from eeg_bg.ml.xgb_pipeline import (
     train_xgboost,
-    subject_level_predict,
+    evaluation_level_predict,
     evaluate_subject_level,
     find_optimal_threshold,
 )
@@ -97,8 +95,9 @@ def _load_or_extract_features(
     feature_set: str = "base211",
     connectivity_nperseg: int | None = None,
     max_workers: int | None = None,
-) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Return (X, y, subject_ids), using a profile-aware feature-level NPZ cache."""
+    dataset_name: str = "tuep",
+) -> FeatureDataset:
+    """Load or build a profile-aware feature dataset with identities."""
     from eeg_bg.features.profiles import PROFILES
     profile = PROFILES[feature_set]
 
@@ -111,7 +110,8 @@ def _load_or_extract_features(
 
     # Schema hash covers feature names, sfreq, nperseg, freq_band.
     schema_hash = hashlib.sha256(
-        f"{profile.names}|{sfreq}|{nperseg}|{freq_band}|{connectivity_nperseg}".encode()
+        f"{profile.names}|{sfreq}|{nperseg}|{freq_band}|"
+        f"{connectivity_nperseg}|{dataset_name}".encode()
     ).hexdigest()[:16]
 
     if feat_file.exists() and not force:
@@ -125,30 +125,45 @@ def _load_or_extract_features(
             )
         X    = data["X"].astype(np.float64)
         y    = data["y"].astype(np.int64)
-        sids = list(data["subject_ids"])
+        evaluation_ids = list(data.get("evaluation_ids", data["subject_ids"]))
+        patient_ids = list(data.get("patient_ids", data["subject_ids"]))
+        recording_ids = list(data.get(
+            "recording_ids", np.asarray([""] * len(y), dtype=object)
+        ))
+        dataset_names = list(data.get(
+            "dataset_names", np.asarray([dataset_name] * len(y), dtype=object)
+        ))
         if X.shape[1] != profile.dim:
             raise ValueError(
                 f"Feature cache has {X.shape[1]} dims but profile "
                 f"{feature_set!r} expects {profile.dim}. "
                 f"Re-run script 06 with --force."
             )
-        return X, y, sids
+        return FeatureDataset(
+            X, y, evaluation_ids, patient_ids, recording_ids, dataset_names
+        )
 
-    from eeg_bg.features.extraction import build_dataset_with_profile
-    X, y, sids = build_dataset_with_profile(
+    from eeg_bg.features.extraction import build_feature_dataset_with_profile
+    dataset = build_feature_dataset_with_profile(
         cache_root, condition, split,
         sfreq=sfreq, nperseg=nperseg, freq_band=freq_band,
         profile_name=feature_set, connectivity_nperseg=connectivity_nperseg,
         max_workers=max_workers,
     )
-    if len(X):
+    if len(dataset.X):
         feat_file.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
             feat_file,
-            X=X, y=y, subject_ids=np.array(sids, dtype=object),
+            X=dataset.X,
+            y=dataset.y,
+            evaluation_ids=np.asarray(dataset.evaluation_ids, dtype=object),
+            subject_ids=np.asarray(dataset.evaluation_ids, dtype=object),
+            patient_ids=np.asarray(dataset.patient_ids, dtype=object),
+            recording_ids=np.asarray(dataset.recording_ids, dtype=object),
+            dataset_names=np.asarray(dataset.dataset_names, dtype=object),
             schema_hash=schema_hash,
         )
-    return X, y, sids
+    return dataset
 
 
 def _save_json(obj: dict, path: Path) -> None:
@@ -158,44 +173,43 @@ def _save_json(obj: dict, path: Path) -> None:
 
 
 def _split_stats(
-    X: np.ndarray,
-    y: np.ndarray,
-    sids: list[str],
+    dataset: FeatureDataset,
+    class_names: dict[int, str],
 ) -> dict:
-    """Compute subject / epoch counts for one data split.
-
-    Returns
-    -------
-    dict with keys:
-        n_epochs, n_subjects,
-        n_epochs_epilepsy, n_epochs_control,
-        n_subjects_epilepsy, n_subjects_control
-    """
-    if len(X) == 0:
-        return {
-            "n_epochs": 0, "n_subjects": 0,
-            "n_epochs_epilepsy": 0, "n_epochs_control": 0,
-            "n_subjects_epilepsy": 0, "n_subjects_control": 0,
-        }
-    return {
-        "n_epochs":            int(len(X)),
-        "n_subjects":          int(len(set(sids))),
-        "n_epochs_epilepsy":   int(np.sum(y == 0)),
-        "n_epochs_control":    int(np.sum(y == 1)),
-        "n_subjects_epilepsy": int(len({s for s, l in zip(sids, y) if l == 0})),
-        "n_subjects_control":  int(len({s for s, l in zip(sids, y) if l == 1})),
+    """Compute generic epoch, patient, and evaluation-unit counts."""
+    stats = {
+        "n_epochs": int(len(dataset.X)),
+        "n_evaluations": int(len(set(dataset.evaluation_ids))),
+        "n_patients": int(len(set(dataset.patient_ids))),
     }
+    stats["n_subjects"] = stats["n_evaluations"]  # compatibility alias
+    for label, class_name in class_names.items():
+        safe_name = class_name.replace(" ", "_")
+        stats[f"n_epochs_{safe_name}"] = int(np.sum(dataset.y == label))
+        stats[f"n_evaluations_{safe_name}"] = int(len({
+            evaluation_id
+            for evaluation_id, row_label
+            in zip(dataset.evaluation_ids, dataset.y)
+            if row_label == label
+        }))
+    return stats
 
 
-def _print_data_stats(data_stats: dict) -> None:
+def _print_data_stats(
+    data_stats: dict, aggregation_unit: str = "evaluation unit",
+) -> None:
     """Print split statistics without treating metadata as a split."""
     for split in ("train", "val", "test"):
         s = data_stats.get(split)
         if not isinstance(s, dict):
             continue
-        print(f"  {split.capitalize():5}: {s['n_subjects']:4d} subjects / "
-              f"{s['n_epochs']:5d} epochs  "
-              f"({s['n_subjects_epilepsy']}E + {s['n_subjects_control']}C subjects)")
+        n_evaluations = s.get("n_evaluations", s.get("n_subjects", 0))
+        n_patients = s.get("n_patients", s.get("n_subjects", 0))
+        print(
+            f"  {split.capitalize():5}: {n_evaluations:4d} "
+            f"{aggregation_unit}s / {n_patients:4d} patients / "
+            f"{s['n_epochs']:5d} epochs"
+        )
 
 
 # ── Per-condition pipeline ────────────────────────────────────────────────────
@@ -217,6 +231,16 @@ def run_condition(
                                .get("connectivity", {}).get("nperseg", nperseg))
     freq_band  = tuple(cfg["wiener"]["freq_band"])
     shap_cfg   = cfg["ml"]["shap"]
+    dataset_name = active_dataset_name(cfg)
+    dataset_block = active_dataset_config(cfg)
+    class_names = {}
+    for name, value in dataset_block["classes"].items():
+        default_label = 0 if name in {"epilepsy", "abnormal"} else 1
+        label = int(value.get("label", default_label)) if isinstance(value, dict) \
+            else default_label
+        class_names[label] = name
+    positive_class = class_names[1]
+    aggregation_unit = "recording" if dataset_name == "tuab" else "patient"
     out_dir    = out_root / condition
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -226,48 +250,65 @@ def run_condition(
 
     # ── Feature extraction ────────────────────────────────────────────────────
     print("Loading features...")
-    X_train, y_train, sids_train = _load_or_extract_features(
+    train_data = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "train",
         sfreq, nperseg, freq_band, force, feature_set,
-        connectivity_nperseg, max_workers,
+        connectivity_nperseg, max_workers, dataset_name,
     )
-    X_val,   y_val,   sids_val   = _load_or_extract_features(
+    val_data = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "val",
         sfreq, nperseg, freq_band, force, feature_set,
-        connectivity_nperseg, max_workers,
+        connectivity_nperseg, max_workers, dataset_name,
     )
-    X_test,  y_test,  sids_test  = _load_or_extract_features(
+    test_data = _load_or_extract_features(
         cache_root, feature_cache_dir, condition, "test",
         sfreq, nperseg, freq_band, force, feature_set,
-        connectivity_nperseg, max_workers,
+        connectivity_nperseg, max_workers, dataset_name,
     )
 
-    if len(X_train) == 0:
-        print(f"  [WARNING] No training data found for condition '{condition}'. "
-              "Run scripts 01-03 first.")
-        return {}
+    if len(train_data.X) == 0 or len(val_data.X) == 0:
+        raise ValueError(
+            f"Condition {condition!r} needs non-empty train and validation "
+            "feature sets. Run script 01 on a complete training partition first."
+        )
+    for left_name, left, right_name, right in (
+        ("train", train_data, "val", val_data),
+        ("train", train_data, "test", test_data),
+        ("val", val_data, "test", test_data),
+    ):
+        overlap = set(left.patient_ids) & set(right.patient_ids)
+        if overlap:
+            raise ValueError(
+                f"Patient leakage between {left_name} and {right_name}: "
+                f"{sorted(overlap)[:5]}"
+            )
 
     # ── Data statistics ───────────────────────────────────────────────────────
     data_stats = {
-        "train": _split_stats(X_train, y_train, sids_train),
-        "val":   _split_stats(X_val,   y_val,   sids_val),
-        "test":  _split_stats(X_test,  y_test,  sids_test),
+        "train": _split_stats(train_data, class_names),
+        "val":   _split_stats(val_data, class_names),
+        "test":  _split_stats(test_data, class_names),
         "feature_set": feature_set,
+        "dataset_name": dataset_name,
+        "aggregation_unit": aggregation_unit,
     }
     _save_json(data_stats, out_dir / "data_stats.json")
 
-    _print_data_stats(data_stats)
+    _print_data_stats(data_stats, aggregation_unit)
 
     # ── Feature scaling ───────────────────────────────────────────────────────
     scaler    = StandardScaler()
-    X_tr_sc   = scaler.fit_transform(X_train)
-    X_val_sc  = scaler.transform(X_val)  if len(X_val)  else X_val
-    X_test_sc = scaler.transform(X_test) if len(X_test) else X_test
+    X_tr_sc   = scaler.fit_transform(train_data.X)
+    X_val_sc  = scaler.transform(val_data.X)
+    X_test_sc = scaler.transform(test_data.X) if len(test_data.X) else test_data.X
     joblib.dump(scaler, out_dir / "scaler.joblib")
 
     # ── Training ──────────────────────────────────────────────────────────────
     print("Training XGBoost (GridSearchCV + early stopping)...")
-    model = train_xgboost(X_tr_sc, y_train, X_val_sc, y_val, cfg)
+    model = train_xgboost(
+        X_tr_sc, train_data.y, X_val_sc, val_data.y, cfg,
+        groups=train_data.patient_ids,
+    )
     joblib.dump(model, out_dir / "model.joblib")
 
     # Save best hyperparameters
@@ -275,14 +316,24 @@ def run_condition(
     _save_json(best_params, out_dir / "best_params.json")
 
     # ── Validation evaluation ─────────────────────────────────────────────────
-    val_metrics: dict[str, float] = {}
+    val_metrics: dict = {}
     opt_threshold = 0.5
-    if len(X_val):
-        val_df = subject_level_predict(model, X_val_sc, sids_val, y_val)
-        val_df.to_csv(out_dir / "val_predictions.csv", index=False)
+    if len(val_data.X):
+        val_df = evaluation_level_predict(
+            model, X_val_sc, val_data.y, val_data.evaluation_ids,
+            val_data.patient_ids, val_data.recording_ids, val_data.dataset_names,
+        )
         # Find F1-optimal threshold on validation set; apply to both val+test.
         opt_threshold = find_optimal_threshold(val_df)
+        val_df["predicted_label"] = (
+            val_df["pred_proba"] >= opt_threshold
+        ).astype(int)
+        val_df.to_csv(out_dir / "val_predictions.csv", index=False)
         val_metrics = evaluate_subject_level(val_df, threshold=opt_threshold)
+        val_metrics.update({
+            "positive_class": positive_class,
+            "aggregation_unit": aggregation_unit,
+        })
         _save_json(val_metrics, out_dir / "val_metrics.json")
         print(f"  Val  → AUROC {val_metrics['auroc']:.3f}  "
               f"F1 {val_metrics['f1']:.3f}  "
@@ -290,11 +341,22 @@ def run_condition(
               f"(threshold={opt_threshold:.3f})")
 
     # ── Test evaluation ───────────────────────────────────────────────────────
-    test_metrics: dict[str, float] = {}
-    if len(X_test):
-        test_df = subject_level_predict(model, X_test_sc, sids_test, y_test)
+    test_metrics: dict = {}
+    if len(test_data.X):
+        test_df = evaluation_level_predict(
+            model, X_test_sc, test_data.y, test_data.evaluation_ids,
+            test_data.patient_ids, test_data.recording_ids,
+            test_data.dataset_names,
+        )
+        test_df["predicted_label"] = (
+            test_df["pred_proba"] >= opt_threshold
+        ).astype(int)
         test_df.to_csv(out_dir / "test_predictions.csv", index=False)
         test_metrics = evaluate_subject_level(test_df, threshold=opt_threshold)
+        test_metrics.update({
+            "positive_class": positive_class,
+            "aggregation_unit": aggregation_unit,
+        })
         _save_json(test_metrics, out_dir / "test_metrics.json")
         print(f"  Test → AUROC {test_metrics['auroc']:.3f}  "
               f"F1 {test_metrics['f1']:.3f}  "
@@ -302,7 +364,7 @@ def run_condition(
               f"(threshold={opt_threshold:.3f})")
 
     # ── SHAP analysis ─────────────────────────────────────────────────────────
-    if len(X_test):
+    if len(test_data.X):
         from eeg_bg.features.profiles import PROFILES
         feat_names = PROFILES[feature_set].names
         print("Computing SHAP values...")

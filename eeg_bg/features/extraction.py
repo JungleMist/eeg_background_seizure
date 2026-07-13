@@ -28,6 +28,7 @@ and their own unit tests remain in the codebase, untouched, for future use.
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +76,32 @@ _CONDITION_TO_KEY: dict[str, str] = {
     "wiener_phasegated": "specific",
     "wiener_zerophase": "specific",
 }
+
+
+@dataclass(frozen=True)
+class FeatureDataset:
+    """Epoch features plus identities needed for leakage-safe aggregation."""
+
+    X: np.ndarray
+    y: np.ndarray
+    evaluation_ids: list[str]
+    patient_ids: list[str]
+    recording_ids: list[str]
+    dataset_names: list[str]
+
+    @property
+    def subject_ids(self) -> list[str]:
+        """Backward-compatible alias for the evaluation IDs."""
+        return self.evaluation_ids
+
+
+def _cache_identity(data) -> tuple[str, str, str, str]:
+    subject_id = str(data.get("subject_id", ""))
+    evaluation_id = str(data.get("evaluation_id", subject_id))
+    patient_id = str(data.get("patient_id", subject_id))
+    recording_id = str(data.get("recording_id", ""))
+    dataset_name = str(data.get("dataset_name", "tuep"))
+    return evaluation_id, patient_id, recording_id, dataset_name
 
 
 def extract_epoch_features(
@@ -164,7 +191,7 @@ def _extract_one_file(args: tuple) -> tuple[list, list, list]:
                   if "ch_names" in data.files
                   else list(_STANDARD_19))
     label      = int(data["label"])
-    subject_id = str(data["subject_id"])
+    subject_id = _cache_identity(data)[0]
 
     rows = [
         extract_epoch_features(ep, ch_names, sfreq=sfreq,
@@ -285,6 +312,32 @@ def build_dataset_with_profile(
         Worker processes for parallel file processing. ``None`` uses the
         executor default.
     """
+    dataset = build_feature_dataset_with_profile(
+        cache_root=cache_root,
+        condition=condition,
+        split=split,
+        sfreq=sfreq,
+        nperseg=nperseg,
+        freq_band=freq_band,
+        profile_name=profile_name,
+        connectivity_nperseg=connectivity_nperseg,
+        max_workers=max_workers,
+    )
+    return dataset.X, dataset.y, dataset.evaluation_ids
+
+
+def build_feature_dataset_with_profile(
+    cache_root: Path,
+    condition: str,
+    split: str,
+    sfreq: float,
+    nperseg: int,
+    freq_band: tuple[float, float],
+    profile_name: str = "base211",
+    connectivity_nperseg: int | None = None,
+    max_workers: int | None = None,
+) -> FeatureDataset:
+    """Build a feature dataset with patient and recording identities."""
     from eeg_bg.features.profiles import PROFILES
     profile = PROFILES[profile_name]
 
@@ -312,7 +365,7 @@ def build_dataset_with_profile(
         for file_index, npz_path in enumerate(npz_files)
     ]
 
-    results: dict[int, tuple[list[np.ndarray], list[int], list[str]]] = {}
+    results: dict[int, tuple] = {}
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_extract_one_file_with_profile, args): args[0]
@@ -322,31 +375,46 @@ def build_dataset_with_profile(
             as_completed(futures), total=len(futures),
             desc=f"Features [{profile.name}/{condition}/{split}]", leave=False,
         ):
-            file_index, rows, labels, subject_ids = future.result()
-            results[file_index] = (rows, labels, subject_ids)
+            result = future.result()
+            results[result[0]] = result[1:]
 
     X_list: list[np.ndarray] = []
     y_list: list[int] = []
-    sid_list: list[str] = []
+    evaluation_ids: list[str] = []
+    patient_ids: list[str] = []
+    recording_ids: list[str] = []
+    dataset_names: list[str] = []
     for file_index in sorted(results):
-        rows, labels, subject_ids = results[file_index]
+        (
+            rows, labels, file_evaluation_ids, file_patient_ids,
+            file_recording_ids, file_dataset_names,
+        ) = results[file_index]
         X_list.extend(rows)
         y_list.extend(labels)
-        sid_list.extend(subject_ids)
+        evaluation_ids.extend(file_evaluation_ids)
+        patient_ids.extend(file_patient_ids)
+        recording_ids.extend(file_recording_ids)
+        dataset_names.extend(file_dataset_names)
 
     if not X_list:
-        return (np.empty((0, profile.dim), dtype=np.float64),
-                np.empty((0,), dtype=np.int64),
-                [])
+        return FeatureDataset(
+            np.empty((0, profile.dim), dtype=np.float64),
+            np.empty((0,), dtype=np.int64), [], [], [], [],
+        )
 
-    return (np.vstack(X_list).astype(np.float64),
-            np.asarray(y_list, dtype=np.int64),
-            sid_list)
+    return FeatureDataset(
+        np.vstack(X_list).astype(np.float64),
+        np.asarray(y_list, dtype=np.int64),
+        evaluation_ids,
+        patient_ids,
+        recording_ids,
+        dataset_names,
+    )
 
 
 def _extract_one_file_with_profile(
     args: tuple,
-) -> tuple[int, list[np.ndarray], list[int], list[str]]:
+) -> tuple:
     """Worker: extract one NPZ file with a named feature profile."""
     (
         file_index, npz_path_str, array_key, target_split, sfreq, nperseg,
@@ -358,14 +426,14 @@ def _extract_one_file_with_profile(
         profile = PROFILES[profile_name]
         data = np.load(npz_path_str, allow_pickle=True)
         if str(data.get("split", "")) != target_split:
-            return file_index, [], [], []
+            return file_index, [], [], [], [], [], []
 
         epochs_arr = data[array_key]
         ch_names = list(data.get("ch_names", []))
         if not ch_names:
             ch_names = list(_STANDARD_19)
         label = int(data["label"])
-        subject_id = str(data["subject_id"])
+        evaluation_id, patient_id, recording_id, dataset_name = _cache_identity(data)
 
         rows = []
         for epoch in epochs_arr:
@@ -380,6 +448,14 @@ def _extract_one_file_with_profile(
                 )
             rows.append(feats)
         n_rows = len(rows)
-        return file_index, rows, [label] * n_rows, [subject_id] * n_rows
+        return (
+            file_index,
+            rows,
+            [label] * n_rows,
+            [evaluation_id] * n_rows,
+            [patient_id] * n_rows,
+            [recording_id] * n_rows,
+            [dataset_name] * n_rows,
+        )
     except Exception:
-        return file_index, [], [], []
+        return file_index, [], [], [], [], [], []

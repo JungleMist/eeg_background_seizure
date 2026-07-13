@@ -6,6 +6,7 @@ from eeg_bg.features.extraction import (
     extract_epoch_features,
     build_dataset,
     build_dataset_with_profile,
+    build_feature_dataset_with_profile,
     FEATURE_NAMES,
     _STANDARD_19,
 )
@@ -278,3 +279,31 @@ def test_build_dataset_with_connectivity_profile_parallel(tmp_path):
     assert np.all(np.isfinite(X))
     assert y.tolist() == [0]
     assert sids == ["s001"]
+
+
+def test_feature_dataset_propagates_tuab_identities(tmp_path):
+    rng = np.random.default_rng(10)
+    epochs = rng.standard_normal((2, 19, 256)).astype(np.float64)
+    path = tmp_path / "epochs" / "rec001" / "data.npz"
+    _write_fake_npz(path, epochs, "train", 1, "rec001")
+    with np.load(path, allow_pickle=True) as old:
+        values = {key: old[key] for key in old.files}
+    np.savez(
+        path,
+        **values,
+        dataset_name="tuab",
+        patient_id="patient001",
+        recording_id="patient001_s001_t000",
+        evaluation_id="patient001_s001_t000",
+    )
+
+    dataset = build_feature_dataset_with_profile(
+        tmp_path, "raw", "train",
+        sfreq=125.0, nperseg=64, freq_band=(0.5, 40.0),
+        max_workers=1,
+    )
+
+    assert dataset.evaluation_ids == ["patient001_s001_t000"] * 2
+    assert dataset.patient_ids == ["patient001"] * 2
+    assert dataset.recording_ids == ["patient001_s001_t000"] * 2
+    assert dataset.dataset_names == ["tuab"] * 2

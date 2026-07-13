@@ -30,32 +30,56 @@ paths:
 # -----------------------------------------------------------------------------
 # Dataset discovery  [Tier 1 — re-run 01+]
 # -----------------------------------------------------------------------------
-# PAIRED: reference_scheme ↔ montage_dir
+# dataset.active selects the adapter used by scripts 01–07.  The CNN path
+# (script 08) remains TUEP-only.
+#
+# PAIRED: reference_scheme ↔ montage_dir inside each dataset block
 #   These two values must always be changed together:
 #     "ar"  →  montage_dir: "01_tcp_ar"
 #     "le"  →  montage_dir: "02_tcp_le"
 #   Mixing them causes build_subject_index() to find zero EDF files for one
 #   class (the montage subdirectory will not exist).
 #
-# classes: maps config label names to directory names under data_root.
-#   label=0 is always assigned to "epilepsy"; label=1 to any other key.
-#   The label encoding is hardcoded in io/dataset.py and propagated to every
-#   .npz cache file — do not reorder.
+# Label 1 is the probability modelled downstream: control for TUEP and normal
+# for TUAB.  TUAB labels belong to recordings, not permanently to patients.
 dataset:
-  reference_scheme: "ar"          # categorical: "ar" | "le"
-  montage_dir: "01_tcp_ar"        # PAIRED with reference_scheme (see above)
-  classes:
-    epilepsy: "00_epilepsy"       # → label=0; folder name under data_root
-    control: "01_no_epilepsy"     # → label=1; folder name under data_root
+  active: "tuep"                  # categorical: "tuep" | "tuab"
+
+  tuep:
+    reference_scheme: "ar"
+    montage_dir: "01_tcp_ar"
+    classes:
+      epilepsy:
+        folder: "00_epilepsy"
+        label: 0
+      control:
+        folder: "01_no_epilepsy"
+        label: 1
+
+  tuab:
+    edf_dir: "edf"
+    reference_scheme: "ar"
+    montage_dir: "01_tcp_ar"
+    train_partition: "train"
+    eval_partition: "eval"
+    validation_fraction: 0.10
+    max_recording_sec: 1200.0      # first 20 minutes of every recording
+    classes:
+      abnormal:
+        folder: "abnormal"
+        label: 0
+      normal:
+        folder: "normal"
+        label: 1
 
 # -----------------------------------------------------------------------------
 # Train / val / test split  [Tier 1 — re-run 01+]
 # -----------------------------------------------------------------------------
-# CONSTRAINT: train + val + test must sum to exactly 1.0.
+# TUEP: train + val + test must sum to exactly 1.0.
 #   test is the implicit remainder (all subjects assigned to neither train
 #   nor val); it is not read from this file directly.
 #
-# Splits are stratified by class label: each class is shuffled and partitioned
+# TUEP splits are stratified by class label: each class is shuffled and partitioned
 # independently so both epilepsy and control subjects appear in every split,
 # even when val is as small as 10 %.  A floor of max(1, int(n * val_frac))
 # guarantees ≥1 val subject per class regardless of dataset size.
@@ -63,6 +87,8 @@ dataset:
 # IMPORTANT: split assignments are written into every .npz epoch cache file at
 # creation time.  Changing random_seed, train, or val reassigns subjects and
 # requires a full cache rebuild starting from script 01.
+# TUAB ignores these fractions except random_seed: official eval is test, and
+# dataset.tuab.validation_fraction selects a patient-grouped fold from train.
 split:
   train: 0.70
   val:   0.10
@@ -119,8 +145,8 @@ preprocessing:
 #   as 19 channels × 9 features in this exact order.  Reordering or removing
 #   channels shifts feature indices and invalidates saved SHAP .npy arrays
 #   (which are indexed by position, not name).
-#   All channels listed here must be present in the EDF or the missing channels
-#   fill with zeros (no error is raised).
+#   TUEP feature extraction can zero-fill missing channels for compatibility.
+#   TUAB preprocessing requires all 19 channels and skips incomplete EDF files.
 #
 # CONSTRAINT: every channel in channel_groups and passthrough must appear in
 #   standard_19.  Together, channel_groups ∪ passthrough must cover all 19

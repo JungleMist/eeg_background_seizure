@@ -36,6 +36,7 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from eeg_bg.config.settings import load_config
+from eeg_bg.io.dataset import active_dataset_name
 from eeg_bg.ml.cnn_pipeline import train_cnn
 
 
@@ -74,6 +75,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     cfg  = load_config(args.config)
+    if active_dataset_name(cfg) != "tuep":
+        raise SystemExit(
+            "Script 08 (EEGNet CNN) currently supports TUEP only. "
+            "Use scripts 01-07 for TUAB."
+        )
 
     # Allow --workers CLI flag to override the config value
     if args.workers is not None:

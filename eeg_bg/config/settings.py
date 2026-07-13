@@ -49,4 +49,10 @@ def load_config(config_path: str | Path = "configs/default.yaml") -> dict:
             p = Path(cfg["paths"][key])
             if not p.is_absolute():
                 cfg["paths"][key] = str(project_root / p)
+    # Local experiment configs created before dataset.active used a flat TUEP
+    # block. Keep them usable while all newly tracked configs use the nested
+    # dataset.tuep / dataset.tuab layout.
+    dataset_cfg = cfg.get("dataset", {})
+    if "active" not in dataset_cfg and "reference_scheme" in dataset_cfg:
+        cfg["dataset"] = {"active": "tuep", "tuep": dataset_cfg}
     return cfg

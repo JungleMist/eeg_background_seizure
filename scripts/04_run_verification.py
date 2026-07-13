@@ -104,15 +104,20 @@ def _verify_recording_cache(args: tuple) -> dict:
     edata = np.load(epoch_path, allow_pickle=True)
 
     # Validate consistency
-    if str(wdata["subject_id"]) != str(edata["subject_id"]):
-        return {"error": f"subject_id mismatch: {wiener_path.name}"}
+    w_evaluation_id = str(wdata.get("evaluation_id", wdata["subject_id"]))
+    e_evaluation_id = str(edata.get("evaluation_id", edata["subject_id"]))
+    if w_evaluation_id != e_evaluation_id:
+        return {"error": f"evaluation_id mismatch: {wiener_path.name}"}
     if int(wdata["label"]) != int(edata["label"]):
         return {"error": f"label mismatch: {wiener_path.name}"}
 
-    subject_id = str(wdata["subject_id"])
+    subject_id = w_evaluation_id
     label = int(wdata["label"])
     split = str(wdata.get("split", ""))
-    recording_id = str(wiener_path.relative_to(Path(wiener_root_str)).parent / wiener_path.stem)
+    recording_id = str(wdata.get(
+        "recording_id",
+        wiener_path.relative_to(Path(wiener_root_str)).parent / wiener_path.stem,
+    ))
     ch_names = list(edata["ch_names"])
 
     sfreq = float(cfg["preprocessing"]["target_sfreq"])
@@ -534,7 +539,7 @@ def _decompose_one_file(args):
     data = np.load(npz_path_str, allow_pickle=True)
     epochs     = data["epochs"]
     ch_names   = list(data["ch_names"])
-    subject_id = str(data["subject_id"])
+    subject_id = str(data.get("evaluation_id", data["subject_id"]))
     return [
         decompose_epoch(ep, ch_names, cfg, subject_id=subject_id, epoch_idx=i)
         for i, ep in enumerate(epochs)
