@@ -65,6 +65,34 @@ def test_grid_paired_delta_rejects_label_mismatch():
         script09._bootstrap_delta(left, right, repeats=10, seed=42)
 
 
+def test_grid_analysis_accepts_custom_config_prefix(tmp_path, monkeypatch):
+    script09 = _load_script("09_analyze_wiener_phase_grid")
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "custom_grid_1.yaml").write_text(
+        "wiener:\n  overlap_policy: coherence_weighted\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        script09,
+        "MATRIX",
+        [(1, "frequency", 3.141592653589793, 0.15)],
+    )
+
+    output_dir = tmp_path / "summary"
+    script09.analyze(
+        tmp_path / "results",
+        output_dir,
+        repeats=10,
+        seed=42,
+        config_dir=config_dir,
+        config_prefix="custom_grid",
+    )
+
+    assert (output_dir / "performance.csv").exists()
+    assert (output_dir / "report.md").exists()
+
+
 def test_verification_epoch_sampling_is_deterministic_and_bounded():
     script04 = _load_script("04_run_verification")
     first = script04._sample_epoch_indices(20, 5, 42, "recording-a")

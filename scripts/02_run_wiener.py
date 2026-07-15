@@ -8,21 +8,32 @@ import numpy as np
 from tqdm import tqdm
 
 from eeg_bg.config.settings import load_config
-from eeg_bg.io.cache import copy_cache_metadata
+from eeg_bg.io.cache import copy_cache_metadata, make_wiener_cache_fingerprint
+
+
+WIENER_CACHE_SCHEMA_VERSION = 3
 
 
 def _process_wiener_file(args):
     npz_path_str, cfg, epoch_root_str, out_root_str, mode, force = args
     npz_path = Path(npz_path_str)
     out_path = Path(out_root_str) / npz_path.relative_to(Path(epoch_root_str))
+    expected_fingerprint = make_wiener_cache_fingerprint(cfg, mode)
 
     if out_path.exists() and not force:
         data = np.load(out_path, allow_pickle=True)
         sv = data.get("schema_version", None)
-        if sv is None or int(sv) < 2:
+        if sv is None or int(sv) < WIENER_CACHE_SCHEMA_VERSION:
             raise ValueError(
-                f"Old Wiener cache without target-level diagnostics "
-                f"(schema_version={sv}). Re-run script 02 with --force."
+                f"Old Wiener cache schema (schema_version={sv}, expected "
+                f"{WIENER_CACHE_SCHEMA_VERSION}). Re-run script 02 with "
+                "--force."
+            )
+        cached_fingerprint = str(data.get("wiener_config_fingerprint", ""))
+        if cached_fingerprint != expected_fingerprint:
+            raise ValueError(
+                "Wiener cache configuration mismatch. Re-run script 02 "
+                "with --force."
             )
         return (npz_path.name, "cached", None)
 
@@ -93,7 +104,8 @@ def _process_wiener_file(args):
         specific=np.stack([r["specific"] for r in results]),
         coherent=np.stack([r["coherent"] for r in results]),
         ch_names=data["ch_names"],
-        schema_version=2,
+        schema_version=WIENER_CACHE_SCHEMA_VERSION,
+        wiener_config_fingerprint=expected_fingerprint,
         candidate_keys=_ck_arr,
         skipped_pairs=skipped_arr,
         **copy_cache_metadata(data),

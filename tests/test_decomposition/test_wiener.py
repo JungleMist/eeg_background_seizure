@@ -2,7 +2,10 @@ import numpy as np
 import pytest
 from scipy.signal import coherence as scipy_coherence
 from eeg_bg.decomposition.wiener import (
+    CANDIDATE_PROCESSED,
+    CANDIDATE_SOLVE_FAILED,
     WienerResult,
+    WienerSolveError,
     estimate_cross_psd,
     compute_wiener_filter,
     apply_wiener_filter,
@@ -80,6 +83,14 @@ def test_compute_wiener_filter_shape(synthetic_epoch):
     assert h.dtype == complex
 
 
+def test_compute_wiener_filter_raises_on_singular_system():
+    S = np.zeros((3, 3, 1), dtype=complex)
+    S[1:, 1:, 0] = np.ones((2, 2))
+
+    with pytest.raises(WienerSolveError, match="frequency bin 0"):
+        compute_wiener_filter(S, target_idx=0, reg_factor=0.0)
+
+
 def test_apply_wiener_filter_output_shape(synthetic_epoch):
     epoch, ch_names, cfg, *_ = synthetic_epoch
     pair_data = epoch[:2]
@@ -91,6 +102,28 @@ def test_apply_wiener_filter_output_shape(synthetic_epoch):
     assert specific.shape == (pair_data.shape[1],)
     assert coherent.shape == (pair_data.shape[1],)
     np.testing.assert_allclose(specific + coherent, pair_data[0], atol=1e-8)
+
+
+def test_wiener_filter_reconstructs_delayed_target():
+    """A complex Wiener filter must preserve the transfer-function phase."""
+    rng = np.random.default_rng(42)
+    n_times = 1024
+    reference = rng.standard_normal(n_times)
+    reference -= reference.mean()
+    target = np.roll(reference, 7)
+    pair_data = np.vstack([target, reference])
+
+    _, S = estimate_cross_psd(pair_data, sfreq=128.0, nperseg=n_times)
+    h = compute_wiener_filter(S, target_idx=0, reg_factor=0.0)
+    specific, coherent = apply_wiener_filter(
+        pair_data,
+        h,
+        target_idx=0,
+        n_times=n_times,
+    )
+
+    np.testing.assert_allclose(coherent, target, atol=1e-10)
+    np.testing.assert_allclose(specific, np.zeros_like(target), atol=1e-10)
 
 
 def test_decompose_epoch_reduces_coherence(synthetic_epoch):
@@ -251,6 +284,31 @@ def test_unstable_filter_skips_only_that_target_candidate():
         result.raw,
         atol=1e-12,
     )
+
+
+def test_solve_failure_is_reported_and_only_skips_that_candidate():
+    epoch = _overlap_epoch()[:2]
+    ch_names = ["A", "B"]
+    cfg = _fusion_cfg([["A", "B"]])
+
+    def candidate_fn(group_data, S, target_idx, freq_mask, n_times):
+        if target_idx == 1:
+            raise WienerSolveError("synthetic solve failure")
+        return np.array([[0.5]]), np.ones(n_times), {}
+
+    result = decompose_epoch_with_fusion(
+        epoch,
+        ch_names,
+        cfg,
+        candidate_fn=candidate_fn,
+    )
+
+    status_by_key = dict(zip(result.candidate_keys, result.candidate_status))
+    assert status_by_key["A-B::A"] == CANDIDATE_PROCESSED
+    assert status_by_key["A-B::B"] == CANDIDATE_SOLVE_FAILED
+    assert set(result.filters["A-B"]) == {"A"}
+    np.testing.assert_array_equal(result.coherent[1], np.zeros_like(epoch[1]))
+    np.testing.assert_array_equal(result.specific[1], epoch[1])
 
 
 @pytest.mark.parametrize(

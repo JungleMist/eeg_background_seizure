@@ -14,16 +14,25 @@
 set -euo pipefail
 
 CONDA_RUN="${CONDA_RUN:-conda run -n eeg_pipeline}"
+PROGRAM_NAME="${PROGRAM_NAME:-scripts/run_wiener_threshold_phase_experiment.sh}"
+EXPERIMENT_LABEL="${EXPERIMENT_LABEL:-TUEP WIENER THRESHOLD/PHASE ABLATION}"
+CONFIG_PREFIX="${CONFIG_PREFIX:-configs/exp_wiener_phase}"
+BASELINE_CONFIG="${BASELINE_CONFIG:-configs/exp_wiener_phase_baseline.yaml}"
+RESULTS_ROOT="${RESULTS_ROOT:-results/exp_wiener_phase}"
+ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-wiener-phase}"
+EXPECTED_DATASET="${EXPECTED_DATASET:-tuep}"
+RUN_GRID_ANALYSIS="${RUN_GRID_ANALYSIS:-0}"
 WORKERS=16
 FROM=1
 CLEAR_CACHE=0
 SKIP_EPOCHS=0
 SKIP_BASELINE=0
+CHECK_CONFIG=0
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage:
-  bash scripts/run_wiener_threshold_phase_experiment.sh [options]
+  bash ${PROGRAM_NAME} [options]
 
 Options:
   --workers N       Worker processes for scripts 01/02/03 (default: 16)
@@ -31,7 +40,12 @@ Options:
   --clear-cache     Remove the configured cache_dir before script 01
   --skip-epochs     Skip script 01; assumes cache/epochs already exists
   --skip-baseline   Skip script 03 and raw/ICA XGBoost; assumes baseline exists
+  --check-config    Validate the experiment configs and exit without running
   -h, --help        Show this help
+
+Cache policy:
+  epochs/ is retained as shared input. wiener_frequency/, wiener_phasegated/,
+  and ica/ are mutually exclusive and are deleted after feature extraction.
 EOF
 }
 
@@ -42,6 +56,7 @@ while [[ $# -gt 0 ]]; do
         --clear-cache) CLEAR_CACHE=1; shift ;;
         --skip-epochs) SKIP_EPOCHS=1; shift ;;
         --skip-baseline) SKIP_BASELINE=1; shift ;;
+        --check-config) CHECK_CONFIG=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1"; usage; exit 1 ;;
     esac
@@ -56,25 +71,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-LOG_DIR="results/exp_wiener_phase"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/runtime_$(date +%Y-%m-%d_%H%M%S).log"
-EXPERIMENT_START=$SECONDS
+LOG_DIR="$RESULTS_ROOT"
 
 CONFIGS=(
     ""
-    "configs/exp_wiener_phase_1.yaml"
-    "configs/exp_wiener_phase_2.yaml"
-    "configs/exp_wiener_phase_3.yaml"
-    "configs/exp_wiener_phase_4.yaml"
-    "configs/exp_wiener_phase_5.yaml"
-    "configs/exp_wiener_phase_6.yaml"
-    "configs/exp_wiener_phase_7.yaml"
-    "configs/exp_wiener_phase_8.yaml"
+    "${CONFIG_PREFIX}_1.yaml"
+    "${CONFIG_PREFIX}_2.yaml"
+    "${CONFIG_PREFIX}_3.yaml"
+    "${CONFIG_PREFIX}_4.yaml"
+    "${CONFIG_PREFIX}_5.yaml"
+    "${CONFIG_PREFIX}_6.yaml"
+    "${CONFIG_PREFIX}_7.yaml"
+    "${CONFIG_PREFIX}_8.yaml"
 )
 MODES=("" "frequency" "frequency" "frequency" "phasegated" "phasegated" "phasegated" "phasegated" "phasegated")
 CONDITIONS=("" "wiener" "wiener" "wiener" "wiener_phasegated" "wiener_phasegated" "wiener_phasegated" "wiener_phasegated" "wiener_phasegated")
-CACHE_SUBDIRS=("" "wiener_frequency" "wiener_frequency" "wiener_frequency" "wiener_phasegated" "wiener_phasegated" "wiener_phasegated" "wiener_phasegated" "wiener_phasegated")
+DERIVED_CACHE_SUBDIRS=("wiener_frequency" "wiener_phasegated" "ica")
 LABELS=(
     ""
     "coh=0.15 phase=pi frequency"
@@ -131,13 +143,45 @@ safe_clear_dir() {
     rm -rf "$target"
 }
 
+clear_derived_caches() {
+    local cache_dir="$1"
+    local subdir
+    for subdir in "${DERIVED_CACHE_SUBDIRS[@]}"; do
+        safe_clear_dir "$cache_dir/$subdir" "$subdir cache"
+    done
+}
+
+assert_derived_cache_exclusive() {
+    local cache_dir="$1"
+    local count=0
+    local present=()
+    local subdir
+    for subdir in "${DERIVED_CACHE_SUBDIRS[@]}"; do
+        if [[ -d "$cache_dir/$subdir" ]]; then
+            count=$(( count + 1 ))
+            present+=("$subdir")
+        fi
+    done
+    if (( count > 1 )); then
+        echo "Derived cache invariant violated: ${present[*]} coexist in $cache_dir"
+        exit 1
+    fi
+}
+
+clear_baseline_feature_caches() {
+    local cache_dir="$1"
+    rm -f "$cache_dir/features/raw_"*.npz
+    rm -f "$cache_dir/features/ica_"*.npz
+    rm -f "$cache_dir/features/base211_conn80/raw_"*.npz
+    rm -f "$cache_dir/features/base211_conn80/ica_"*.npz
+}
+
 clean_condition_cache() {
     local cfg="$1"
     local condition="$2"
-    local cache_subdir="$3"
     local cache_dir
     cache_dir="$(config_value "$cfg" "paths.cache_dir")"
-    safe_clear_dir "$cache_dir/$cache_subdir" "$cache_subdir cache"
+    clear_derived_caches "$cache_dir"
     rm -f "$cache_dir/features/${condition}_"*.npz
     rm -f "$cache_dir/features/base211_conn80/${condition}_"*.npz
 }
@@ -157,16 +201,13 @@ prepare_condition_results() {
 }
 
 clean_baseline_cache_and_results() {
-    local cfg="configs/exp_wiener_phase_baseline.yaml"
+    local cfg="$BASELINE_CONFIG"
     local cache_dir results_dir
     cache_dir="$(config_value "$cfg" "paths.cache_dir")"
     results_dir="$(config_value "$cfg" "paths.results_dir")"
 
-    safe_clear_dir "$cache_dir/ica" "ica cache"
-    rm -f "$cache_dir/features/raw_"*.npz
-    rm -f "$cache_dir/features/ica_"*.npz
-    rm -f "$cache_dir/features/base211_conn80/raw_"*.npz
-    rm -f "$cache_dir/features/base211_conn80/ica_"*.npz
+    clear_derived_caches "$cache_dir"
+    clear_baseline_feature_caches "$cache_dir"
     for profile in base211 base211_conn80; do
         safe_clear_dir "$results_dir/xgboost/$profile/raw" "$profile baseline raw results"
         safe_clear_dir "$results_dir/xgboost/$profile/ica" "$profile baseline ica results"
@@ -178,7 +219,7 @@ copy_baseline_results() {
     local cfg="${CONFIGS[$idx]}"
     local results_dir baseline_dir
     results_dir="$(config_value "$cfg" "paths.results_dir")"
-    baseline_dir="$(config_value "configs/exp_wiener_phase_baseline.yaml" "paths.results_dir")"
+    baseline_dir="$(config_value "$BASELINE_CONFIG" "paths.results_dir")"
 
     for profile in base211 base211_conn80; do
         if [[ ! -d "$baseline_dir/xgboost/$profile/raw" || ! -d "$baseline_dir/xgboost/$profile/ica" ]]; then
@@ -193,16 +234,43 @@ copy_baseline_results() {
     done
 }
 
-echo "# run_wiener_threshold_phase_experiment.sh started $(date)" | tee "$LOG_FILE"
-echo "# workers=$WORKERS from=$FROM clear_cache=$CLEAR_CACHE skip_epochs=$SKIP_EPOCHS skip_baseline=$SKIP_BASELINE" | tee -a "$LOG_FILE"
-echo "#" | tee -a "$LOG_FILE"
-
 BASE_CFG="${CONFIGS[1]}"
 CACHE_DIR="$(config_value "$BASE_CFG" "paths.cache_dir")"
+for CFG in "$BASELINE_CONFIG" "${CONFIGS[@]:1}"; do
+    ACTIVE_DATASET="$(config_value "$CFG" "dataset.active")"
+    CFG_CACHE_DIR="$(config_value "$CFG" "paths.cache_dir")"
+    if [[ "$ACTIVE_DATASET" != "$EXPECTED_DATASET" ]]; then
+        echo "Expected dataset.active=$EXPECTED_DATASET, got $ACTIVE_DATASET from $CFG"
+        exit 1
+    fi
+    if [[ "$CFG_CACHE_DIR" != "$CACHE_DIR" ]]; then
+        echo "Expected shared cache_dir=$CACHE_DIR, got $CFG_CACHE_DIR from $CFG"
+        exit 1
+    fi
+done
+
+if (( CHECK_CONFIG )); then
+    echo "Validated 8 grid entries for dataset=$EXPECTED_DATASET"
+    echo "Shared cache_dir: $CACHE_DIR"
+    echo "Results root: $RESULTS_ROOT"
+    exit 0
+fi
+
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/runtime_$(date +%Y-%m-%d_%H%M%S).log"
+EXPERIMENT_START=$SECONDS
+echo "# $PROGRAM_NAME started $(date)" | tee "$LOG_FILE"
+echo "# workers=$WORKERS from=$FROM clear_cache=$CLEAR_CACHE skip_epochs=$SKIP_EPOCHS skip_baseline=$SKIP_BASELINE" | tee -a "$LOG_FILE"
+echo "#" | tee -a "$LOG_FILE"
 
 if (( CLEAR_CACHE )); then
     safe_clear_dir "$CACHE_DIR" "full cache_dir"
 fi
+
+# epochs/ is the shared input to scripts 02 and 03. Keep it, but ensure the
+# three large derived caches never coexist, including stale data from a prior run.
+clear_derived_caches "$CACHE_DIR"
+assert_derived_cache_exclusive "$CACHE_DIR"
 
 if (( SKIP_EPOCHS )); then
     echo ""
@@ -224,7 +292,6 @@ for IDX in 1 2 3 4 5 6 7 8; do
     CFG="${CONFIGS[$IDX]}"
     MODE="${MODES[$IDX]}"
     CONDITION="${CONDITIONS[$IDX]}"
-    CACHE_SUBDIR="${CACHE_SUBDIRS[$IDX]}"
     LABEL="${LABELS[$IDX]}"
 
     echo ""
@@ -235,7 +302,7 @@ for IDX in 1 2 3 4 5 6 7 8; do
     echo "  06 condition: $CONDITION"
     echo "============================================================"
 
-    clean_condition_cache "$CFG" "$CONDITION" "$CACHE_SUBDIR"
+    clean_condition_cache "$CFG" "$CONDITION"
     prepare_condition_results "$CFG" "$CONDITION"
 
     run_step "exp$IDX - 02 Wiener $MODE" \
@@ -244,6 +311,7 @@ for IDX in 1 2 3 4 5 6 7 8; do
             --mode "$MODE" \
             --force \
             --workers "$WORKERS"
+    assert_derived_cache_exclusive "$CACHE_DIR"
 
     for FEATURE_SET in base211 base211_conn80; do
         run_step "exp$IDX - 06 XGBoost $CONDITION ($FEATURE_SET)" \
@@ -254,7 +322,8 @@ for IDX in 1 2 3 4 5 6 7 8; do
                 --force
     done
 
-    clean_condition_cache "$CFG" "$CONDITION" "$CACHE_SUBDIR"
+    clean_condition_cache "$CFG" "$CONDITION"
+    assert_derived_cache_exclusive "$CACHE_DIR"
 done
 
 if (( SKIP_BASELINE )); then
@@ -270,25 +339,32 @@ else
 
     run_step "03 - ICA decomposition" \
         $CONDA_RUN python scripts/03_run_ica.py \
-            --config configs/exp_wiener_phase_baseline.yaml \
+            --config "$BASELINE_CONFIG" \
             --force \
             --workers "$WORKERS"
+    assert_derived_cache_exclusive "$CACHE_DIR"
 
     for FEATURE_SET in base211 base211_conn80; do
         run_step "06 - XGBoost raw baseline ($FEATURE_SET)" \
             $CONDA_RUN python scripts/06_train_xgboost.py \
-                --config configs/exp_wiener_phase_baseline.yaml \
+                --config "$BASELINE_CONFIG" \
                 --condition raw \
                 --feature-set "$FEATURE_SET" \
                 --force
 
         run_step "06 - XGBoost ica baseline ($FEATURE_SET)" \
             $CONDA_RUN python scripts/06_train_xgboost.py \
-                --config configs/exp_wiener_phase_baseline.yaml \
+                --config "$BASELINE_CONFIG" \
                 --condition ica \
                 --feature-set "$FEATURE_SET" \
                 --force
     done
+
+    # Models and predictions are already persisted in results/. The ICA tensor
+    # cache and the temporary raw/ICA feature matrices are no longer needed.
+    clear_derived_caches "$CACHE_DIR"
+    clear_baseline_feature_caches "$CACHE_DIR"
+    assert_derived_cache_exclusive "$CACHE_DIR"
 fi
 
 echo ""
@@ -308,12 +384,20 @@ for IDX in 1 2 3 4 5 6 7 8; do
     run_step "exp$IDX - 07 archive" \
         $CONDA_RUN python scripts/07_organize_experiment.py \
             --config "$CFG" \
-            --name "wiener-phase-exp$IDX"
+            --name "${ARCHIVE_PREFIX}-exp$IDX"
 done
+
+if (( RUN_GRID_ANALYSIS )); then
+    run_step "09 - Analyze phase/coherence grid" \
+        $CONDA_RUN python scripts/09_analyze_wiener_phase_grid.py \
+            --results-root "$RESULTS_ROOT" \
+            --config-dir "$(dirname "$CONFIG_PREFIX")" \
+            --config-prefix "$(basename "$CONFIG_PREFIX")"
+fi
 
 echo ""
 echo "============================================================"
-echo "  WIENER THRESHOLD/PHASE ABLATION - RESULTS SUMMARY"
+echo "  $EXPERIMENT_LABEL - RESULTS SUMMARY"
 echo "============================================================"
 printf "  %-4s %-36s %s\n" "Exp" "Setting" "Test AUROC(raw / ica / wiener-condition)"
 echo "  --------------------------------------------------------------------------------"

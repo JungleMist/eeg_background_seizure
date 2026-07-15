@@ -68,6 +68,8 @@ conda run -n eeg_pipeline python scripts/09_analyze_wiener_phase_grid.py [--resu
 
 Scripts 01–07 support TUEP and TUAB. Use `configs/default.yaml` for TUEP and `configs/tuab.yaml` for TUAB. Script 08 is explicitly **TUEP-only** and fails fast when `dataset.active: tuab`; it has no dependency on script 06 for supported TUEP runs.
 
+The TUAB counterpart of the fixed 8-cell Wiener phase/coherence experiment is `bash scripts/run_tuab_wiener_threshold_phase_experiment.sh [--workers N] [--from N]`. Its `configs/exp_tuab_wiener_phase_{1..8}.yaml` files inherit through `exp_tuab_wiener_phase_base.yaml` → `tuab.yaml`, share `cache_tuab`, and write isolated outputs under `results_tuab/exp_wiener_phase/`. The wrapper also runs script 09 with the TUAB config prefix after training and archiving. To limit disk use, the shared experiment driver keeps `epochs/` as the required common input but enforces that `wiener_frequency/`, `wiener_phasegated/`, and `ica/` never coexist; the active derived cache is deleted immediately after its XGBoost feature extraction finishes.
+
 ### Cache invalidation tiers
 
 Changing a `configs/default.yaml` key requires re-running all scripts at or after its tier with `--force`:
@@ -81,6 +83,8 @@ Changing a `configs/default.yaml` key requires re-running all scripts at or afte
 | 5 | `08` only | `ml.cnn` |
 
 Scripts 04 and 05 produce no cache and always re-run from existing caches — changing `verification` or `visualization` keys requires no `--force`. This includes `visualization.export_edf`/`export_edf_max_epochs` — plain output-gating flags for script 05's optional `.edf` export step, not cache keys. `export_edf_max_epochs` must be a positive integer (`>=1`). Script 06 additionally has a **shape guard**: if a cached `cache/features/{condition}_{split}.npz` has a different column count than the current `FEATURE_NAMES` (e.g. after a feature-engineering code change bumped the vector length), `_load_or_extract_features` raises `ValueError` naming `--force` rather than silently training on a stale/misaligned feature matrix.
+
+Script 02 stores a Wiener configuration fingerprint in schema-v3 output caches. When `--force` is omitted, a legacy schema or any mismatch in the effective mode, sampling rate, channel groups, or Wiener decomposition settings raises `ValueError` naming `--force` instead of silently reusing stale output.
 
 ### Running with a local config
 

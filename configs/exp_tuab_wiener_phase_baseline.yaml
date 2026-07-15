@@ -1,0 +1,5 @@
+# Shared raw/ICA baseline for the TUAB Wiener phase/coherence grid.
+extends: exp_tuab_wiener_phase_base.yaml
+
+paths:
+  results_dir: "results_tuab/exp_wiener_phase/baseline"

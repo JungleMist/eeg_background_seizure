@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 from eeg_bg.decomposition.wiener import (
     WienerResult,
+    WienerSolveError,
     estimate_cross_psd,
     compute_wiener_filter,
     decompose_epoch as freq_decompose,
@@ -45,6 +47,14 @@ def test_zerophase_filter_is_real(synthetic_epoch):
     h = compute_zerophase_filter(S, target_idx=0)
     assert np.isrealobj(h)
     assert h.shape == (1, nperseg // 2 + 1)
+
+
+def test_zerophase_filter_raises_on_singular_system():
+    S = np.zeros((3, 3, 1), dtype=complex)
+    S[1:, 1:, 0] = np.ones((2, 2))
+
+    with pytest.raises(WienerSolveError, match="frequency bin 0"):
+        compute_zerophase_filter(S, target_idx=0, reg_factor=0.0)
 
 
 def test_zerophase_matches_real_part_for_single_reference(synthetic_epoch):

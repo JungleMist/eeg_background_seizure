@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Summarise the fixed eight-cell Wiener phase/coherence experiment grid.
+"""Summarise a fixed eight-cell Wiener phase/coherence experiment grid.
 
-The script consumes the profile-aware ``results/exp_wiener_phase/expN`` trees
-and uses the archived subject-level prediction CSVs for paired comparisons.
-It never retrains a model and keeps the analysis bootstrap seed fixed at 42.
+The result root and config filename prefix are selectable so the same analysis
+can be used for the TUEP and TUAB grids. The script uses subject/evaluation-level
+prediction CSVs for paired comparisons, never retrains a model, and keeps the
+analysis bootstrap seed fixed at 42.
 """
 from __future__ import annotations
 
@@ -125,13 +126,14 @@ def analyze(
     repeats: int,
     seed: int,
     config_dir: Path,
+    config_prefix: str = "exp_wiener_phase",
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     paired = []
     for idx, mode, phase, coh in MATRIX:
         exp_root = results_parent / f"exp{idx}"
-        cfg_path = config_dir / f"exp_wiener_phase_{idx}.yaml"
+        cfg_path = config_dir / f"{config_prefix}_{idx}.yaml"
         cfg = load_config(cfg_path)
         condition = "wiener" if mode == "frequency" else "wiener_phasegated"
         for profile in PROFILES:
@@ -211,7 +213,12 @@ def main() -> None:
     parser.add_argument(
         "--config-dir",
         default=str(Path(__file__).resolve().parents[1] / "configs"),
-        help="Directory containing exp_wiener_phase_1.yaml through _8.yaml",
+        help="Directory containing the eight experiment config files",
+    )
+    parser.add_argument(
+        "--config-prefix",
+        default="exp_wiener_phase",
+        help="Config filename prefix before _1.yaml through _8.yaml",
     )
     parser.add_argument("--bootstrap-repeats", type=int, default=10000)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
@@ -224,6 +231,7 @@ def main() -> None:
         args.bootstrap_repeats,
         args.bootstrap_seed,
         Path(args.config_dir).resolve(),
+        args.config_prefix,
     )
     print(f"Grid summary written to {out}")
 

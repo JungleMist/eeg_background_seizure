@@ -15,6 +15,10 @@ CANDIDATE_MISSING_CHANNEL = 4
 CANDIDATE_UNUSED          = 255
 
 
+class WienerSolveError(RuntimeError):
+    """Raised when a per-frequency Wiener system cannot be solved safely."""
+
+
 @dataclass
 class WienerResult:
     subject_id: str
@@ -89,6 +93,11 @@ def compute_wiener_filter(
     Returns
     -------
     h : np.ndarray, shape ``(n_ref, n_freqs)``, complex
+
+    Raises
+    ------
+    WienerSolveError
+        If a frequency-bin system is singular or produces non-finite values.
     """
     n_ch = S.shape[0]
     n_freqs = S.shape[2]
@@ -98,15 +107,25 @@ def compute_wiener_filter(
 
     for f in range(n_freqs):
         S_ref = S[np.ix_(ref_indices, ref_indices)][:, :, f]
-        s_cross = S[target_idx, ref_indices, f]
+        # scipy.signal.csd(x, y) returns conj(X) * Y.  Since the filter is
+        # applied as sum(h * X_ref), the normal-equation right-hand side is
+        # E[conj(X_ref) * X_target], i.e. S[ref, target].
+        s_cross = S[ref_indices, target_idx, f]
         # Diagonal loading: eps = reg_factor × mean(diag(S_ref)), floored at
         # 1e-30 to avoid zero-regularisation on silent channels.
         eps = reg_factor * max(float(np.real(np.diag(S_ref)).mean()), 1e-30)
         S_ref_reg = S_ref + eps * np.eye(n_ref, dtype=complex)
         try:
-            h[:, f] = np.linalg.solve(S_ref_reg, s_cross)
-        except np.linalg.LinAlgError:
-            pass
+            solution = np.linalg.solve(S_ref_reg, s_cross)
+        except np.linalg.LinAlgError as exc:
+            raise WienerSolveError(
+                f"Wiener solve failed at frequency bin {f}"
+            ) from exc
+        if not np.all(np.isfinite(solution)):
+            raise WienerSolveError(
+                f"Wiener solve produced non-finite values at frequency bin {f}"
+            )
+        h[:, f] = solution
     return h
 
 
@@ -273,13 +292,21 @@ def decompose_epoch_with_fusion(
                 _candidate_phase_pass.append(0.0)
                 continue
 
-            h, candidate_coherent, diagnostics = candidate_fn(
-                group_data,
-                S,
-                local_idx,
-                freq_mask,
-                n_times,
-            )
+            try:
+                h, candidate_coherent, diagnostics = candidate_fn(
+                    group_data,
+                    S,
+                    local_idx,
+                    freq_mask,
+                    n_times,
+                )
+            except WienerSolveError:
+                _candidate_keys.append(f"{pair_key}::{ch}")
+                _candidate_status.append(CANDIDATE_SOLVE_FAILED)
+                _candidate_coherence.append(score)
+                _candidate_max_abs_h.append(0.0)
+                _candidate_phase_pass.append(0.0)
+                continue
             max_abs_h = float(np.max(np.abs(h))) if h.size else 0.0
             pass_frac = float(diagnostics.get("pass_fraction", 1.0))
 

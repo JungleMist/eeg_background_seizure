@@ -28,6 +28,7 @@ from eeg_bg.decomposition.phase_gate import (
 )
 from eeg_bg.decomposition.wiener import (
     WienerResult,
+    WienerSolveError,
     apply_wiener_filter,
     decompose_epoch_with_fusion,
 )
@@ -59,13 +60,21 @@ def compute_zerophase_filter(
 
     for f in range(n_freqs):
         S_ref = np.real(S[np.ix_(ref_indices, ref_indices)][:, :, f])
-        s_cross = np.real(S[target_idx, ref_indices, f])
+        s_cross = np.real(S[ref_indices, target_idx, f])
         eps = reg_factor * max(float(np.diag(S_ref).mean()), 1e-30)
         S_ref_reg = S_ref + eps * np.eye(n_ref, dtype=np.float64)
         try:
-            h[:, f] = np.linalg.solve(S_ref_reg, s_cross)
-        except np.linalg.LinAlgError:
-            pass
+            solution = np.linalg.solve(S_ref_reg, s_cross)
+        except np.linalg.LinAlgError as exc:
+            raise WienerSolveError(
+                f"Zero-phase Wiener solve failed at frequency bin {f}"
+            ) from exc
+        if not np.all(np.isfinite(solution)):
+            raise WienerSolveError(
+                "Zero-phase Wiener solve produced non-finite values "
+                f"at frequency bin {f}"
+            )
+        h[:, f] = solution
 
     weights = phase_gate_weights(S, target_idx, phase_gate_threshold_rad)
     return h * weights

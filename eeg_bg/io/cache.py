@@ -26,6 +26,30 @@ def make_cache_key(edf_path: Path, start_sec: float, cfg: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
+def make_wiener_cache_fingerprint(cfg: dict, mode: str) -> str:
+    """Hash the effective configuration that changes Wiener decomposition."""
+    wiener = cfg["wiener"]
+    fingerprint = {
+        "mode": mode,
+        "target_sfreq": cfg["preprocessing"]["target_sfreq"],
+        "channel_groups": cfg["channels"]["channel_groups"],
+        "nperseg": wiener["nperseg"],
+        "coherence_threshold": wiener["coherence_threshold"],
+        "filter_magnitude_threshold": wiener.get(
+            "filter_magnitude_threshold", 50.0
+        ),
+        "overlap_policy": wiener.get(
+            "overlap_policy", "coherence_weighted"
+        ),
+        "phase_gate_threshold_rad": wiener.get(
+            "phase_gate_threshold_rad", 0.392
+        ),
+        "freq_band": wiener["freq_band"],
+    }
+    raw = json.dumps(fingerprint, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 CACHE_METADATA_KEYS = (
     "dataset_name", "patient_id", "recording_id", "evaluation_id",
     "subject_id", "class_name", "label", "split", "source_partition",
