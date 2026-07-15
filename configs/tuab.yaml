@@ -1,10 +1,10 @@
 extends: default.yaml
 
 # TUAB v3.0.1 recording-level normal/abnormal classification.
-# Keep these paths separate from TUEP so caches and results cannot mix.
+# Match default.yaml's large-disk paths; keep result output separate.
 paths:
-  data_root: "/Users/jsu/Data/EEGdata/TUAB/v3.0.1"
-  cache_dir: "cache_tuab"
+  data_root: "/root/autodl-tmp/EEGdata/TUAB/v3.0.1"
+  cache_dir: "/root/autodl-tmp/cache"
   results_dir: "results_tuab"
 
 dataset:
