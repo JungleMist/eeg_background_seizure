@@ -1,0 +1,35 @@
+{
+  "train": {
+    "n_epochs": 129104,
+    "n_evaluations": 2428,
+    "n_patients": 1863,
+    "n_subjects": 2428,
+    "n_epochs_abnormal": 62378,
+    "n_evaluations_abnormal": 1194,
+    "n_epochs_normal": 66726,
+    "n_evaluations_normal": 1234
+  },
+  "val": {
+    "n_epochs": 14135,
+    "n_evaluations": 270,
+    "n_patients": 207,
+    "n_subjects": 270,
+    "n_epochs_abnormal": 6836,
+    "n_evaluations_abnormal": 133,
+    "n_epochs_normal": 7299,
+    "n_evaluations_normal": 137
+  },
+  "test": {
+    "n_epochs": 14833,
+    "n_evaluations": 275,
+    "n_patients": 252,
+    "n_subjects": 275,
+    "n_epochs_abnormal": 6677,
+    "n_evaluations_abnormal": 126,
+    "n_epochs_normal": 8156,
+    "n_evaluations_normal": 149
+  },
+  "feature_set": "base211_conn80",
+  "dataset_name": "tuab",
+  "aggregation_unit": "recording"
+}

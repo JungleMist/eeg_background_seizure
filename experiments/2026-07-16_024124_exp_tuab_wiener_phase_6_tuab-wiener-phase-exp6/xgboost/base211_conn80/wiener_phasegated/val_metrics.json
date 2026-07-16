@@ -1,0 +1,8 @@
+{
+  "auroc": 0.9262938367817354,
+  "f1": 0.8589807026224641,
+  "accuracy": 0.8592592592592593,
+  "threshold": 0.5499999999999999,
+  "positive_class": "normal",
+  "aggregation_unit": "recording"
+}

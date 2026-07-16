@@ -1,0 +1,187 @@
+paths:
+  data_root: /root/autodl-tmp/EEGdata/TUAB/v3.0.1
+  cache_dir: /root/autodl-tmp/cache
+  results_dir: /root/eeg_background_seizure/results_tuab/exp_wiener_phase/exp4
+dataset:
+  active: tuab
+  tuep:
+    reference_scheme: ar
+    montage_dir: 01_tcp_ar
+    classes:
+      epilepsy:
+        folder: 00_epilepsy
+        label: 0
+      control:
+        folder: 01_no_epilepsy
+        label: 1
+  tuab:
+    edf_dir: edf
+    reference_scheme: ar
+    montage_dir: 01_tcp_ar
+    train_partition: train
+    eval_partition: eval
+    validation_fraction: 0.1
+    max_recording_sec: 1200.0
+    classes:
+      abnormal:
+        folder: abnormal
+        label: 0
+      normal:
+        folder: normal
+        label: 1
+split:
+  train: 0.7
+  val: 0.1
+  test: 0.2
+  random_seed: 42
+preprocessing:
+  target_sfreq: 125
+  bandpass:
+  - 0.5
+  - 40.0
+  epoch_length_sec: 20.0
+  artifact_threshold_uv: 200.0
+  seizure_buffer_sec: 30.0
+channels:
+  standard_19:
+  - FP1
+  - FP2
+  - F3
+  - F4
+  - F7
+  - F8
+  - C3
+  - C4
+  - T3
+  - T4
+  - T5
+  - T6
+  - P3
+  - P4
+  - O1
+  - O2
+  - Fz
+  - Cz
+  - Pz
+  channel_groups:
+  - - FP1
+    - FP2
+  - - F7
+    - T3
+  - - T3
+    - T5
+    - O1
+  - - O1
+    - O2
+  - - F8
+    - T4
+  - - T4
+    - T6
+    - O2
+  passthrough:
+  - F3
+  - F4
+  - C3
+  - C4
+  - P3
+  - P4
+  - Fz
+  - Cz
+  - Pz
+wiener:
+  mode: phasegated
+  nperseg: 500
+  freq_resolution_hz: 0.5
+  coherence_threshold: 0.15
+  overlap_policy: coherence_weighted
+  filter_magnitude_threshold: 50.0
+  phase_gate_threshold_rad: 1.5707963267948966
+  freq_band:
+  - 0.5
+  - 40.0
+ica:
+  n_components: 19
+  method: fastica
+  artifact_corr_threshold: 0.8
+  random_state: 42
+  max_iter: 1000
+verification:
+  v2_transitivity_amp_threshold: 0.1
+  v2_transitivity_phase_threshold: 0.392
+  v3_freq_variation_threshold: 0.2
+visualization:
+  psd_target_channels:
+  - FP1
+  - FP2
+  n_subjects: 4
+  epoch_idx: 1
+  export_edf: false
+  export_edf_max_epochs: 3
+ml:
+  xgboost:
+    param_grid:
+      max_depth:
+      - 3
+      - 4
+      - 5
+      - 6
+      learning_rate:
+      - 0.01
+      - 0.05
+      - 0.1
+      - 0.3
+      n_estimators:
+      - 100
+      - 200
+      - 500
+      subsample:
+      - 0.8
+      - 1.0
+      colsample_bytree:
+      - 0.8
+      - 1.0
+      reg_alpha:
+      - 0.0
+      - 0.1
+      reg_lambda:
+      - 1.0
+      - 5.0
+    fixed:
+      objective: binary:logistic
+      eval_metric: auc
+      random_state: 42
+      n_jobs: -1
+      device: cuda
+    early_stopping_rounds: 30
+    cv_folds: 5
+  shap:
+    max_display: 20
+    dpi: 150
+    pruning_threshold: 0.0001
+  features:
+    wavelet:
+      wavelet: db4
+      level: 6
+    connectivity:
+      nperseg: 250
+    complexity:
+      m: 2
+      r_factor: 0.2
+    temporal:
+      scales:
+      - 125
+      - 375
+      - 750
+  cnn:
+    F1: 8
+    D: 2
+    dropout: 0.25
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 64
+    max_epochs: 200
+    patience: 20
+    lr_patience: 10
+    lr_factor: 0.5
+    device: cuda
+    num_workers: 0
