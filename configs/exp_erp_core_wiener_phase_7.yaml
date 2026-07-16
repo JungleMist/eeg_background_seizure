@@ -1,0 +1,9 @@
+extends: exp_erp_core_wiener_phase_base.yaml
+
+paths:
+  results_dir: results/erp_core_flankers/phase_grid/exp7
+
+wiener:
+  mode: phasegated
+  coherence_threshold: 0.45
+  phase_gate_threshold_rad: 0.3141592653589793

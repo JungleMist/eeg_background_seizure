@@ -1,0 +1,6 @@
+extends: erp_core_flankers.yaml
+
+# Shared invariant configuration for the ERP-CORE eight-cell
+# phase-gate/coherence-threshold experiment.
+paths:
+  results_dir: results/erp_core_flankers/phase_grid/base

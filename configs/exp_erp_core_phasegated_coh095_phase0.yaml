@@ -1,0 +1,9 @@
+extends: erp_core_flankers.yaml
+
+paths:
+  results_dir: results/erp_core_flankers/phasegated_coh095_phase0
+
+wiener:
+  mode: phasegated
+  coherence_threshold: 0.95
+  phase_gate_threshold_rad: 0.0

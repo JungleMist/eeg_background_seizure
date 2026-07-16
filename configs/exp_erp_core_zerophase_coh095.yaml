@@ -1,0 +1,10 @@
+extends: erp_core_flankers.yaml
+
+paths:
+  results_dir: results/erp_core_flankers/zerophase_coh095
+
+wiener:
+  mode: zerophase
+  coherence_threshold: 0.95
+  # User did not override phase gating; retain the repository default (~22.5°).
+  phase_gate_threshold_rad: 0.392
