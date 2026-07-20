@@ -10,7 +10,9 @@ __pycache__/
 .zcode/
 /.vscode
 .DS_Store
+.Rhistory
 configs/local*.yaml
 environment_macos.yaml
 
 /paper
+/tmp/
