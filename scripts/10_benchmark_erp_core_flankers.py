@@ -46,6 +46,7 @@ from eeg_bg.decomposition.wiener_phasegated import (
 from eeg_bg.decomposition.wiener_zerophase import (
     decompose_epoch as decompose_epoch_zerophase,
 )
+from eeg_bg.preprocessing.continuous import wiener_continuous_raw
 
 
 METHODS = ("raw", "standard", "wiener")
@@ -373,60 +374,12 @@ def _merge_group_processing_rates(
 
 def _wiener_continuous(raw, cfg: dict, subject_id: str = "erp_core"):
     """Apply 20 s Wiener windows with 50% weighted overlap-add."""
-    data = raw.get_data()
-    sfreq = float(raw.info["sfreq"])
-    local_cfg = json.loads(json.dumps(cfg))
-    local_cfg["preprocessing"]["target_sfreq"] = sfreq
-    mode = str(local_cfg["wiener"].get("mode", "frequency"))
-    decomposer = _select_wiener_decomposer(mode)
-    n_times = max(2, int(round(cfg["preprocessing"]["epoch_length_sec"] * sfreq)))
-    if data.shape[1] < n_times:
+    required = int(round(
+        float(cfg["preprocessing"]["epoch_length_sec"]) * float(raw.info["sfreq"])
+    ))
+    if raw.n_times < required:
         raise ValueError("Recording is shorter than one Wiener analysis window")
-    hop = n_times // 2
-    pad = hop
-    padded = np.pad(data, ((0, 0), (pad, pad)), mode="reflect")
-    starts = list(range(0, padded.shape[1] - n_times + 1, hop))
-    last = padded.shape[1] - n_times
-    if starts[-1] != last:
-        starts.append(last)
-    window = np.hanning(n_times + 2)[1:-1]
-    numerator = np.zeros_like(padded)
-    denominator = np.zeros(padded.shape[1], dtype=float)
-    processed = 0
-    group_keys = [_group_key(group) for group in cfg["channels"]["channel_groups"]]
-    group_active_windows = {key: 0 for key in group_keys}
-    for epoch_idx, start in enumerate(starts):
-        chunk = padded[:, start : start + n_times]
-        result = decomposer(
-            chunk, raw.ch_names, local_cfg, subject_id=subject_id, epoch_idx=epoch_idx
-        )
-        numerator[:, start : start + n_times] += result.specific * window
-        denominator[start : start + n_times] += window
-        processed += int(np.count_nonzero(result.channel_sources))
-        for key in _active_groups_from_result(result, group_keys):
-            group_active_windows[key] = group_active_windows.get(key, 0) + 1
-    output = numerator / np.maximum(denominator, np.finfo(float).eps)
-    denoised = raw.copy()
-    denoised._data = output[:, pad : pad + data.shape[1]]
-    total_windows = len(starts)
-    group_processing_rates = {
-        key: {
-            "active_windows": group_active_windows.get(key, 0),
-            "total_windows": total_windows,
-            "rate": (
-                float(group_active_windows.get(key, 0)) / float(total_windows)
-                if total_windows
-                else 0.0
-            ),
-        }
-        for key in group_keys
-    }
-    return denoised, {
-        "mode": mode,
-        "windows": total_windows,
-        "processed_channel_windows": processed,
-        "group_processing_rates": group_processing_rates,
-    }
+    return wiener_continuous_raw(raw, cfg, subject_id)
 
 
 def _make_shared_epochs(raws: dict, table: pd.DataFrame, spec: dict, reject_uv: float):

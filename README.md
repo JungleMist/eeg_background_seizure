@@ -20,6 +20,34 @@ A research framework for studying **physical point-source Wiener decomposition**
 
 ---
 
+## eeg_bg Studio
+
+The repository includes a Chinese PySide6 desktop application for interactive
+EEG preprocessing. It supports EDF/FIF input, EDF/FIF output, synchronized raw
+and processed waveform inspection, fixed-window or continuous extraction,
+standard ICA, and the frequency/phasegated/zerophase Wiener modes.
+
+```bash
+conda run -n eeg_pipeline pip install -r requirements-gui.txt
+conda run -n eeg_pipeline python -m eeg_bg.gui
+```
+
+The GUI and batch workflow call the same services in `eeg_bg/application/`.
+Batch output mirrors the input directory tree and writes CSV/JSON manifests
+containing the effective processing parameters and per-file status.
+
+Windows x64 packaging uses PyInstaller in one-directory mode. Run the following
+from PowerShell on Windows; PyInstaller must run on the target operating system.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
+```
+
+The build produces `dist\eeg_bg_studio-windows-x64.zip`; users extract it and
+launch `eeg_bg_studio.exe` without installing Python.
+
+---
+
 ## Dataset Support
 
 | Dataset | Labels | Evaluation unit | Split policy | Supported path |

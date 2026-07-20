@@ -16,3 +16,7 @@ environment_macos.yaml
 
 /paper
 /tmp/
+/build/
+/dist/
+/.venv-eeg-bg-studio/
+/packaging/windows/eeg_bg_studio.ico
