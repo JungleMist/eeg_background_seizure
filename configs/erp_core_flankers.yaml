@@ -12,19 +12,23 @@ preprocessing:
   epoch_length_sec: 20.0
   artifact_threshold_uv: 250.0
 
-# ERP-CORE ERN-focused Wiener group.  All remaining EEG channels pass through
-# unchanged so the only decomposed targets are FCz/Cz/Fz/FC3/FC4.
+# ERP-CORE Wiener groups covering midline, sensorimotor, and posterior channels.
+# Only EEG channels absent from every group pass through unchanged.
 channels:
   channel_groups:
     - [FCz, Cz, Fz, FC3, FC4]
-  passthrough: [FP1, F3, F7, C3, C5, P3, P7, P9, PO7, PO3, O1, Oz,
-                Pz, CPz, FP2, F4, F8, C4, C6, P4, P8, P10, PO8, PO4, O2]
+    - [FC3, C3, C5, P3]
+    - [FC4, C4, C6, P4]
+    - [P7, P8, P9, P10, PO3, PO4, PO7, PO8, O1, O2, Oz]
+    - [Pz, CPz, FCz, Cz]
+  passthrough: [FP1, F3, F7, FP2, F4, F8]
 
 wiener:
   freq_band: [0.5, 30.0]
 
 erp_core:
-  line_freq: 50.0
+  data_dir: ~/Data/ERP_CORE
+  line_freq: 60.0
   ern:
     tmin: -0.6
     tmax: 0.4

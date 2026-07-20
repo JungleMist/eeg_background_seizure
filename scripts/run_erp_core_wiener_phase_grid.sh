@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Run the fixed eight-cell Wiener phase/coherence grid on MNE ERP-CORE Flankers.
+# Run the fixed eight-cell Wiener phase/coherence grid on ERP-CORE ERN.
 
 set -euo pipefail
 
 CONDA_RUN="${CONDA_RUN:-conda run -n eeg_pipeline}"
 FIF_PATH=""
+DATA_DIR=""
 
 usage() {
     cat <<EOF
-Usage: bash scripts/run_erp_core_wiener_phase_grid.sh [--fif PATH]
+Usage: bash scripts/run_erp_core_wiener_phase_grid.sh [--data-dir PATH] [--fif PATH]
 
-If --fif is omitted, script 10 locates/downloads the MNE ERP-CORE Flankers FIF.
+By default script 10 reads the local ERP-CORE directory from its config.
+Use --data-dir to override it, or --fif for the legacy one-subject MNE input.
 Each cell writes results/erp_core_flankers/phase_grid/exp{1..8}/ern_fcz_difference.png.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
         --fif) FIF_PATH="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -47,6 +50,8 @@ for idx in {1..8}; do
     )
     if [[ -n "$FIF_PATH" ]]; then
         command+=(--fif "$FIF_PATH")
+    elif [[ -n "$DATA_DIR" ]]; then
+        command+=(--data-dir "$DATA_DIR")
     fi
     "${command[@]}"
 done

@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This file provides guidance to ZCode / Claude Code agents working with this repository.
-Last updated: 2026-07-15.
+Last updated: 2026-07-16.
 
 ## Project identity and research scope
 
@@ -74,10 +74,10 @@ conda run -n eeg_pipeline python scripts/08_train_cnn.py [--condition raw|ica|wi
 conda run -n eeg_pipeline python scripts/09_analyze_wiener_phase_grid.py [--results-root PATH]
 
 # 10 — ERP-CORE Flankers Raw vs standard ICA vs Wiener benchmark
-conda run -n eeg_pipeline python scripts/10_benchmark_erp_core_flankers.py [--fif PATH] [--config configs/erp_core_flankers.yaml] [--force]
+conda run -n eeg_pipeline python scripts/10_benchmark_erp_core_flankers.py [--data-dir PATH] [--fif PATH] [--config configs/erp_core_flankers.yaml] [--force]
 
 # ERP-CORE counterpart of the fixed 8-cell Wiener phase/coherence experiment
-bash scripts/run_erp_core_wiener_phase_grid.sh [--fif PATH]
+bash scripts/run_erp_core_wiener_phase_grid.sh [--data-dir PATH] [--fif PATH]
 ```
 
 Scripts 01–07 support TUEP and TUAB. Use `configs/default.yaml` for TUEP and `configs/tuab.yaml` for TUAB. Script 08 is explicitly **TUEP-only** and fails fast when `dataset.active: tuab`; it has no dependency on script 06 for supported TUEP runs.
@@ -86,14 +86,14 @@ The TUAB counterpart of the fixed 8-cell Wiener phase/coherence experiment is `b
 
 ### ERP-CORE direct denoising benchmark (script 10)
 
-`scripts/10_benchmark_erp_core_flankers.py` is a standalone ERP evaluation path; it does not consume the TUEP/TUAB epoch caches. It reads an ERP-CORE Flankers FIF supplied by `--fif`, or locates/downloads MNE's bundled one-subject FIF when the argument is omitted.
+`scripts/10_benchmark_erp_core_flankers.py` is a standalone ERP evaluation path; it does not consume the TUEP/TUAB epoch caches. By default it discovers every `sub-*/eeg/*_task-ERN_eeg.set` recording below `erp_core.data_dir` (`~/Data/ERP_CORE`). `--data-dir` overrides that root, while `--fif` retains the legacy MNE one-subject input.
 
-- Shared preprocessing: EEG selection, standard montage, optional 50 Hz notch, 0.1–30 Hz bandpass, resampling to 125 Hz, response-event pairing, epoch rejection, epoch windows, and baseline correction are identical for all three branches.
+- Shared preprocessing: EEG selection, standard montage, optional 60 Hz notch, 0.1–30 Hz bandpass, resampling to 125 Hz, response-event pairing, epoch rejection, epoch windows, and baseline correction are identical for all three branches.
 - Compared branches: `raw` (no denoising), `standard` (MNE FastICA with FP1/FP2 EOG proxies), and `wiener` (the repository Wiener implementation).
 - Wiener is applied to continuous data as 20 s windows with 50% weighted overlap-add. The ERP configuration targets `[FCz, Cz, Fz, FC3, FC4]`; all other listed ERP-CORE EEG channels pass through unchanged.
-- Primary signal measures in `metrics.csv`: `ern_snr_db`, `ern_waveform_r`, `ern_rmse_vs_standard_uv`, ERN peak amplitude/latency, baseline noise SD, LRP peak amplitude/latency and half-peak onset, FP1/FP2 proxy variance, and target-channel RMS change. Trial-level correctness classification accuracy/F1/AUC is secondary.
+- Primary signal measures in `metrics.csv`: `ern_snr_db`, `ern_waveform_r`, `ern_rmse_vs_standard_uv`, ERN peak amplitude/latency, baseline noise SD, LRP peak amplitude/latency and half-peak onset, FP1/FP2 proxy variance, and target-channel RMS change. Root metrics are equal-weight participant means; `subject_metrics.csv` retains every participant/method row. Trial-level correctness classification accuracy/F1/AUC is secondary.
 - `standard` ICA is a comparison reference, not clean ground truth. Therefore `ern_rmse_vs_standard_uv` and `ern_waveform_r` measure agreement with ICA, not absolute denoising error or proof of physiological correctness.
-- The bundled MNE ERP-CORE FIF contains one participant. It supports pipeline/figure validation and within-recording descriptive comparison, but not subject-level inference; paired statistical testing requires the full multi-participant ERP-CORE release.
+- Each participant is processed independently before aggregation. The local directory may contain only a subset of ERP-CORE, so outputs support paired participant-level analysis of the available sample but must not be described as results from the complete release.
 - `scripts/run_erp_core_wiener_phase_grid.sh` runs the same fixed eight phase/coherence cells as the TUEP/TUAB experiment. Additional `configs/exp_erp_core_*` files cover high-coherence phase-gate sweeps and a zerophase case, but there is currently no ERP grid-summary aggregator analogous to script 09.
 
 ### Cache invalidation tiers
@@ -294,13 +294,13 @@ results/
 │   │   └── val_predictions.csv / test_predictions.csv
 │   └── comparison_summary.csv        — written when all 3 conditions have been trained
 ├── erp_core_flankers/
-│   ├── metrics.csv                   — Raw/standard-ICA/Wiener ERP and noise metrics
+│   ├── metrics.csv                   — participant-equal Raw/standard-ICA/Wiener means
+│   ├── subject_metrics.csv           — one metric row per participant and method
 │   ├── response_trials.csv           — paired Flankers stimulus-response trials
 │   ├── run_summary.json              — input/version/count/fairness/Wiener diagnostics
 │   ├── config_resolved.yaml
-│   ├── ern_fcz_difference.png / ern_topomaps.png
-│   ├── lrp_c3_c4.png / lrp_by_compatibility.png
-│   ├── time_domain_segment.png / time_frequency_segment.png
+│   ├── ern_fcz_difference.png / lrp_c3_c4.png  — participant-equal waveforms
+│   ├── subjects/sub-*/               — per-participant metrics, trials, and six figures
 │   └── phase_grid/exp{1..8}/         — per-cell script 10 outputs
 └── exp_chgroups/                     — output of scripts/run_chgroups_experiment.sh
     ├── runtime_<timestamp>.log
@@ -357,10 +357,10 @@ Changes to the pipeline (new scripts, new config keys, new output directories, o
 ## Non-obvious constraints and gotchas
 
 - **Dataset selection**: `dataset.active` selects `dataset.tuep` or `dataset.tuab`. Inside the active block, `reference_scheme` and `montage_dir` must agree (`"ar"` ↔ `"01_tcp_ar"`, `"le"` ↔ `"02_tcp_le"`). TUAB reads only the first `max_recording_sec` (1200 s by default), requires all 19 standard channels, and must use cache/results paths separate from TUEP.
-- **ERP-CORE is not selected through `dataset.active`**: script 10 is a standalone FIF-based path that inherits shared numerical Wiener defaults from `default.yaml` through `configs/erp_core_flankers.yaml`. Do not send ERP-CORE through scripts 01–08 or the TUEP/TUAB cache layout.
+- **ERP-CORE is not selected through `dataset.active`**: script 10 is a standalone EEGLAB/FIF path that inherits shared numerical Wiener defaults from `default.yaml` through `configs/erp_core_flankers.yaml`. Do not send ERP-CORE through scripts 01–08 or the TUEP/TUAB cache layout.
 - **ERP comparisons must remain branch-fair**: filtering, resampling, response events, rejection decisions, epoch windows, and baselines must be shared across Raw/standard-ICA/Wiener. Only the denoising operation may differ. Preserve `_make_shared_epochs()` selection semantics when modifying script 10.
 - **ERP metrics do not currently have clean ground truth**: standard ICA is only a baseline/reference. Treat SNR, baseline noise, waveform correlation, ICA-relative RMSE, ERN/LRP morphology, and downstream correctness classification as complementary evidence; no single value establishes denoising quality by itself.
-- **ERP statistics are currently limited by the bundled dataset**: MNE's bundled ERP-CORE Flankers file has one participant. Do not claim population-level significance from its outputs; full ERP-CORE multi-subject ingestion and paired subject-level statistics remain future work.
+- **ERP statistics reflect the available local subset**: script 10 processes each discovered participant independently and writes participant-level metrics, but `~/Data/ERP_CORE` may not contain the complete ERP-CORE release. Do not claim complete-dataset results from a partial local download.
 - **`bandpass_filter()` in `epoch.py` is not used in the pipeline**: `load_edf` in `edf_reader.py` applies MNE's `raw.filter()` on the continuous signal before resampling. The standalone `bandpass_filter()` function in `epoch.py` (5th-order `sosfiltfilt`) is available for ad-hoc use but is never called by any script.
 - **XGBoost `n_estimators` in `param_grid` is ignored during Phase 1**: `xgb_pipeline.py` overrides it to 500 for the grid search and uses early stopping in Phase 2 to find the final tree count. The entry in `configs/default.yaml` is documentation only.
 - **`device="cuda"` automatically sets `n_jobs=1`**: `xgb_pipeline.py` detects the CUDA device setting and overrides GridSearchCV's `n_jobs` to avoid CUDA context conflicts across parallel workers. No manual change needed.

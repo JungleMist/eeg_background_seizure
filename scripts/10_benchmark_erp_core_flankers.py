@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Benchmark Raw, standard ICA, and Wiener preprocessing on ERP-CORE Flankers.
 
-The script supports both the semantic annotations in MNE's modified one-subject
-FIF and the numeric response codes used by the full ERP-CORE Flankers release.
+By default the script discovers BIDS-style ``*_task-ERN_eeg.set`` and
+``*_task-LRP_eeg.set`` recordings below ``~/Data/ERP_CORE``.  Each participant
+is evaluated and visualized only for the task files present in its EEG folder.
+The script also supports MNE's modified one-subject FIF via
+``--fif`` for backwards compatibility.  The semantic annotations in that FIF,
+the bare numeric annotations in EEGLAB files, and prefixed numeric annotations
+are all supported.
 All three branches share filtering, resampling, response events, rejection
 decisions, epoch windows, and baseline correction.  Their only branch-specific
 operation is no denoising, ICA, or the repository Wiener decomposition.
@@ -29,7 +34,12 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from eeg_bg.config.settings import load_config
-from eeg_bg.decomposition.wiener import decompose_epoch as decompose_epoch_frequency
+from eeg_bg.decomposition.wiener import (
+    CANDIDATE_BELOW_COHERENCE,
+    CANDIDATE_PROCESSED,
+    CANDIDATE_SOLVE_FAILED,
+    decompose_epoch as decompose_epoch_frequency,
+)
 from eeg_bg.decomposition.wiener_phasegated import (
     decompose_epoch as decompose_epoch_phasegated,
 )
@@ -65,7 +75,24 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fif",
         type=Path,
-        help="Flankers FIF path. If omitted, download/locate it via MNE.",
+        help="Optional single Flankers FIF path (legacy one-subject input).",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        help="ERP-CORE root containing sub-*/eeg/*_task-{ERN,LRP}_eeg.set files.",
+    )
+    parser.add_argument(
+        "--subject",
+        action="append",
+        dest="subjects",
+        help="Only process this subject ID (for example sub-002); repeat as needed.",
+    )
+    parser.add_argument(
+        "--task",
+        choices=("ern", "lrp", "both"),
+        default="both",
+        help="Only process the selected ERP task (default: both).",
     )
     parser.add_argument(
         "--config", default="configs/erp_core_flankers.yaml", help="YAML config path"
@@ -75,23 +102,92 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_fif(mne, path: Path | None) -> Path:
-    if path is not None:
-        resolved = path.expanduser().resolve()
+def _resolve_recordings(
+    data_dir: Path, fif_path: Path | None
+) -> list[dict[str, Path | str]]:
+    if fif_path is not None:
+        resolved = fif_path.expanduser().resolve()
         if not resolved.is_file():
             raise FileNotFoundError(f"ERP-CORE FIF not found: {resolved}")
-        return resolved
-    data_dir = Path(mne.datasets.erp_core.data_path())
-    candidate = data_dir / "ERP-CORE_Subject-001_Task-Flankers_eeg.fif"
-    if not candidate.is_file():
-        matches = sorted(data_dir.rglob("*Flankers*.fif"))
-        if not matches:
-            raise FileNotFoundError(f"No Flankers FIF found below {data_dir}")
-        candidate = matches[0]
-    return candidate
+        return [{"subject_id": _subject_id(resolved), "ern": resolved, "lrp": resolved}]
+
+    root = data_dir.expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"ERP-CORE data directory not found: {root}")
+    recordings: dict[str, dict[str, Path | str]] = {}
+    for task in ("ERN", "LRP"):
+        for path in sorted(root.glob(f"sub-*/eeg/*_task-{task}_eeg.set")):
+            subject_id = _subject_id(path)
+            recordings.setdefault(subject_id, {"subject_id": subject_id})[
+                task.lower()
+            ] = path
+    if not recordings:
+        raise FileNotFoundError(
+            f"No ERP-CORE ERN/LRP EEGLAB recordings found below {root}; expected "
+            "sub-*/eeg/*_task-{ERN,LRP}_eeg.set"
+        )
+    return [recordings[subject_id] for subject_id in sorted(recordings)]
+
+
+def _select_recordings(
+    recordings: list[dict[str, Path | str]],
+    subjects: list[str] | None,
+    task: str,
+) -> list[dict[str, Path | str]]:
+    selected_tasks = ("ern", "lrp") if task == "both" else (task,)
+    requested_subjects = set(subjects or [])
+    available_subjects = {str(recording["subject_id"]) for recording in recordings}
+    missing_subjects = sorted(requested_subjects - available_subjects)
+    if missing_subjects:
+        raise ValueError(
+            f"Requested ERP-CORE subjects not found: {missing_subjects}; "
+            f"available subjects: {sorted(available_subjects)}"
+        )
+    selected = []
+    for recording in recordings:
+        subject_id = str(recording["subject_id"])
+        if requested_subjects and subject_id not in requested_subjects:
+            continue
+        filtered = {"subject_id": subject_id}
+        filtered.update(
+            {selected_task: recording[selected_task] for selected_task in selected_tasks if selected_task in recording}
+        )
+        if len(filtered) > 1:
+            selected.append(filtered)
+    if not selected:
+        subject_label = sorted(requested_subjects) if requested_subjects else "all subjects"
+        raise ValueError(f"No {task.upper()} recordings found for {subject_label}")
+    return selected
+
+
+def _subject_id(path: Path) -> str:
+    for parent in path.parents:
+        if parent.name.startswith("sub-"):
+            return parent.name
+    if "Subject-" in path.stem:
+        return "sub-" + path.stem.split("Subject-", 1)[1].split("_", 1)[0]
+    return path.stem
+
+
+def _read_recording(mne, path: Path):
+    if path.suffix.lower() == ".set":
+        raw = mne.io.read_raw_eeglab(path, preload=True, verbose=False)
+        eog_types = {
+            channel: "eog"
+            for channel in raw.ch_names
+            if "EOG" in channel.upper()
+        }
+        if eog_types:
+            raw.set_channel_types(eog_types, verbose=False)
+        return raw
+    if path.suffix.lower() == ".fif":
+        return mne.io.read_raw_fif(path, preload=True, verbose=False)
+    raise ValueError(f"Unsupported ERP-CORE recording format: {path}")
 
 
 def _stimulus_details(description: str) -> tuple[str, str] | None:
+    if description in {"11", "12", "21", "22"}:
+        description = f"stimulus/{description}"
     if description in _NUMERIC_STIMULUS:
         return _NUMERIC_STIMULUS[description]
     if not description.startswith("stimulus/"):
@@ -105,6 +201,8 @@ def _stimulus_details(description: str) -> tuple[str, str] | None:
 
 
 def _response_details(description: str) -> tuple[str, bool | None] | None:
+    if description in {"111", "112", "121", "122", "211", "212", "221", "222"}:
+        description = f"response/{description}"
     if description in _NUMERIC_RESPONSE:
         return _NUMERIC_RESPONSE[description]
     if description == "response/left":
@@ -214,7 +312,66 @@ def _select_wiener_decomposer(mode: str):
     )
 
 
-def _wiener_continuous(raw, cfg: dict):
+def _group_key(group: list[str]) -> str:
+    """Stable group identifier matching wiener.py's ``pair_key`` construction."""
+    return "-".join(group)
+
+
+def _active_groups_from_result(result, group_keys: list[str]) -> set[str]:
+    """Return the set of group keys with at least one accepted candidate.
+
+    A group is considered active in a window when any of its per-target
+    candidates has status ``CANDIDATE_PROCESSED``.  Candidate keys are
+    formatted ``"{pair_key}::{channel}"`` (see ``wiener.py``); the channel
+    suffix is redundant here because the pair key already identifies the group.
+    """
+    active: set[str] = set()
+    keys = result.candidate_keys
+    status = result.candidate_status
+    if keys is not None and status is not None:
+        for key, code in zip(keys, status):
+            if int(code) != CANDIDATE_PROCESSED:
+                continue
+            pair_key = key.split("::", 1)[0]
+            active.add(pair_key)
+        return active
+    # Fallback: derive group membership from channel_sources, which lists the
+    # pair_key of each accepted candidate as the sources of a target channel.
+    for sources in result.channel_sources.values():
+        active.update(sources)
+    return active
+
+
+def _merge_group_processing_rates(
+    rates_list: list[dict[str, dict]],
+) -> dict[str, dict[str, int | float]]:
+    """Sum ``active_windows``/``total_windows`` across multiple Wiener runs.
+
+    Each input entry is the ``group_processing_rates`` dict produced by
+    ``_wiener_continuous`` for one continuous recording (typically one ERP
+    task).  Returns the per-group totals and the active-window fraction.
+    """
+    totals: dict[str, dict[str, int]] = {}
+    for rates in rates_list:
+        for group, stats in rates.items():
+            entry = totals.setdefault(
+                group, {"active_windows": 0, "total_windows": 0}
+            )
+            entry["active_windows"] += int(stats["active_windows"])
+            entry["total_windows"] += int(stats["total_windows"])
+    merged: dict[str, dict[str, int | float]] = {}
+    for group, stats in totals.items():
+        total = stats["total_windows"]
+        active = stats["active_windows"]
+        merged[group] = {
+            "active_windows": active,
+            "total_windows": total,
+            "rate": float(active) / float(total) if total else 0.0,
+        }
+    return merged
+
+
+def _wiener_continuous(raw, cfg: dict, subject_id: str = "erp_core"):
     """Apply 20 s Wiener windows with 50% weighted overlap-add."""
     data = raw.get_data()
     sfreq = float(raw.info["sfreq"])
@@ -236,21 +393,39 @@ def _wiener_continuous(raw, cfg: dict):
     numerator = np.zeros_like(padded)
     denominator = np.zeros(padded.shape[1], dtype=float)
     processed = 0
+    group_keys = [_group_key(group) for group in cfg["channels"]["channel_groups"]]
+    group_active_windows = {key: 0 for key in group_keys}
     for epoch_idx, start in enumerate(starts):
         chunk = padded[:, start : start + n_times]
         result = decomposer(
-            chunk, raw.ch_names, local_cfg, subject_id="erp_core", epoch_idx=epoch_idx
+            chunk, raw.ch_names, local_cfg, subject_id=subject_id, epoch_idx=epoch_idx
         )
         numerator[:, start : start + n_times] += result.specific * window
         denominator[start : start + n_times] += window
         processed += int(np.count_nonzero(result.channel_sources))
+        for key in _active_groups_from_result(result, group_keys):
+            group_active_windows[key] = group_active_windows.get(key, 0) + 1
     output = numerator / np.maximum(denominator, np.finfo(float).eps)
     denoised = raw.copy()
     denoised._data = output[:, pad : pad + data.shape[1]]
+    total_windows = len(starts)
+    group_processing_rates = {
+        key: {
+            "active_windows": group_active_windows.get(key, 0),
+            "total_windows": total_windows,
+            "rate": (
+                float(group_active_windows.get(key, 0)) / float(total_windows)
+                if total_windows
+                else 0.0
+            ),
+        }
+        for key in group_keys
+    }
     return denoised, {
         "mode": mode,
-        "windows": len(starts),
+        "windows": total_windows,
         "processed_channel_windows": processed,
+        "group_processing_rates": group_processing_rates,
     }
 
 
@@ -294,8 +469,29 @@ def _make_shared_epochs(raws: dict, table: pd.DataFrame, spec: dict, reject_uv: 
     }
 
 
-def compute_lrp(epochs, compatibility: str | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Return correct-trial ipsilateral-minus-contralateral C3/C4 LRP."""
+def _task_epoch_issue(task: str, epochs: dict) -> str | None:
+    metadata = epochs["raw"].metadata
+    if task == "ern":
+        if metadata["correct"].nunique() != 2:
+            return "shared rejection left no usable correct/incorrect ERN pair"
+        return None
+    correct = metadata[metadata["correct"].to_numpy(bool)]
+    if set(correct["response_side"]) != {"left", "right"}:
+        return "shared rejection left no usable left/right correct LRP pair"
+    for compatibility in ("compatible", "incompatible"):
+        subset = correct[correct["compatibility"] == compatibility]
+        if set(subset["response_side"]) != {"left", "right"}:
+            return (
+                "shared rejection left no usable left/right correct LRP pair for "
+                f"{compatibility} trials"
+            )
+    return None
+
+
+def compute_lrp(
+    epochs, compatibility: str | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return correct-trial C3/C4 LRP mean and across-trial standard deviation."""
     correct = epochs[epochs.metadata["correct"].to_numpy(bool)]
     if compatibility is not None:
         correct = correct[
@@ -305,17 +501,39 @@ def compute_lrp(epochs, compatibility: str | None = None) -> tuple[np.ndarray, n
     right = correct[correct.metadata["response_side"].to_numpy() == "right"]
     if len(left) == 0 or len(right) == 0:
         raise ValueError("LRP requires correct trials for both left and right responses")
-    left_data = left.get_data(picks=["C3", "C4"], copy=False).mean(axis=0)
-    right_data = right.get_data(picks=["C3", "C4"], copy=False).mean(axis=0)
-    lrp = 0.5 * ((left_data[0] - left_data[1]) + (right_data[1] - right_data[0]))
-    return correct.times.copy(), lrp
+    left_data = left.get_data(picks=["C3", "C4"], copy=False)
+    right_data = right.get_data(picks=["C3", "C4"], copy=False)
+    left_lateralized = left_data[:, 0] - left_data[:, 1]
+    right_lateralized = right_data[:, 1] - right_data[:, 0]
+    lrp = 0.5 * (
+        left_lateralized.mean(axis=0) + right_lateralized.mean(axis=0)
+    )
+    trial_sd = np.std(
+        np.concatenate([left_lateralized, right_lateralized], axis=0), axis=0
+    )
+    return correct.times.copy(), lrp, trial_sd
 
 
-def _ern_waveforms(epochs) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _ern_waveforms(
+    epochs,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     correct_mask = epochs.metadata["correct"].to_numpy(bool)
-    incorrect = epochs[~correct_mask].average(picks=["FCz"])
-    correct = epochs[correct_mask].average(picks=["FCz"])
-    return incorrect.times.copy(), incorrect.data[0], incorrect.data[0] - correct.data[0]
+    incorrect_epochs = epochs[~correct_mask]
+    correct_epochs = epochs[correct_mask]
+    incorrect = incorrect_epochs.get_data(picks=["FCz"], copy=False)[:, 0]
+    correct = correct_epochs.get_data(picks=["FCz"], copy=False)[:, 0]
+    incorrect_mean = incorrect.mean(axis=0)
+    correct_mean = correct.mean(axis=0)
+    difference = incorrect_mean - correct_mean
+    incorrect_sd = np.std(incorrect, axis=0)
+    difference_sd = np.sqrt(np.var(incorrect, axis=0) + np.var(correct, axis=0))
+    return (
+        incorrect_epochs.times.copy(),
+        incorrect_mean,
+        difference,
+        incorrect_sd,
+        difference_sd,
+    )
 
 
 def _window_mask(times: np.ndarray, limits: list[float] | tuple[float, float]) -> np.ndarray:
@@ -375,63 +593,143 @@ def _classification_metrics(epochs, cfg: dict) -> dict[str, float]:
     }
 
 
-def _compute_metrics(raws: dict, ern_epochs: dict, lrp_epochs: dict, cfg: dict):
-    ern = {method: _ern_waveforms(epochs) for method, epochs in ern_epochs.items()}
-    lrp = {method: compute_lrp(epochs) for method, epochs in lrp_epochs.items()}
-    reference = ern["standard"][2]
-    peak_mask = _window_mask(ern["standard"][0], cfg["erp_core"]["ern"]["peak_window"])
+def _compute_metrics(
+    raws: dict,
+    ern_epochs: dict | None,
+    lrp_epochs: dict | None,
+    cfg: dict,
+):
+    ern = (
+        {method: _ern_waveforms(epochs) for method, epochs in ern_epochs.items()}
+        if ern_epochs is not None
+        else None
+    )
+    lrp = (
+        {method: compute_lrp(epochs) for method, epochs in lrp_epochs.items()}
+        if lrp_epochs is not None
+        else None
+    )
+    reference = ern["standard"][2] if ern is not None else None
+    peak_mask = (
+        _window_mask(ern["standard"][0], cfg["erp_core"]["ern"]["peak_window"])
+        if ern is not None
+        else None
+    )
+    target_epochs = ern_epochs if ern_epochs is not None else lrp_epochs
     rows = []
     for method in METHODS:
-        times, incorrect, difference = ern[method]
-        peak_indices = np.flatnonzero(peak_mask)
-        peak_index = int(peak_indices[np.argmin(difference[peak_mask])])
-        baseline_mask = _window_mask(times, cfg["erp_core"]["ern"]["baseline"])
-        baseline_sd = float(np.std(incorrect[baseline_mask]))
-        peak_uv = float(difference[peak_index] * 1e6)
-        snr = 20 * np.log10(max(abs(difference[peak_index]), np.finfo(float).eps) / max(baseline_sd, np.finfo(float).eps))
-        corr = float(np.corrcoef(difference, reference)[0, 1])
-        rmse_uv = float(np.sqrt(np.mean((difference - reference) ** 2)) * 1e6)
-        lrp_times, lrp_wave = lrp[method]
-        lrp_mask = _window_mask(lrp_times, cfg["erp_core"]["lrp"]["measure_window"])
-        lrp_peak_index = int(np.flatnonzero(lrp_mask)[np.argmax(np.abs(lrp_wave[lrp_mask]))])
-        classification = _classification_metrics(ern_epochs[method], cfg)
-        raw_target = ern_epochs["raw"].get_data(picks=["FCz", "C3", "C4"], copy=False)
-        method_target = ern_epochs[method].get_data(picks=["FCz", "C3", "C4"], copy=False)
-        rows.append(
-            {
-                "method": method,
-                "ern_snr_db": float(snr),
-                "ern_waveform_r": corr,
-                "ern_rmse_vs_standard_uv": rmse_uv,
-                "ern_peak_uv": peak_uv,
-                "ern_peak_latency_ms": float(times[peak_index] * 1000),
-                "baseline_noise_sd_uv": baseline_sd * 1e6,
-                "lrp_peak_uv": float(lrp_wave[lrp_peak_index] * 1e6),
-                "lrp_peak_latency_ms": float(lrp_times[lrp_peak_index] * 1000),
-                "lrp_half_peak_onset_ms": _half_peak_onset_ms(
-                    lrp_times, lrp_wave, cfg["erp_core"]["lrp"]["measure_window"]
-                ),
-                "line_50hz_power_v2_hz": _line_power(raws[method], 50.0),
-                "fp1_fp2_proxy_variance_uv2": _eog_proxy_variance_uv2(raws[method]),
-                "target_change_rms_uv": float(np.sqrt(np.mean((method_target - raw_target) ** 2)) * 1e6),
-                "classification_accuracy": classification["accuracy"],
-                "classification_f1": classification["f1"],
-                "classification_auc": classification["auc"],
-            }
+        row = {
+            "method": method,
+            "ern_snr_db": float("nan"),
+            "ern_waveform_r": float("nan"),
+            "ern_rmse_vs_standard_uv": float("nan"),
+            "ern_peak_uv": float("nan"),
+            "ern_peak_latency_ms": float("nan"),
+            "baseline_noise_sd_uv": float("nan"),
+            "lrp_peak_uv": float("nan"),
+            "lrp_peak_latency_ms": float("nan"),
+            "lrp_half_peak_onset_ms": float("nan"),
+            "line_frequency_power_v2_hz": _line_power(
+                raws[method], float(cfg["erp_core"]["line_freq"])
+            ),
+            "fp1_fp2_proxy_variance_uv2": _eog_proxy_variance_uv2(raws[method]),
+            "classification_accuracy": float("nan"),
+            "classification_f1": float("nan"),
+            "classification_auc": float("nan"),
+        }
+        if target_epochs is not None:
+            raw_target = target_epochs["raw"].get_data(
+                picks=["FCz", "C3", "C4"], copy=False
+            )
+            method_target = target_epochs[method].get_data(
+                picks=["FCz", "C3", "C4"], copy=False
+            )
+        else:
+            raw_target = raws["raw"].get_data(picks=["FCz", "C3", "C4"])
+            method_target = raws[method].get_data(picks=["FCz", "C3", "C4"])
+        row["target_change_rms_uv"] = float(
+            np.sqrt(np.mean((method_target - raw_target) ** 2)) * 1e6
         )
+        if ern is not None and ern_epochs is not None:
+            times, incorrect, difference, _, _ = ern[method]
+            peak_indices = np.flatnonzero(peak_mask)
+            peak_index = int(peak_indices[np.argmin(difference[peak_mask])])
+            baseline_mask = _window_mask(times, cfg["erp_core"]["ern"]["baseline"])
+            baseline_sd = float(np.std(incorrect[baseline_mask]))
+            classification = _classification_metrics(ern_epochs[method], cfg)
+            row.update(
+                {
+                    "ern_snr_db": float(
+                        20
+                        * np.log10(
+                            max(abs(difference[peak_index]), np.finfo(float).eps)
+                            / max(baseline_sd, np.finfo(float).eps)
+                        )
+                    ),
+                    "ern_waveform_r": float(np.corrcoef(difference, reference)[0, 1]),
+                    "ern_rmse_vs_standard_uv": float(
+                        np.sqrt(np.mean((difference - reference) ** 2)) * 1e6
+                    ),
+                    "ern_peak_uv": float(difference[peak_index] * 1e6),
+                    "ern_peak_latency_ms": float(times[peak_index] * 1000),
+                    "baseline_noise_sd_uv": baseline_sd * 1e6,
+                    "classification_accuracy": classification["accuracy"],
+                    "classification_f1": classification["f1"],
+                    "classification_auc": classification["auc"],
+                }
+            )
+        if lrp is not None:
+            lrp_times, lrp_wave, _ = lrp[method]
+            lrp_mask = _window_mask(
+                lrp_times, cfg["erp_core"]["lrp"]["measure_window"]
+            )
+            lrp_peak_index = int(
+                np.flatnonzero(lrp_mask)[np.argmax(np.abs(lrp_wave[lrp_mask]))]
+            )
+            row.update(
+                {
+                    "lrp_peak_uv": float(lrp_wave[lrp_peak_index] * 1e6),
+                    "lrp_peak_latency_ms": float(lrp_times[lrp_peak_index] * 1000),
+                    "lrp_half_peak_onset_ms": _half_peak_onset_ms(
+                        lrp_times,
+                        lrp_wave,
+                        cfg["erp_core"]["lrp"]["measure_window"],
+                    ),
+                }
+            )
+        rows.append(row)
     return pd.DataFrame(rows), ern, lrp
 
 
-def _plot_ern(ern: dict, cfg: dict, path: Path) -> None:
+def _plot_ern(
+    ern: dict, cfg: dict, path: Path, show_trial_variance: bool = False
+) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), layout="constrained")
     for method in METHODS:
-        times, _, difference = ern[method]
+        times, incorrect, difference, incorrect_sd, difference_sd = ern[method]
         axes[0].plot(
-            times * 1000, ern[method][1] * 1e6, color=COLORS[method], label=LABELS[method]
+            times * 1000, incorrect * 1e6, color=COLORS[method], label=LABELS[method]
         )
         axes[1].plot(
             times * 1000, difference * 1e6, color=COLORS[method], label=LABELS[method]
         )
+        if show_trial_variance:
+            axes[0].fill_between(
+                times * 1000,
+                (incorrect - incorrect_sd) * 1e6,
+                (incorrect + incorrect_sd) * 1e6,
+                color=COLORS[method],
+                alpha=0.12,
+                linewidth=0,
+            )
+            axes[1].fill_between(
+                times * 1000,
+                (difference - difference_sd) * 1e6,
+                (difference + difference_sd) * 1e6,
+                color=COLORS[method],
+                alpha=0.12,
+                linewidth=0,
+            )
     limits = cfg["erp_core"]["ern"]["peak_window"]
     for ax in axes:
         ax.axvspan(limits[0] * 1000, limits[1] * 1000, color="#E8E8E8", zorder=-1)
@@ -445,38 +743,75 @@ def _plot_ern(ern: dict, cfg: dict, path: Path) -> None:
     fig.suptitle(
         "Wiener "
         f"mode={cfg['wiener'].get('mode', 'frequency')}, "
-        f"coherence={float(cfg['wiener']['coherence_threshold']):.2f}, "
+        f"coherence={float(cfg['wiener']['coherence_threshold']):.3f}, "
         f"phase={float(cfg['wiener']['phase_gate_threshold_rad']):.3f} rad"
+        + ("\nShading: mean ±1 trial SD" if show_trial_variance else "")
     )
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
 
-def _plot_lrp(lrp: dict, path: Path) -> None:
+def _plot_lrp(lrp: dict, path: Path, show_trial_variance: bool = False) -> None:
     fig, ax = plt.subplots(figsize=(8, 4.5), layout="constrained")
     for method in METHODS:
-        times, wave = lrp[method]
+        times, wave, trial_sd = lrp[method]
         ax.plot(times * 1000, wave * 1e6, color=COLORS[method], label=LABELS[method])
+        if show_trial_variance:
+            ax.fill_between(
+                times * 1000,
+                (wave - trial_sd) * 1e6,
+                (wave + trial_sd) * 1e6,
+                color=COLORS[method],
+                alpha=0.12,
+                linewidth=0,
+            )
     ax.axvline(0, color="black", linewidth=0.8)
     ax.axhline(0, color="black", linewidth=0.5)
-    ax.set(xlabel="Response-locked time (ms)", ylabel="Ipsilateral − contralateral (µV)", title="C3/C4 LRP")
+    title = "C3/C4 LRP"
+    if show_trial_variance:
+        title += " (shading: mean ±1 trial SD)"
+    ax.set(xlabel="Response-locked time (ms)", ylabel="Ipsilateral − contralateral (µV)", title=title)
     ax.legend(frameon=False)
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
 
-def _plot_lrp_by_compatibility(lrp_epochs: dict, path: Path) -> None:
+def _lrp_compatibility_waveforms(lrp_epochs: dict) -> dict:
+    return {
+        compatibility: {
+            method: compute_lrp(lrp_epochs[method], compatibility)
+            for method in METHODS
+        }
+        for compatibility in ("compatible", "incompatible")
+    }
+
+
+def _plot_lrp_by_compatibility(
+    waveforms: dict, path: Path, show_trial_variance: bool = False
+) -> None:
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True, layout="constrained")
     for ax, compatibility in zip(axes, ("compatible", "incompatible")):
         for method in METHODS:
-            times, wave = compute_lrp(lrp_epochs[method], compatibility)
+            times, wave, trial_sd = waveforms[compatibility][method]
             ax.plot(times * 1000, wave * 1e6, color=COLORS[method], label=LABELS[method])
+            if show_trial_variance:
+                ax.fill_between(
+                    times * 1000,
+                    (wave - trial_sd) * 1e6,
+                    (wave + trial_sd) * 1e6,
+                    color=COLORS[method],
+                    alpha=0.12,
+                    linewidth=0,
+                )
         ax.axvline(0, color="black", linewidth=0.8)
         ax.axhline(0, color="black", linewidth=0.5)
         ax.set(xlabel="Response-locked time (ms)", title=compatibility.capitalize())
     axes[0].set_ylabel("Ipsilateral − contralateral (µV)")
     axes[0].legend(frameon=False)
-    fig.suptitle("C3/C4 LRP by Flankers compatibility")
+    title = "C3/C4 LRP by Flankers compatibility"
+    if show_trial_variance:
+        title += " (shading: mean ±1 trial SD)"
+    fig.suptitle(title)
     fig.savefig(path, dpi=180)
     plt.close(fig)
 
@@ -565,17 +900,8 @@ def _plot_topomaps(ern_epochs: dict, ern: dict, cfg: dict, path: Path) -> None:
     plt.close(fig)
 
 
-def run(fif_path: Path | None, config_path: str, output_dir: Path | None, force: bool) -> Path:
-    import mne
-
-    cfg = load_config(config_path)
-    fif = _resolve_fif(mne, fif_path)
-    out = output_dir or Path(cfg["paths"]["results_dir"])
-    if out.exists() and any(out.iterdir()) and not force:
-        raise FileExistsError(f"Output directory is not empty: {out}; pass --force to overwrite files")
-    out.mkdir(parents=True, exist_ok=True)
-
-    original = mne.io.read_raw_fif(fif, preload=True, verbose=False)
+def _prepare_recording(mne, recording: Path, cfg: dict, subject_id: str) -> dict:
+    original = _read_recording(mne, recording)
     common = _common_preprocess(original, cfg)
     all_events, all_event_id = mne.events_from_annotations(common, verbose=False)
     table = build_response_table(
@@ -585,31 +911,137 @@ def run(fif_path: Path | None, config_path: str, output_dir: Path | None, force:
         float(cfg["erp_core"]["response_pairing_window_sec"]),
     )
     standard, excluded = _standard_ica(common, cfg)
-    wiener, wiener_diagnostics = _wiener_continuous(common, cfg)
-    raws = {"raw": common, "standard": standard, "wiener": wiener}
+    wiener, wiener_diagnostics = _wiener_continuous(common, cfg, subject_id)
+    return {
+        "recording": recording,
+        "raws": {"raw": common, "standard": standard, "wiener": wiener},
+        "table": table,
+        "ica_excluded_components": [int(value) for value in excluded],
+        "wiener": wiener_diagnostics,
+    }
+
+
+def _run_subject(
+    mne, recordings: dict[str, Path | str], cfg: dict, out: Path
+) -> dict:
+    subject_id = str(recordings["subject_id"])
+    out.mkdir(parents=True, exist_ok=True)
+    prepared_by_path = {}
+    task_data = {}
+    for task in ("ern", "lrp"):
+        if task not in recordings:
+            continue
+        recording = Path(recordings[task])
+        if recording not in prepared_by_path:
+            prepared_by_path[recording] = _prepare_recording(
+                mne, recording, cfg, subject_id
+            )
+        task_data[task] = prepared_by_path[recording]
 
     reject_uv = float(cfg["preprocessing"]["artifact_threshold_uv"])
-    ern_epochs = _make_shared_epochs(raws, table, cfg["erp_core"]["ern"], reject_uv)
-    lrp_epochs = _make_shared_epochs(raws, table, cfg["erp_core"]["lrp"], reject_uv)
-    metrics, ern, lrp = _compute_metrics(raws, ern_epochs, lrp_epochs, cfg)
+    ern_epochs = (
+        _make_shared_epochs(
+            task_data["ern"]["raws"],
+            task_data["ern"]["table"],
+            cfg["erp_core"]["ern"],
+            reject_uv,
+        )
+        if "ern" in task_data
+        else None
+    )
+    lrp_epochs = (
+        _make_shared_epochs(
+            task_data["lrp"]["raws"],
+            task_data["lrp"]["table"],
+            cfg["erp_core"]["lrp"],
+            reject_uv,
+        )
+        if "lrp" in task_data
+        else None
+    )
+    epoch_counts = {
+        "ern": int(len(ern_epochs["raw"])) if ern_epochs is not None else 0,
+        "lrp": int(len(lrp_epochs["raw"])) if lrp_epochs is not None else 0,
+    }
+    epoch_issues = {
+        task: _task_epoch_issue(task, epochs)
+        for task, epochs in (("ern", ern_epochs), ("lrp", lrp_epochs))
+        if epochs is not None
+    }
+    for task, issue in epoch_issues.items():
+        if issue is not None:
+            warnings.warn(f"{subject_id} {task.upper()} skipped: {issue}", RuntimeWarning)
+    if epoch_issues.get("ern") is not None:
+        ern_epochs = None
+    if epoch_issues.get("lrp") is not None:
+        lrp_epochs = None
+    primary = task_data["ern"] if "ern" in task_data else task_data["lrp"]
+    metrics, ern, lrp = _compute_metrics(
+        primary["raws"], ern_epochs, lrp_epochs, cfg
+    )
+    lrp_by_compatibility = (
+        _lrp_compatibility_waveforms(lrp_epochs)
+        if lrp_epochs is not None
+        else None
+    )
+    metrics.insert(0, "subject_id", subject_id)
+    tables = []
+    for prepared in prepared_by_path.values():
+        tasks = [task for task, value in task_data.items() if value is prepared]
+        table = prepared["table"].copy()
+        table.insert(0, "task", "+".join(tasks))
+        table.insert(0, "subject_id", subject_id)
+        tables.append(table)
+    table = pd.concat(tables, ignore_index=True)
     metrics.to_csv(out / "metrics.csv", index=False)
     table.to_csv(out / "response_trials.csv", index=False)
+    wiener_runs = [prepared["wiener"] for prepared in prepared_by_path.values()]
     summary = {
-        "input_fif": str(fif),
+        "subject_id": subject_id,
+        "input_recordings": {
+            task: str(recordings[task]) for task in ("ern", "lrp") if task in recordings
+        },
+        "available_visualizations": [
+            task
+            for task, epochs in (("ern", ern_epochs), ("lrp", lrp_epochs))
+            if epochs is not None
+        ],
+        "epoch_availability": {
+            task: {
+                "n_epochs_after_shared_rejection": epoch_counts[task],
+                "usable": epoch_issues.get(task) is None,
+                "reason": epoch_issues.get(task),
+            }
+            for task in task_data
+        },
         "mne_version": mne.__version__,
         "numpy_version": np.__version__,
         "n_response_trials": int(len(table)),
         "n_correct": int(table["correct"].sum()),
         "n_incorrect": int((~table["correct"]).sum()),
-        "n_ern_epochs_after_shared_rejection": int(len(ern_epochs["raw"])),
-        "n_lrp_epochs_after_shared_rejection": int(len(lrp_epochs["raw"])),
-        "ica_excluded_components": [int(value) for value in excluded],
-        "wiener": wiener_diagnostics,
+        "n_ern_epochs_after_shared_rejection": (
+            epoch_counts["ern"]
+        ),
+        "n_lrp_epochs_after_shared_rejection": (
+            epoch_counts["lrp"]
+        ),
+        "ica_excluded_components": {
+            task: task_data[task]["ica_excluded_components"] for task in task_data
+        },
+        "wiener": {
+            "mode": str(cfg["wiener"].get("mode", "frequency")),
+            "windows": sum(run["windows"] for run in wiener_runs),
+            "processed_channel_windows": sum(
+                run["processed_channel_windows"] for run in wiener_runs
+            ),
+            "group_processing_rates": _merge_group_processing_rates(
+                [run.get("group_processing_rates", {}) for run in wiener_runs]
+            ),
+        },
         "wiener_parameters": {
             "coherence_threshold": float(cfg["wiener"]["coherence_threshold"]),
             "phase_gate_threshold_rad": float(cfg["wiener"]["phase_gate_threshold_rad"]),
         },
-        "statistical_note": "MNE's bundled ERP-CORE FIF contains one participant; subject-level paired t-tests require the full multi-participant release.",
         "fairness": "Filtering, resampling, events, rejection, epoch windows, and baselines are shared across all branches.",
     }
     (out / "run_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -617,23 +1049,246 @@ def run(fif_path: Path | None, config_path: str, output_dir: Path | None, force:
         yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8"
     )
 
-    _plot_ern(ern, cfg, out / "ern_fcz_difference.png")
-    _plot_lrp(lrp, out / "lrp_c3_c4.png")
-    _plot_lrp_by_compatibility(lrp_epochs, out / "lrp_by_compatibility.png")
-    _plot_segment(raws, cfg, out / "time_domain_segment.png")
-    _plot_time_frequency(raws, cfg, out / "time_frequency_segment.png")
-    _plot_topomaps(ern_epochs, ern, cfg, out / "ern_topomaps.png")
+    if ern is not None and ern_epochs is not None:
+        _plot_ern(
+            ern,
+            cfg,
+            out / "ern_fcz_difference.png",
+            show_trial_variance=True,
+        )
+        _plot_topomaps(ern_epochs, ern, cfg, out / "ern_topomaps.png")
+    else:
+        (out / "ern_fcz_difference.png").unlink(missing_ok=True)
+        (out / "ern_topomaps.png").unlink(missing_ok=True)
+    if lrp is not None and lrp_by_compatibility is not None:
+        _plot_lrp(lrp, out / "lrp_c3_c4.png", show_trial_variance=True)
+        _plot_lrp_by_compatibility(
+            lrp_by_compatibility,
+            out / "lrp_by_compatibility.png",
+            show_trial_variance=True,
+        )
+    else:
+        (out / "lrp_c3_c4.png").unlink(missing_ok=True)
+        (out / "lrp_by_compatibility.png").unlink(missing_ok=True)
+    _plot_segment(primary["raws"], cfg, out / "time_domain_segment.png")
+    _plot_time_frequency(primary["raws"], cfg, out / "time_frequency_segment.png")
     if metrics.loc[metrics["method"] == "wiener", "target_change_rms_uv"].iloc[0] < 1e-12:
         warnings.warn(
             "Wiener produced no measurable change at FCz/C3/C4; inspect coherence-gate diagnostics.",
             RuntimeWarning,
         )
+    return {
+        "subject_id": subject_id,
+        "metrics": metrics,
+        "table": table,
+        "summary": summary,
+        "ern": ern,
+        "lrp": lrp,
+        "lrp_by_compatibility": lrp_by_compatibility,
+    }
+
+
+def _mean_method_waveforms(waveforms_by_subject: list[dict], label: str) -> dict:
+    averaged = {}
+    for method in METHODS:
+        waveforms = [waveforms[method] for waveforms in waveforms_by_subject]
+        times = waveforms[0][0]
+        if any(not np.array_equal(times, waveform[0]) for waveform in waveforms[1:]):
+            raise ValueError(f"Cannot average {label}: subject time axes differ")
+        averaged[method] = (times.copy(),) + tuple(
+            np.mean([waveform[index] for waveform in waveforms], axis=0)
+            for index in range(1, len(waveforms[0]))
+        )
+    return averaged
+
+
+def _mean_waveforms(results: list[dict], key: str) -> dict:
+    return _mean_method_waveforms([result[key] for result in results], key)
+
+
+def _mean_lrp_compatibility_waveforms(results: list[dict]) -> dict:
+    return {
+        compatibility: _mean_method_waveforms(
+            [result["lrp_by_compatibility"][compatibility] for result in results],
+            f"lrp_{compatibility}",
+        )
+        for compatibility in ("compatible", "incompatible")
+    }
+
+
+def run(
+    fif_path: Path | None,
+    config_path: str,
+    output_dir: Path | None,
+    force: bool,
+    data_dir: Path | None = None,
+    subjects: list[str] | None = None,
+    task: str = "both",
+) -> Path:
+    import mne
+
+    cfg = load_config(config_path)
+    configured_data_dir = Path(cfg["erp_core"]["data_dir"])
+    recordings = _select_recordings(
+        _resolve_recordings(data_dir or configured_data_dir, fif_path),
+        subjects,
+        task,
+    )
+    out = output_dir or Path(cfg["paths"]["results_dir"])
+    if out.exists() and any(out.iterdir()) and not force:
+        raise FileExistsError(f"Output directory is not empty: {out}; pass --force to overwrite files")
+    out.mkdir(parents=True, exist_ok=True)
+
+    multiple_subjects = len(recordings) > 1
+    results = []
+    for index, subject_recordings in enumerate(recordings, start=1):
+        subject_id = str(subject_recordings["subject_id"])
+        tasks = ", ".join(task.upper() for task in ("ern", "lrp") if task in subject_recordings)
+        print(f"[{index}/{len(recordings)}] Processing {subject_id}: {tasks}")
+        subject_out = out / "subjects" / subject_id if multiple_subjects else out
+        results.append(_run_subject(mne, subject_recordings, cfg, subject_out))
+
+    subject_metrics = pd.concat(
+        [result["metrics"] for result in results], ignore_index=True
+    )
+    response_trials = pd.concat(
+        [result["table"] for result in results], ignore_index=True
+    )
+    numeric_columns = subject_metrics.select_dtypes(include=[np.number]).columns
+    metrics = (
+        subject_metrics.groupby("method", sort=False)[list(numeric_columns)]
+        .mean()
+        .reindex(METHODS)
+        .reset_index()
+    )
+    metrics.insert(1, "n_subjects", len(results))
+    metrics.insert(
+        2, "n_ern_subjects", sum(result["ern"] is not None for result in results)
+    )
+    metrics.insert(
+        3, "n_lrp_subjects", sum(result["lrp"] is not None for result in results)
+    )
+    metrics.to_csv(out / "metrics.csv", index=False)
+    subject_metrics.to_csv(out / "subject_metrics.csv", index=False)
+    response_trials.to_csv(out / "response_trials.csv", index=False)
+
+    summary = {
+        "input_data_dir": (
+            None
+            if fif_path is not None
+            else str((data_dir or configured_data_dir).expanduser().resolve())
+        ),
+        "input_fif": (
+            str(recordings[0]["ern"]) if fif_path is not None else None
+        ),
+        "input_recordings": [
+            str(subject_recordings[task])
+            for subject_recordings in recordings
+            for task in ("ern", "lrp")
+            if task in subject_recordings
+            and (
+                task == "ern"
+                or subject_recordings[task] != subject_recordings.get("ern")
+            )
+        ],
+        "mne_version": mne.__version__,
+        "numpy_version": np.__version__,
+        "n_subjects": len(results),
+        "n_ern_subjects": sum(result["ern"] is not None for result in results),
+        "n_lrp_subjects": sum(result["lrp"] is not None for result in results),
+        "subject_ids": [result["subject_id"] for result in results],
+        "selection": {
+            "requested_subject_ids": subjects,
+            "task": task,
+        },
+        "n_response_trials": int(len(response_trials)),
+        "n_correct": int(response_trials["correct"].sum()),
+        "n_incorrect": int((~response_trials["correct"]).sum()),
+        "n_ern_epochs_after_shared_rejection": sum(
+            result["summary"]["n_ern_epochs_after_shared_rejection"]
+            for result in results
+        ),
+        "n_lrp_epochs_after_shared_rejection": sum(
+            result["summary"]["n_lrp_epochs_after_shared_rejection"]
+            for result in results
+        ),
+        "ica_excluded_components": {
+            result["subject_id"]: result["summary"]["ica_excluded_components"]
+            for result in results
+        },
+        "wiener": {
+            "mode": str(cfg["wiener"].get("mode", "frequency")),
+            "windows": sum(
+                result["summary"]["wiener"]["windows"] for result in results
+            ),
+            "processed_channel_windows": sum(
+                result["summary"]["wiener"]["processed_channel_windows"]
+                for result in results
+            ),
+            "group_processing_rates": _merge_group_processing_rates(
+                [
+                    result["summary"]["wiener"].get("group_processing_rates", {})
+                    for result in results
+                ]
+            ),
+        },
+        "subjects": [result["summary"] for result in results],
+        "wiener_parameters": {
+            "coherence_threshold": float(cfg["wiener"]["coherence_threshold"]),
+            "phase_gate_threshold_rad": float(cfg["wiener"]["phase_gate_threshold_rad"]),
+        },
+        "statistical_note": "Group metrics are equal-weight means of the available participants; this local ERP-CORE subset is not the complete release.",
+        "fairness": "Each participant uses shared filtering, resampling, events, rejection, epoch windows, and baselines across all three branches.",
+    }
+    (out / "run_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    (out / "config_resolved.yaml").write_text(
+        yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+
+    if multiple_subjects:
+        ern_results = [result for result in results if result["ern"] is not None]
+        lrp_results = [result for result in results if result["lrp"] is not None]
+        if ern_results:
+            _plot_ern(
+                _mean_waveforms(ern_results, "ern"),
+                cfg,
+                out / "ern_fcz_difference.png",
+            )
+        else:
+            (out / "ern_fcz_difference.png").unlink(missing_ok=True)
+        if lrp_results:
+            _plot_lrp(
+                _mean_waveforms(lrp_results, "lrp"), out / "lrp_c3_c4.png"
+            )
+            _plot_lrp_by_compatibility(
+                _mean_lrp_compatibility_waveforms(lrp_results),
+                out / "lrp_by_compatibility.png",
+            )
+        else:
+            (out / "lrp_c3_c4.png").unlink(missing_ok=True)
+            (out / "lrp_by_compatibility.png").unlink(missing_ok=True)
+        for stale_single_subject_plot in (
+            "ern_topomaps.png",
+            "time_domain_segment.png",
+            "time_frequency_segment.png",
+        ):
+            (out / stale_single_subject_plot).unlink(missing_ok=True)
     return out
 
 
 def main() -> None:
     args = _parse_args()
-    output = run(args.fif, args.config, args.output_dir, args.force)
+    output = run(
+        args.fif,
+        args.config,
+        args.output_dir,
+        args.force,
+        data_dir=args.data_dir,
+        subjects=args.subjects,
+        task=args.task,
+    )
     print(f"ERP-CORE benchmark complete: {output}")
 
 
