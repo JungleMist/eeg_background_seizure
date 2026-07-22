@@ -16,7 +16,6 @@ def _continuous():
     return ExtractionSpec(
         mode=ExtractionMode.CONTINUOUS,
         window_sec=4.0,
-        artifact_threshold_uv=500.0,
     )
 
 
@@ -30,7 +29,6 @@ def test_basic_selection_uses_shared_preprocessing(synthetic_fif):
             start_sec=1.0,
             stop_sec=5.0,
             window_sec=4.0,
-            artifact_threshold_uv=500.0,
         ),
     )
     assert result.preview_raw.n_times == 500
@@ -44,11 +42,40 @@ def test_fixed_windows_are_export_ready_segments(synthetic_fif):
         ExtractionSpec(
             mode=ExtractionMode.FIXED_WINDOWS,
             window_sec=4.0,
-            artifact_threshold_uv=500.0,
         ),
     )
     assert [item.window_index for item in result.processed_segments] == [0, 1]
     assert all(item.raw.n_times == 500 for item in result.processed_segments)
+    assert result.diagnostics["processed_windows"] == 2
+    assert result.diagnostics["incomplete_tail_samples"] == 0
+
+
+@pytest.mark.parametrize(
+    "method",
+    [ProcessingMethod.BASIC, ProcessingMethod.ICA, ProcessingMethod.WIENER],
+)
+def test_extreme_amplitude_fixed_windows_are_still_processed(
+    synthetic_fif, tmp_path, method
+):
+    import mne
+
+    raw = mne.io.read_raw_fif(synthetic_fif, preload=True, verbose=False)
+    raw._data[0, 100:120] = 1200e-6
+    source = tmp_path / f"extreme-{method.value}-raw.fif"
+    raw.save(source, overwrite=True, verbose=False)
+    spec = ProcessingSpec(
+        method=method,
+        analysis_window_sec=4.0,
+        ica_n_components=4,
+        coherence_threshold=0.0,
+    )
+    result = ProcessingEngine().process(
+        source,
+        spec,
+        ExtractionSpec(mode=ExtractionMode.FIXED_WINDOWS, window_sec=4.0),
+    )
+    assert [segment.window_index for segment in result.processed_segments] == [0, 1]
+    assert result.diagnostics["processed_windows"] == 2
 
 
 @pytest.mark.parametrize("mode", list(WienerMode))
@@ -95,7 +122,6 @@ def test_selection_ica_fits_once_on_full_source(synthetic_fif):
             start_sec=0.0,
             stop_sec=4.0,
             window_sec=4.0,
-            artifact_threshold_uv=500.0,
         ),
     )
     assert result.preview_raw.n_times == 500
@@ -111,7 +137,6 @@ def test_short_basic_selection_is_allowed(synthetic_fif):
             start_sec=1.0,
             stop_sec=2.0,
             window_sec=4.0,
-            artifact_threshold_uv=500.0,
         ),
     )
     assert result.preview_raw.n_times == 125

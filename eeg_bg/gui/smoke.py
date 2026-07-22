@@ -49,7 +49,6 @@ def run_smoke_test() -> int:
         extraction = ExtractionSpec(
             mode=ExtractionMode.CONTINUOUS,
             window_sec=4.0,
-            artifact_threshold_uv=500.0,
         )
         engine = ProcessingEngine()
         methods = [

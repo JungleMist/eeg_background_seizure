@@ -6,7 +6,12 @@ import threading
 from PySide6.QtCore import QObject, Signal, Slot
 
 from eeg_bg.application.batch import BatchProcessor, scan_recordings
-from eeg_bg.application.models import ExtractionSpec, OutputFormat, ProcessingSpec
+from eeg_bg.application.models import (
+    ArtifactSettings,
+    ExtractionSpec,
+    OutputFormat,
+    ProcessingSpec,
+)
 from eeg_bg.application.processing import ProcessingEngine
 from eeg_bg.application.recording import RecordingService
 from eeg_bg.exceptions import ProcessingCancelled
@@ -124,6 +129,7 @@ class BatchWorker(BaseWorker):
         output_root: Path,
         processing: ProcessingSpec,
         extraction: ExtractionSpec,
+        artifact_settings: ArtifactSettings,
         output_format: OutputFormat,
         overwrite: bool,
     ):
@@ -133,6 +139,7 @@ class BatchWorker(BaseWorker):
         self.output_root = output_root
         self.processing = processing
         self.extraction = extraction
+        self.artifact_settings = artifact_settings
         self.output_format = output_format
         self.overwrite = overwrite
 
@@ -147,6 +154,7 @@ class BatchWorker(BaseWorker):
                 self.processing,
                 self.extraction,
                 self.output_format,
+                artifact_settings=self.artifact_settings,
                 overwrite=self.overwrite,
                 cancel_requested=self.is_cancelled,
                 item_progress=lambda a, b, p: self.itemStarted.emit(a, b, str(p)),

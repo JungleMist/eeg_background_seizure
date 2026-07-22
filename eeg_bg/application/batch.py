@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import time
@@ -10,6 +11,7 @@ from typing import Callable
 import uuid
 
 from .models import (
+    ArtifactSettings,
     BatchItemResult,
     ExtractionSpec,
     OutputFormat,
@@ -19,8 +21,12 @@ from .models import (
     WienerMode,
     pipeline_fingerprint,
 )
+from .artifacts import summarize_raw_artifacts
 from .processing import ProcessingEngine
 from .recording import is_supported_recording
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def scan_recordings(root: str | Path) -> list[Path]:
@@ -101,6 +107,7 @@ class BatchProcessor:
         extraction: ExtractionSpec,
         output_format: OutputFormat,
         *,
+        artifact_settings: ArtifactSettings | None = None,
         overwrite: bool = False,
         cancel_requested: Callable[[], bool] | None = None,
         item_progress: Callable[[int, int, Path], None] | None = None,
@@ -109,6 +116,8 @@ class BatchProcessor:
     ) -> list[BatchItemResult]:
         input_root, output_root = validate_batch_roots(input_root, output_root)
         output_root.mkdir(parents=True, exist_ok=True)
+        artifact_settings = artifact_settings or ArtifactSettings()
+        artifact_settings.validate()
         results: list[BatchItemResult] = []
         config_hash = pipeline_fingerprint(processing, extraction)
         for index, source in enumerate(files):
@@ -132,6 +141,26 @@ class BatchProcessor:
                     cancel_requested=cancel_requested,
                     progress=stage_progress,
                 )
+                artifact_summary = summarize_raw_artifacts(
+                    result.original_raw, artifact_settings
+                )
+                if not artifact_settings.enabled:
+                    artifact_summary.update({
+                        "affected_channels": [],
+                        "affected_channel_count": 0,
+                        "exceedance_region_count": 0,
+                        "channel_region_counts": {},
+                    })
+                artifact_warnings: list[str] = []
+                if artifact_settings.enabled and artifact_summary["affected_channels"]:
+                    warning = (
+                        f"原始输入超过 {artifact_settings.threshold_uv:g} µV："
+                        f"通道 {', '.join(artifact_summary['affected_channels'])}，"
+                        f"{artifact_summary['exceedance_region_count']} 个连续区段，"
+                        f"最大绝对振幅 {artifact_summary['max_abs_uv']:.1f} µV"
+                    )
+                    artifact_warnings.append(warning)
+                    LOGGER.warning("%s：%s", source, warning)
                 relative_parent = source.parent.relative_to(input_root)
                 destination = output_root / relative_parent
                 outputs: list[Path] = []
@@ -151,11 +180,14 @@ class BatchProcessor:
                     self.engine.recordings.write(segment.raw, target, output_format)
                     outputs.append(target)
                 item.outputs = outputs
-                item.warnings = result.warnings
-                item.diagnostics = result.diagnostics
+                item.warnings = list(result.warnings) + artifact_warnings
+                item.diagnostics = {
+                    **result.diagnostics,
+                    "artifact_threshold": artifact_summary,
+                }
                 if skipped == len(outputs):
                     item.status = "skipped"
-                elif result.warnings:
+                elif item.warnings:
                     item.status = "warning"
                 else:
                     item.status = "done"
@@ -180,6 +212,7 @@ class BatchProcessor:
             processing,
             extraction,
             output_format,
+            artifact_settings,
         )
         return results
 
@@ -190,7 +223,9 @@ class BatchProcessor:
         processing: ProcessingSpec,
         extraction: ExtractionSpec,
         output_format: OutputFormat,
+        artifact_settings: ArtifactSettings | None = None,
     ) -> tuple[Path, Path]:
+        artifact_settings = artifact_settings or ArtifactSettings()
         config_hash = pipeline_fingerprint(processing, extraction)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         stem = f"eeg_bg_manifest_{timestamp}_{config_hash[:8]}"
@@ -212,6 +247,7 @@ class BatchProcessor:
         payload = {
             "processing": processing.as_serializable_dict(),
             "extraction": _jsonable_extraction(extraction),
+            "artifact_settings": artifact_settings.as_serializable_dict(),
             "output_format": output_format.value,
             "items": rows,
         }
@@ -228,6 +264,7 @@ class BatchProcessor:
                     fieldnames=[
                         "source", "status", "outputs", "warnings", "error",
                         "elapsed_sec", "config_hash", "diagnostics",
+                        "artifact_threshold_enabled", "artifact_threshold_uv",
                     ],
                 )
                 writer.writeheader()
@@ -239,6 +276,8 @@ class BatchProcessor:
                         "diagnostics": json.dumps(
                             row["diagnostics"], ensure_ascii=False, separators=(",", ":")
                         ),
+                        "artifact_threshold_enabled": artifact_settings.enabled,
+                        "artifact_threshold_uv": artifact_settings.threshold_uv,
                     })
             os.replace(tmp_json, json_path)
             os.replace(tmp_csv, csv_path)

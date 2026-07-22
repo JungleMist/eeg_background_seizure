@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
 from eeg_bg.application.batch import output_name
 from eeg_bg.application.models import OutputFormat
 
-from .parameters import ParameterPanel
+from .branding import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
+from .parameters import ArtifactSettingsStore, ParameterPanel
 from .waveform import WaveformView
 from .workers import BatchWorker, ExportWorker, LoadWorker, ProcessWorker, ScanWorker
 
@@ -87,9 +88,17 @@ class ThreadedPage(QWidget):
 
 
 class PreviewPage(ThreadedPage):
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        artifact_store: ArtifactSettingsStore | None = None,
+        settings: QSettings | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
-        self.settings = QSettings("eeg_bg", "eeg_bg Studio")
+        self.settings = settings or QSettings(
+            SETTINGS_ORGANIZATION, SETTINGS_APPLICATION
+        )
+        self.artifact_store = artifact_store or ArtifactSettingsStore(self.settings, self)
         self.source_path: Path | None = None
         self.current_result = None
 
@@ -100,7 +109,7 @@ class PreviewPage(ThreadedPage):
         titles = QVBoxLayout()
         title = QLabel("交互预览")
         title.setObjectName("PageTitle")
-        subtitle = QLabel("在同一时间轴上核对原始 EEG 与预处理结果")
+        subtitle = QLabel("在同一时间轴上核对原始 EEG 与 ECMAD 降噪结果")
         subtitle.setObjectName("Muted")
         titles.addWidget(title)
         titles.addWidget(subtitle)
@@ -112,7 +121,9 @@ class PreviewPage(ThreadedPage):
         header.addWidget(self.open_button)
         root.addLayout(header)
 
-        self.metadata = QLabel("尚未打开文件 · 支持 EDF / FIF / FIF.GZ")
+        self.metadata = QLabel(
+            "尚未打开文件 · 支持 EDF / FIF / EEGLAB SET（SET 需与 FDT 同目录）"
+        )
         self.metadata.setObjectName("Metadata")
         self.metadata.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(self.metadata)
@@ -123,6 +134,8 @@ class PreviewPage(ThreadedPage):
         plot_layout = QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(12, 12, 12, 12)
         self.waveform = WaveformView()
+        self.waveform.set_artifact_settings(self.artifact_store.snapshot())
+        self.artifact_store.changed.connect(self.waveform.set_artifact_settings)
         self.waveform.selectionChanged.connect(self._selection_changed)
         plot_layout.addWidget(self.waveform)
         splitter.addWidget(plot_panel)
@@ -131,7 +144,9 @@ class PreviewPage(ThreadedPage):
         controls_host.setObjectName("ScrollContents")
         controls_layout = QVBoxLayout(controls_host)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        self.parameters = ParameterPanel(allow_selection=True)
+        self.parameters = ParameterPanel(
+            allow_selection=True, artifact_store=self.artifact_store
+        )
         self.parameters.bind_settings(self.settings, "preview/parameters")
         controls_layout.addWidget(self.parameters)
         output_row = QHBoxLayout()
@@ -173,7 +188,8 @@ class PreviewPage(ThreadedPage):
             self,
             "打开 EEG 文件",
             start,
-            "EEG 文件 (*.edf *.fif *.fif.gz);;EDF (*.edf);;FIF (*.fif *.fif.gz)",
+            "EEG 文件 (*.edf *.fif *.fif.gz *.set);;"
+            "EEGLAB SET (*.set);;EDF (*.edf);;FIF (*.fif *.fif.gz)",
         )
         if not path:
             return
@@ -205,7 +221,8 @@ class PreviewPage(ThreadedPage):
         self.parameters.stop_sec.setMaximum(info.duration_sec)
         self.parameters.stop_sec.setValue(min(20.0, info.duration_sec))
         self.metadata.setText(
-            f"{info.path.name}   ·   {len(info.ch_names)} ch   ·   "
+            f"{info.format.upper()}   ·   {info.path.name}   ·   "
+            f"{len(info.ch_names)} ch   ·   "
             f"{info.sfreq:.1f} Hz   ·   {info.duration_sec:.2f} s"
         )
         self._set_busy(False)
@@ -263,7 +280,7 @@ class PreviewPage(ThreadedPage):
     def export_result(self):
         if self.current_result is None:
             return
-        fmt = self.output_format.currentData()
+        fmt = OutputFormat(self.output_format.currentData())
         processing = self.current_result.processing_spec
         segments = self.current_result.processed_segments
         start_dir = str(self.settings.value("preview/export_dir", str(self.source_path.parent)))
@@ -333,9 +350,17 @@ class BatchPage(ThreadedPage):
         "cancelled": "■ 已取消",
     }
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        artifact_store: ArtifactSettingsStore | None = None,
+        settings: QSettings | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
-        self.settings = QSettings("eeg_bg", "eeg_bg Studio")
+        self.settings = settings or QSettings(
+            SETTINGS_ORGANIZATION, SETTINGS_APPLICATION
+        )
+        self.artifact_store = artifact_store or ArtifactSettingsStore(self.settings, self)
         self.files: list[Path] = []
         self.failed_files: list[Path] = []
         self._row_by_path: dict[str, int] = {}
@@ -345,7 +370,7 @@ class BatchPage(ThreadedPage):
         root.setSpacing(14)
         title = QLabel("批量处理")
         title.setObjectName("PageTitle")
-        subtitle = QLabel("递归发现 EEG 文件，逐文件安全执行同一预处理方案")
+        subtitle = QLabel("递归发现 EEG 文件，逐文件执行同一 ECMAD 降噪方案")
         subtitle.setObjectName("Muted")
         root.addWidget(title)
         root.addWidget(subtitle)
@@ -404,7 +429,9 @@ class BatchPage(ThreadedPage):
         controls_host.setObjectName("ScrollContents")
         controls_layout = QVBoxLayout(controls_host)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        self.parameters = ParameterPanel(allow_selection=False)
+        self.parameters = ParameterPanel(
+            allow_selection=False, artifact_store=self.artifact_store
+        )
         self.parameters.bind_settings(self.settings, "batch/parameters")
         controls_layout.addWidget(self.parameters)
         format_row = QHBoxLayout()
@@ -459,7 +486,7 @@ class BatchPage(ThreadedPage):
     def scan(self):
         root = Path(self.input_edit.text()).expanduser()
         self._set_busy(True)
-        self.statusChanged.emit("正在递归扫描 EDF/FIF…")
+        self.statusChanged.emit("正在递归扫描 EDF/FIF/SET…")
         if not self._start_worker(ScanWorker(root), self._scanned, self._batch_failed):
             self._set_busy(False)
 
@@ -469,7 +496,7 @@ class BatchPage(ThreadedPage):
         self._populate_table(files)
         self.summary.setText(f"发现 {len(files)} 个可读取候选文件")
         self._set_busy(False)
-        self.statusChanged.emit("扫描完成" if files else "未发现 EDF/FIF 文件")
+        self.statusChanged.emit("扫描完成" if files else "未发现 EDF/FIF/SET 文件")
 
     def _populate_table(self, files: list[Path]):
         self.table.setRowCount(len(files))
@@ -509,7 +536,8 @@ class BatchPage(ThreadedPage):
             output_root,
             processing,
             extraction,
-            self.output_format.currentData(),
+            self.artifact_store.snapshot(),
+            OutputFormat(self.output_format.currentData()),
             self.overwrite.isChecked(),
         )
         worker.itemStarted.connect(self._item_started)

@@ -1,4 +1,4 @@
-"""PySide6 desktop interface for eeg_bg Studio."""
+"""PySide6 desktop interface for ECMAD Studio."""
 
 import os
 from pathlib import Path

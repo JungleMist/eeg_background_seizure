@@ -95,41 +95,34 @@ class ProcessingEngine:
         )
 
     @staticmethod
-    def _window_epochs(raw, window_sec: float, threshold_uv: float):
+    def _window_epochs(raw, window_sec: float):
         sfreq = float(raw.info["sfreq"])
         n_times = int(round(window_sec * sfreq))
         data_uv = raw.get_data() * 1e6
-        accepted: list[tuple[int, np.ndarray]] = []
-        rejected = 0
+        windows: list[tuple[int, np.ndarray]] = []
         for idx, start in enumerate(range(0, data_uv.shape[1] - n_times + 1, n_times)):
             epoch = data_uv[:, start : start + n_times]
-            if float(np.max(np.abs(epoch))) <= threshold_uv:
-                accepted.append((idx, epoch.copy()))
-            else:
-                rejected += 1
-        return accepted, rejected, n_times
+            windows.append((idx, epoch.copy()))
+        return windows, n_times
 
     def _fit_ica(
         self,
         raw,
         cfg: dict,
-        extraction: ExtractionSpec,
         fit_window_sec: float,
     ):
-        epochs, rejected, _ = self._window_epochs(
-            raw, fit_window_sec, extraction.artifact_threshold_uv
-        )
+        epochs, _ = self._window_epochs(raw, fit_window_sec)
         if not epochs:
             # A valid interactive selection may be shorter than the fixed export
             # window. It is still suitable as one ICA fitting block.
             data_uv = raw.get_data() * 1e6
-            if data_uv.size and float(np.max(np.abs(data_uv))) <= extraction.artifact_threshold_uv:
+            if data_uv.size:
                 epochs = [(0, data_uv)]
         if not epochs:
-            raise ValueError("没有低于伪迹阈值的窗口可用于 ICA 拟合")
+            raise ValueError("没有可用于 ICA 拟合的数据")
         batch = np.stack([epoch for _, epoch in epochs])
         model, artifact_indices = fit_ica(batch, list(raw.ch_names), cfg)
-        return model, artifact_indices, rejected, len(epochs)
+        return model, artifact_indices, len(epochs)
 
     def _apply_method_to_raw(
         self,
@@ -152,10 +145,9 @@ class ProcessingEngine:
             warnings: list[str] = []
             if not any(ch in raw.ch_names for ch in ("FP1", "FP2")):
                 warnings.append("缺少 FP1/FP2：ICA 未找到自动伪迹代理，输出可能与基础处理相同")
-            model, artifacts, rejected, fit_windows = self._fit_ica(
+            model, artifacts, fit_windows = self._fit_ica(
                 ica_fit_raw if ica_fit_raw is not None else raw,
                 cfg,
-                extraction,
                 processing.analysis_window_sec,
             )
             self._check_cancel(cancel_requested)
@@ -166,7 +158,6 @@ class ProcessingEngine:
             return cleaned, {
                 "method": "ica",
                 "removed_components": [int(i) for i in artifacts],
-                "rejected_fit_windows": int(rejected),
                 "fit_windows": int(fit_windows),
             }, warnings
 
@@ -210,18 +201,16 @@ class ProcessingEngine:
         progress: ProgressCallback | None,
         subject_id: str,
     ):
-        accepted, rejected, n_times = self._window_epochs(
-            raw, extraction.window_sec, extraction.artifact_threshold_uv
-        )
-        if not accepted:
-            raise ValueError("没有低于伪迹阈值的完整窗口可导出")
+        windows, n_times = self._window_epochs(raw, extraction.window_sec)
+        if not windows:
+            raise ValueError("记录时长不足一个完整的固定窗口")
 
         ica_state = None
         warnings: list[str] = []
         if processing.method == ProcessingMethod.ICA:
             if not any(ch in raw.ch_names for ch in ("FP1", "FP2")):
                 warnings.append("缺少 FP1/FP2：ICA 未找到自动伪迹代理")
-            batch = np.stack([epoch for _, epoch in accepted])
+            batch = np.stack([epoch for _, epoch in windows])
             ica_state = fit_ica(batch, list(raw.ch_names), cfg)
 
         decomposer = (
@@ -248,7 +237,7 @@ class ProcessingEngine:
         solve_failures = 0
         window_diagnostics: list[dict] = []
         sfreq = float(raw.info["sfreq"])
-        for pos, (window_index, epoch_uv) in enumerate(accepted):
+        for pos, (window_index, epoch_uv) in enumerate(windows):
             self._check_cancel(cancel_requested)
             start = window_index * extraction.window_sec
             processed_uv = epoch_uv
@@ -286,13 +275,13 @@ class ProcessingEngine:
                 )
             )
             if progress is not None:
-                progress(pos + 1, len(accepted), "固定窗口")
+                progress(pos + 1, len(windows), "固定窗口")
         if solve_failures:
             warnings.append(f"{solve_failures} 个 Wiener 候选求解失败；对应通道已安全直通")
         return segments, {
             "method": processing.method.value,
-            "accepted_windows": len(accepted),
-            "rejected_windows": rejected,
+            "processed_windows": len(windows),
+            "incomplete_tail_samples": int(raw.n_times - len(windows) * n_times),
             "solve_failures": solve_failures,
             "window_diagnostics": window_diagnostics,
         }, warnings

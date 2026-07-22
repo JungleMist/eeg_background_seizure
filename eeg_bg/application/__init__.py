@@ -1,6 +1,7 @@
 """Application services shared by the eeg_bg Studio GUI and batch runner."""
 
 from .models import (
+    ArtifactSettings,
     BatchItemResult,
     ExtractionMode,
     ExtractionSpec,
@@ -15,6 +16,7 @@ from .processing import ProcessingEngine
 from .recording import RecordingService
 
 __all__ = [
+    "ArtifactSettings",
     "BatchItemResult",
     "ExtractionMode",
     "ExtractionSpec",

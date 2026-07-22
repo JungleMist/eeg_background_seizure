@@ -3,6 +3,7 @@ import math
 import pytest
 
 from eeg_bg.application.models import (
+    ArtifactSettings,
     ExtractionMode,
     ExtractionSpec,
     ProcessingMethod,
@@ -10,6 +11,16 @@ from eeg_bg.application.models import (
     WienerMode,
     pipeline_fingerprint,
 )
+
+
+def test_artifact_settings_defaults_and_validation():
+    settings = ArtifactSettings()
+    assert settings.as_serializable_dict() == {
+        "enabled": True,
+        "threshold_uv": 200.0,
+    }
+    with pytest.raises(ValueError):
+        ArtifactSettings(threshold_uv=0.0).validate()
 
 
 def test_gate_display_endpoint_maps_to_exact_pi():
@@ -63,3 +74,14 @@ def test_frequency_fingerprint_ignores_disabled_gate():
         phase_gate_threshold_rad=2.50,
     )
     assert first.fingerprint == second.fingerprint
+
+
+def test_specs_normalize_string_backed_enum_values():
+    processing = ProcessingSpec(method="basic", wiener_mode="frequency")
+    extraction = ExtractionSpec(mode="continuous")
+
+    assert processing.method is ProcessingMethod.BASIC
+    assert processing.wiener_mode is WienerMode.FREQUENCY
+    assert extraction.mode is ExtractionMode.CONTINUOUS
+    assert processing.as_serializable_dict()["method"] == "basic"
+    assert extraction.as_serializable_dict()["mode"] == "continuous"

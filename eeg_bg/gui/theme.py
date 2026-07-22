@@ -87,6 +87,49 @@ def stylesheet() -> str:
         selection-background-color: {c['processed']};
     }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
+    QSpinBox, QDoubleSpinBox {{
+        min-height: 44px;
+        padding-right: 44px;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button,
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        width: 38px;
+        background: {c['raised']};
+        border-left: 1px solid {c['border']};
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-position: top right;
+        border-bottom: 1px solid {c['border']};
+        border-top-right-radius: 5px;
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-position: bottom right;
+        border-bottom-right-radius: 5px;
+    }}
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background: #203747;
+        border-left-color: {c['raw']};
+    }}
+    QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+    QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+        background: #28495A;
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: none;
+        width: 12px;
+        height: 8px;
+    }}
+    QToolButton#AxisZoomButton {{
+        min-width: 34px;
+        max-width: 34px;
+        min-height: 34px;
+        padding: 0;
+        font-size: 18px;
+        font-weight: 650;
+    }}
     QCheckBox {{ spacing: 8px; }}
     QProgressBar {{
         min-height: 9px; max-height: 9px;

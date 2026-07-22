@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -15,15 +15,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .branding import (
+    PRODUCT_ACRONYM,
+    SETTINGS_APPLICATION,
+    SETTINGS_ORGANIZATION,
+    WINDOW_TITLE,
+)
 from .pages import BatchPage, PreviewPage
+from .parameters import ArtifactSettingsStore
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: QSettings | None = None):
         super().__init__()
-        self.setWindowTitle("eeg_bg Studio")
+        self.setWindowTitle(WINDOW_TITLE)
         self.resize(1480, 900)
         self.setMinimumSize(1120, 700)
+        self.settings = settings or QSettings(
+            SETTINGS_ORGANIZATION, SETTINGS_APPLICATION
+        )
+        self.artifact_store = ArtifactSettingsStore(self.settings, self)
 
         root = QWidget()
         root.setObjectName("AppRoot")
@@ -37,10 +48,11 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(nav)
         nav_layout.setContentsMargins(18, 22, 18, 18)
         nav_layout.setSpacing(8)
-        brand = QLabel("eeg_bg")
+        brand = QLabel(PRODUCT_ACRONYM)
         brand.setObjectName("Brand")
-        accent = QLabel("SIGNAL STUDIO")
+        accent = QLabel("CHANNEL MATRIX\nADAPTIVE DENOISER")
         accent.setObjectName("BrandAccent")
+        accent.setWordWrap(True)
         nav_layout.addWidget(brand)
         nav_layout.addWidget(accent)
         nav_layout.addSpacing(24)
@@ -55,15 +67,15 @@ class MainWindow(QMainWindow):
             nav_layout.addWidget(button)
         self.preview_nav.setChecked(True)
         nav_layout.addStretch(1)
-        version = QLabel("EEG denoising\nworkspace · v0.1.0")
+        version = QLabel("ECMAD EEG denoising\nworkspace · v0.1.0")
         version.setObjectName("Muted")
         version.setWordWrap(True)
         nav_layout.addWidget(version)
         layout.addWidget(nav)
 
         self.stack = QStackedWidget()
-        self.preview_page = PreviewPage()
-        self.batch_page = BatchPage()
+        self.preview_page = PreviewPage(self.artifact_store, self.settings)
+        self.batch_page = BatchPage(self.artifact_store, self.settings)
         self.stack.addWidget(self.preview_page)
         self.stack.addWidget(self.batch_page)
         layout.addWidget(self.stack, 1)
@@ -76,7 +88,7 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         status.setSizeGripEnabled(True)
         self.setStatusBar(status)
-        self._show_status("就绪 · 打开一个 EDF 或 FIF 文件开始")
+        self._show_status("就绪 · 打开 EEG 文件开始 ECMAD 降噪")
 
         open_action = QAction(self)
         open_action.setShortcut(QKeySequence.Open)

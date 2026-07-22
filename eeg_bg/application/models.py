@@ -35,18 +35,33 @@ class OutputFormat(str, Enum):
 
 
 @dataclass(frozen=True)
+class ArtifactSettings:
+    enabled: bool = True
+    threshold_uv: float = 200.0
+
+    def validate(self) -> None:
+        if not math.isfinite(self.threshold_uv) or self.threshold_uv <= 0:
+            raise ValueError("伪迹阈值必须为正数")
+
+    def as_serializable_dict(self) -> dict[str, Any]:
+        return {"enabled": bool(self.enabled), "threshold_uv": float(self.threshold_uv)}
+
+
+@dataclass(frozen=True)
 class ExtractionSpec:
     mode: ExtractionMode = ExtractionMode.SELECTION
     start_sec: float = 0.0
     stop_sec: float | None = 20.0
     window_sec: float = 20.0
-    artifact_threshold_uv: float = 200.0
+
+    def __post_init__(self) -> None:
+        # Qt stores str-backed enums as plain strings in QVariant. Normalize at
+        # the application boundary so serialization and processing stay typed.
+        object.__setattr__(self, "mode", ExtractionMode(self.mode))
 
     def validate(self, duration_sec: float | None = None) -> None:
         if self.window_sec < 4.0:
             raise ValueError("分析窗长必须至少为 4 秒")
-        if not math.isfinite(self.artifact_threshold_uv) or self.artifact_threshold_uv <= 0:
-            raise ValueError("伪迹阈值必须为正数")
         if self.mode == ExtractionMode.SELECTION:
             if self.stop_sec is None or self.start_sec < 0 or self.stop_sec <= self.start_sec:
                 raise ValueError("交互选区必须满足 0 ≤ 起点 < 终点")
@@ -71,6 +86,10 @@ class ProcessingSpec:
     wiener_mode: WienerMode = WienerMode.FREQUENCY
     coherence_threshold: float = 0.15
     phase_gate_threshold_rad: float = 0.39
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "method", ProcessingMethod(self.method))
+        object.__setattr__(self, "wiener_mode", WienerMode(self.wiener_mode))
 
     def validate(self) -> None:
         values = (
