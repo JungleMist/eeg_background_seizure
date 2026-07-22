@@ -24,12 +24,23 @@ from PySide6.QtWidgets import (
 )
 
 from eeg_bg.application.batch import output_name
-from eeg_bg.application.models import OutputFormat
+from eeg_bg.application.models import OutputFormat, ProcessingMethod, WienerMode
+from eeg_bg.application.processing import ProcessingEngine
 
 from .branding import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
+from .channel_groups import ChannelGroupPresetStore
+from .ern_comparison import ErnComparisonDialog
+from .events import RecordingInspectorPanel
 from .parameters import ArtifactSettingsStore, ParameterPanel
 from .waveform import WaveformView
-from .workers import BatchWorker, ExportWorker, LoadWorker, ProcessWorker, ScanWorker
+from .workers import (
+    BatchWorker,
+    ErnComparisonWorker,
+    ExportWorker,
+    LoadWorker,
+    ProcessWorker,
+    ScanWorker,
+)
 
 
 def _output_format_combo() -> QComboBox:
@@ -99,8 +110,15 @@ class PreviewPage(ThreadedPage):
             SETTINGS_ORGANIZATION, SETTINGS_APPLICATION
         )
         self.artifact_store = artifact_store or ArtifactSettingsStore(self.settings, self)
+        self.channel_group_presets = ChannelGroupPresetStore(self.settings, self)
         self.source_path: Path | None = None
+        self.recording_info = None
         self.current_result = None
+        self._ern_dialog: ErnComparisonDialog | None = None
+        self._default_channel_groups = tuple(
+            tuple(group)
+            for group in ProcessingEngine().base_cfg["channels"]["channel_groups"]
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 18)
@@ -144,10 +162,16 @@ class PreviewPage(ThreadedPage):
         controls_host.setObjectName("ScrollContents")
         controls_layout = QVBoxLayout(controls_host)
         controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.recording_inspector = RecordingInspectorPanel()
+        self.recording_inspector.eventActivated.connect(self._event_activated)
+        controls_layout.addWidget(self.recording_inspector)
         self.parameters = ParameterPanel(
-            allow_selection=True, artifact_store=self.artifact_store
+            allow_selection=True,
+            artifact_store=self.artifact_store,
+            channel_group_presets=self.channel_group_presets,
         )
         self.parameters.bind_settings(self.settings, "preview/parameters")
+        self.parameters.currentWindowRequested.connect(self._use_current_window)
         controls_layout.addWidget(self.parameters)
         output_row = QHBoxLayout()
         output_row.addWidget(QLabel("导出格式"))
@@ -161,12 +185,19 @@ class PreviewPage(ThreadedPage):
         self.export_button = QPushButton("导出当前结果")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_result)
+        self.ern_compare_button = QPushButton("打开 ERN 三方法叠加")
+        self.ern_compare_button.setEnabled(False)
+        self.ern_compare_button.setToolTip(
+            "使用当前参数计算 Raw、ICA 与 ECMAD 的 FCz 响应锁定 ERP"
+        )
+        self.ern_compare_button.clicked.connect(self.compare_ern)
         self.cancel_button = QPushButton("取消任务")
         self.cancel_button.setObjectName("Danger")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.request_cancel)
         controls_layout.addWidget(self.process_button)
         controls_layout.addWidget(self.export_button)
+        controls_layout.addWidget(self.ern_compare_button)
         controls_layout.addWidget(self.cancel_button)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -200,24 +231,39 @@ class PreviewPage(ThreadedPage):
         self.open_button.setEnabled(not busy)
         self.process_button.setEnabled(not busy and self.source_path is not None)
         self.export_button.setEnabled(not busy and self.current_result is not None)
+        self.ern_compare_button.setEnabled(not busy and self._can_compare_ern())
         self.cancel_button.setEnabled(busy)
+        self.parameters.setEnabled(not busy)
+        self.waveform.set_selection_enabled(not busy)
         if busy:
             self.progress.setRange(0, 0)
         else:
             self.progress.setRange(0, 100)
 
+    def _thread_finished(self):
+        super()._thread_finished()
+        self._set_busy(False)
+
     def _load(self, path: Path):
         self._set_busy(True)
         self.statusChanged.emit(f"正在读取 {path.name}…")
         worker = LoadWorker(path)
-        if not self._start_worker(worker, self._loaded, self._preview_failed):
-            self._set_busy(False)
+        self._start_worker(worker, self._loaded, self._preview_failed)
 
     def _loaded(self, payload):
         info, raw, warnings = payload
         self.source_path = info.path
+        self.recording_info = info
         self.current_result = None
+        if self._ern_dialog is not None:
+            self._ern_dialog.close()
+            self._ern_dialog = None
         self.waveform.set_original(raw)
+        self.parameters.set_current_window_available(True)
+        self.parameters.set_channel_context(
+            info.ch_names, self._default_channel_groups
+        )
+        self.recording_inspector.set_recording(info)
         self.parameters.stop_sec.setMaximum(info.duration_sec)
         self.parameters.stop_sec.setValue(min(20.0, info.duration_sec))
         self.metadata.setText(
@@ -225,15 +271,80 @@ class PreviewPage(ThreadedPage):
             f"{len(info.ch_names)} ch   ·   "
             f"{info.sfreq:.1f} Hz   ·   {info.duration_sec:.2f} s"
         )
-        self._set_busy(False)
         self.export_button.setEnabled(False)
         message = "文件已就绪"
         if warnings:
             message += " · " + "；".join(warnings)
         self.statusChanged.emit(message)
 
+    def _can_compare_ern(self) -> bool:
+        info = self.recording_info
+        if info is None or "FCz" not in info.ch_names:
+            return False
+        task_name = str(info.sidecars.eeg.get("TaskName", "")).upper()
+        filename_is_ern = "_task-ern_" in info.path.name.lower()
+        return bool(info.sidecars.events) and (task_name == "ERN" or filename_is_ern)
+
+    def compare_ern(self):
+        if self.source_path is None or not self._can_compare_ern():
+            QMessageBox.information(
+                self,
+                "当前记录不能进行 ERN 对比",
+                "请选择包含 FCz、ERN 任务元数据和事件标记的 ERP-CORE SET 文件。",
+            )
+            return
+        try:
+            processing = self.parameters.processing_spec()
+            processing.validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "参数需要调整", str(exc))
+            return
+        self._set_busy(True)
+        self.statusChanged.emit("正在计算 Raw / ICA / ECMAD 响应锁定 ERN…")
+        worker = ErnComparisonWorker(self.source_path, processing)
+        worker.progress.connect(self._progress_changed)
+        self._start_worker(worker, self._ern_ready, self._preview_failed)
+
+    def _ern_ready(self, result):
+        if self._ern_dialog is not None:
+            self._ern_dialog.close()
+        dialog = ErnComparisonDialog(result, self)
+        dialog.destroyed.connect(
+            lambda _object=None, target=dialog: self._ern_dialog_closed(target)
+        )
+        self._ern_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self.statusChanged.emit(
+            f"ERN 对比已就绪 · {result.n_epochs} 试次 · "
+            f"错误 {result.n_incorrect} / 正确 {result.n_correct}"
+        )
+
+    def _ern_dialog_closed(self, dialog):
+        if self._ern_dialog is dialog:
+            self._ern_dialog = None
+
+    def _event_activated(self, event):
+        self.waveform.focus_event(event)
+        self.statusChanged.emit(
+            f"已定位 {event.trial_type or 'event'} / {event.value or 'n/a'}"
+            f" · {event.onset_sec:.4f} s"
+        )
+
     def _selection_changed(self, start: float, stop: float):
         self.parameters.set_selection(start, stop)
+
+    def _use_current_window(self):
+        visible_range = self.waveform.visible_time_range()
+        if visible_range is None:
+            return
+        start, stop = visible_range
+        self.waveform.set_selection(start, stop)
+        self.parameters.set_selection(start, stop)
+        self.statusChanged.emit(
+            f"已使用当前窗口作为选区 · {start:.2f}–{stop:.2f} s"
+        )
 
     def process(self):
         if self.source_path is None:
@@ -250,8 +361,7 @@ class PreviewPage(ThreadedPage):
         self.statusChanged.emit("正在预处理 EEG…")
         worker = ProcessWorker(self.source_path, processing, extraction)
         worker.progress.connect(self._progress_changed)
-        if not self._start_worker(worker, self._processed, self._preview_failed):
-            self._set_busy(False)
+        self._start_worker(worker, self._processed, self._preview_failed)
 
     def _progress_changed(self, current: int, total: int, label: str):
         self.progress.setRange(0, max(1, total))
@@ -261,20 +371,41 @@ class PreviewPage(ThreadedPage):
     def _processed(self, result):
         self.current_result = result
         segment = result.processed_segments[0]
-        self.waveform.set_processed(segment.raw, segment.start_sec)
-        self._set_busy(False)
-        self.export_button.setEnabled(True)
-        status = "处理完成"
+        label = self._processing_label(result.processing_spec)
+        self.waveform.set_processed(segment.raw, segment.start_sec, label)
+        status = f"处理完成 · {label}"
         if result.warnings:
             status += " · ⚠ " + "；".join(result.warnings)
         self.statusChanged.emit(status)
 
+    @staticmethod
+    def _processing_label(processing) -> str:
+        band = (
+            f"{processing.bandpass_low_hz:g}–{processing.bandpass_high_hz:g} Hz"
+            f" / {processing.target_sfreq:g} Hz"
+        )
+        if processing.method == ProcessingMethod.BASIC:
+            return f"基础处理 · {band}"
+        if processing.method == ProcessingMethod.ICA:
+            components = processing.ica_n_components or "自动"
+            return (
+                f"ICA · 组件 {components} · "
+                f"阈值 {processing.ica_artifact_corr_threshold:g} · {band}"
+            )
+        label = (
+            f"ECMAD {processing.wiener_mode.value} · "
+            f"coherence {processing.coherence_threshold:g}"
+        )
+        if processing.channel_groups is not None:
+            label += f" · 导联组 {len(processing.channel_groups)}"
+        if processing.wiener_mode != WienerMode.FREQUENCY:
+            label += f" · gate {processing.phase_gate_threshold_rad:g} rad"
+        return f"{label} · {band}"
+
     def _preview_failed(self, message: str):
-        self._set_busy(False)
         self._task_failed(message)
 
     def _task_cancelled(self, message: str):
-        self._set_busy(False)
         super()._task_cancelled(message)
 
     def export_result(self):
@@ -331,11 +462,9 @@ class PreviewPage(ThreadedPage):
         self._set_busy(True)
         worker = ExportWorker(jobs, fmt)
         worker.progress.connect(self._progress_changed)
-        if not self._start_worker(worker, self._exported, self._preview_failed):
-            self._set_busy(False)
+        self._start_worker(worker, self._exported, self._preview_failed)
 
     def _exported(self, paths):
-        self._set_busy(False)
         self.statusChanged.emit(f"已导出 {len(paths)} 个文件")
 
 

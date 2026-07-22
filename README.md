@@ -35,9 +35,26 @@ extraction, standard ICA, and ECMAD's frequency/phasegated/zerophase Wiener
 modes. The Python package and executable entry point retain the compatible
 internal names `eeg_bg` and `eeg_bg_studio`.
 
+Interactive raw and processed waveforms use one shared vertical gain and fixed
+channel spacing derived once from the source recording. Both panels are linked
+for Y-axis navigation and apply per-channel display-only smooth baseline
+centering from 20-second median anchors; this does not modify processing inputs
+or exported EEG data.
+
 EEGLAB `.set` recordings may store samples in a paired `.fdt` file. Keep the
 matching `.set` and `.fdt` files in the same directory; select the `.set` file
 in interactive preview, or scan their parent directory in batch processing.
+When BIDS-style `*_eeg.json`, `*_channels.tsv`, `*_events.tsv`,
+`*_electrodes.tsv`, and `*_coordsystem.json` sidecars are present, interactive
+preview loads them automatically and provides event-type/code navigation on the
+EEG timeline. For ERP-CORE ERN recordings with FCz and valid stimulus/response
+events, **打开 ERN 三方法叠加** computes a response-locked Raw/ICA/ECMAD
+comparison from the current filter, sampling, explicit ICA-component, and ECMAD
+parameters. Standard ICA component detection remains the script 10 FP1/FP2
+automatic EOG method. The modeless
+window follows script 10's standard ICA and shared-trial method: `-600..400 ms` epochs,
+`-400..-200 ms` baseline, common rejection decisions, incorrect-trial FCz mean,
+and the incorrect-minus-correct difference wave with trial-SD bands.
 
 ```bash
 conda run -n eeg_pipeline pip install -r requirements-gui.txt

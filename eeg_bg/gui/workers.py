@@ -6,6 +6,7 @@ import threading
 from PySide6.QtCore import QObject, Signal, Slot
 
 from eeg_bg.application.batch import BatchProcessor, scan_recordings
+from eeg_bg.application.ern_comparison import ErnComparisonService
 from eeg_bg.application.models import (
     ArtifactSettings,
     ExtractionSpec,
@@ -71,6 +72,28 @@ class ProcessWorker(BaseWorker):
                 self.path,
                 self.processing,
                 self.extraction,
+                cancel_requested=self.is_cancelled,
+                progress=lambda a, b, c: self.progress.emit(a, b, c),
+            )
+            self.finished.emit(result)
+        except ProcessingCancelled as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ErnComparisonWorker(BaseWorker):
+    def __init__(self, path: Path, processing: ProcessingSpec):
+        super().__init__()
+        self.path = path
+        self.processing = processing
+
+    @Slot()
+    def run(self):
+        try:
+            result = ErnComparisonService().compare(
+                self.path,
+                self.processing,
                 cancel_requested=self.is_cancelled,
                 progress=lambda a, b, c: self.progress.emit(a, b, c),
             )

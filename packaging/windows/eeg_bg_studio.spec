@@ -9,6 +9,7 @@ icon_path = ROOT / "packaging" / "windows" / "eeg_bg_studio.ico"
 
 datas = collect_data_files("mne")
 datas += [(str(ROOT / "configs" / "default.yaml"), "configs")]
+datas += [(str(ROOT / "configs" / "erp_core_flankers.yaml"), "configs")]
 hiddenimports = collect_submodules("mne", on_error="ignore")
 hiddenimports += [
     "edfio",

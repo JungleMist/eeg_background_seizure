@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QLabel,
+    QPushButton,
     QStyle,
     QStyleOptionSpinBox,
     QSpinBox,
@@ -27,6 +28,7 @@ from eeg_bg.application.models import (
 )
 
 from .branding import SETTINGS_APPLICATION, SETTINGS_ORGANIZATION
+from .channel_groups import ChannelGroupEditorDialog, ChannelGroupPresetStore
 from .theme import COLORS
 
 
@@ -113,12 +115,14 @@ class LargeStepSpinBox(_LargeStepperMixin, QSpinBox):
 
 class ParameterPanel(QWidget):
     parametersChanged = Signal()
+    currentWindowRequested = Signal()
 
     def __init__(
         self,
         *,
         allow_selection: bool,
         artifact_store: ArtifactSettingsStore | None = None,
+        channel_group_presets: ChannelGroupPresetStore | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -130,6 +134,11 @@ class ParameterPanel(QWidget):
         self.artifact_store = artifact_store or ArtifactSettingsStore(
             QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION), self
         )
+        self.channel_group_presets = channel_group_presets
+        if allow_selection and self.channel_group_presets is None:
+            self.channel_group_presets = ChannelGroupPresetStore(
+                QSettings(SETTINGS_ORGANIZATION, SETTINGS_APPLICATION), self
+            )
         global_group = QGroupBox("全局设置")
         self.global_form = QFormLayout(global_group)
         self.artifact_enabled = QCheckBox("启用伪迹阈值")
@@ -151,11 +160,19 @@ class ParameterPanel(QWidget):
         self.extraction_mode.addItem("完整长序列", ExtractionMode.CONTINUOUS)
         self.start_sec = self._double(0.0, 864000.0, 0.1, 0.0, 2)
         self.stop_sec = self._double(0.0, 864000.0, 0.1, 20.0, 2)
+        self.current_window_button = QPushButton("当前窗口")
+        self.current_window_button.setToolTip(
+            "使用波形图当前可见的时间范围作为交互选区"
+        )
+        self.current_window_button.setAccessibleName("使用当前可见窗口作为选区")
+        self.current_window_button.clicked.connect(self.currentWindowRequested)
+        self._current_window_available = False
         self.window_sec = self._double(4.0, 600.0, 1.0, 20.0, 1)
         self.extraction_form.addRow("提取方式", self.extraction_mode)
         if allow_selection:
             self.extraction_form.addRow("起点 (s)", self.start_sec)
             self.extraction_form.addRow("终点 (s)", self.stop_sec)
+            self.extraction_form.addRow("快捷范围", self.current_window_button)
         self.extraction_form.addRow("固定分段长度 (s)", self.window_sec)
         layout.addWidget(extraction_group)
 
@@ -189,12 +206,22 @@ class ParameterPanel(QWidget):
         self.coherence = self._double(0.0, 1.0, 0.01, 0.15, 2)
         self.gate = self._double(0.0, 3.14, 0.01, 0.39, 2)
         self.gate.setToolTip("单位为弧度；3.14 会映射为精确 π")
+        self.channel_groups_button = QPushButton("加载 EEG 后编辑")
+        self.channel_groups_button.setAccessibleName("编辑 ECMAD 导联组")
+        self.channel_groups_button.setToolTip(
+            "使用当前 EEG 存在的导联编辑 ECMAD 传导路径"
+        )
+        self.channel_groups_button.clicked.connect(self.open_channel_group_editor)
+        self._available_channels: tuple[str, ...] = ()
+        self._channel_groups: tuple[tuple[str, ...], ...] = ()
         self.method_form.addRow("处理方法", self.method)
         self.method_form.addRow("ICA 组件", self.ica_components)
         self.method_form.addRow("ICA 相关阈值", self.ica_threshold)
         self.method_form.addRow("ECMAD 模式", self.wiener_mode)
         self.method_form.addRow("coherence", self.coherence)
         self.method_form.addRow("gate (rad)", self.gate)
+        if allow_selection:
+            self.method_form.addRow("导联组", self.channel_groups_button)
         layout.addWidget(method_group)
 
         self.hint = QLabel()
@@ -299,6 +326,12 @@ class ParameterPanel(QWidget):
         if self.allow_selection:
             self._set_row_visible(self.extraction_form, self.start_sec, selection)
             self._set_row_visible(self.extraction_form, self.stop_sec, selection)
+            self._set_row_visible(
+                self.extraction_form, self.current_window_button, selection
+            )
+            self.current_window_button.setEnabled(
+                selection and self._current_window_available
+            )
         self._set_row_visible(self.extraction_form, self.window_sec, fixed)
         self._set_row_visible(
             self.base_form,
@@ -310,6 +343,13 @@ class ParameterPanel(QWidget):
         self._set_row_visible(self.method_form, self.ica_threshold, is_ica)
         self._set_row_visible(self.method_form, self.wiener_mode, is_wiener)
         self._set_row_visible(self.method_form, self.coherence, is_wiener)
+        if self.allow_selection:
+            self._set_row_visible(
+                self.method_form, self.channel_groups_button, is_wiener
+            )
+            self.channel_groups_button.setEnabled(
+                is_wiener and len(self._available_channels) >= 2
+            )
         self._set_row_visible(
             self.method_form,
             self.gate,
@@ -359,10 +399,52 @@ class ParameterPanel(QWidget):
         self.start_sec.blockSignals(False)
         self.stop_sec.blockSignals(False)
 
+    def set_current_window_available(self, available: bool) -> None:
+        self._current_window_available = bool(available)
+        self._sync_visibility()
+
+    def set_channel_context(
+        self,
+        channels: list[str] | tuple[str, ...],
+        default_groups: list[list[str]] | tuple[tuple[str, ...], ...],
+    ) -> None:
+        self._available_channels = tuple(dict.fromkeys(channels))
+        available = set(self._available_channels)
+        self._channel_groups = tuple(
+            tuple(group)
+            for group in default_groups
+            if len(group) >= 2 and all(channel in available for channel in group)
+        )
+        self._update_channel_group_button()
+        self._sync_visibility()
+
+    def open_channel_group_editor(self) -> None:
+        if len(self._available_channels) < 2:
+            return
+        dialog = ChannelGroupEditorDialog(
+            self._available_channels,
+            self._channel_groups,
+            preset_store=self.channel_group_presets,
+            parent=self,
+        )
+        if dialog.exec():
+            self._channel_groups = dialog.groups()
+            self._update_channel_group_button()
+            self.parametersChanged.emit()
+
+    def _update_channel_group_button(self) -> None:
+        if not self._available_channels:
+            self.channel_groups_button.setText("加载 EEG 后编辑")
+            return
+        count = len(self._channel_groups)
+        text = f"编辑（{count} 组）" if count else "编辑（尚未配置）"
+        self.channel_groups_button.setText(text)
+
     def processing_spec(self) -> ProcessingSpec:
         components = self.ica_components.value()
+        method = ProcessingMethod(self.method.currentData())
         return ProcessingSpec(
-            method=ProcessingMethod(self.method.currentData()),
+            method=method,
             bandpass_low_hz=self.low_hz.value(),
             bandpass_high_hz=self.high_hz.value(),
             target_sfreq=self.sfreq.value(),
@@ -372,6 +454,11 @@ class ParameterPanel(QWidget):
             wiener_mode=WienerMode(self.wiener_mode.currentData()),
             coherence_threshold=self.coherence.value(),
             phase_gate_threshold_rad=self.gate.value(),
+            channel_groups=(
+                self._channel_groups
+                if self.allow_selection and method == ProcessingMethod.WIENER
+                else None
+            ),
         )
 
     def extraction_spec(self) -> ExtractionSpec:

@@ -10,6 +10,10 @@ COLORS = {
     "muted": "#8FA4B7",
     "raw": "#21B8A6",
     "processed": "#4B8DFF",
+    "erp_raw": "#A7B0B9",
+    "erp_ica": "#4B8DFF",
+    "erp_wiener": "#F29D49",
+    "erp_window": "#C7D0D9",
     "warning": "#F4B860",
     "danger": "#FF6B6B",
     "success": "#52C98B",
@@ -137,7 +141,7 @@ def stylesheet() -> str:
         text-align: center;
     }}
     QProgressBar::chunk {{ background: {c['raw']}; border-radius: 4px; }}
-    QTableWidget {{
+    QTableWidget, QListWidget {{
         background: {c['surface']}; alternate-background-color: #101923;
         border: 1px solid {c['border']}; border-radius: 7px;
         gridline-color: {c['border']}; selection-background-color: #1D3A52;
