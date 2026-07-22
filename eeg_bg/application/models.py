@@ -86,10 +86,20 @@ class ProcessingSpec:
     wiener_mode: WienerMode = WienerMode.FREQUENCY
     coherence_threshold: float = 0.15
     phase_gate_threshold_rad: float = 0.39
+    channel_groups: tuple[tuple[str, ...], ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "method", ProcessingMethod(self.method))
         object.__setattr__(self, "wiener_mode", WienerMode(self.wiener_mode))
+        if self.channel_groups is not None:
+            object.__setattr__(
+                self,
+                "channel_groups",
+                tuple(
+                    tuple(str(channel) for channel in group)
+                    for group in self.channel_groups
+                ),
+            )
 
     def validate(self) -> None:
         values = (
@@ -112,6 +122,16 @@ class ProcessingSpec:
             raise ValueError("coherence 必须位于 [0, 1]")
         if not math.isfinite(self.phase_gate_threshold_rad) or not 0.0 <= self.phase_gate_threshold_rad <= 3.14:
             raise ValueError("gate 必须位于 [0, π]")
+        if self.method == ProcessingMethod.WIENER and self.channel_groups is not None:
+            if not self.channel_groups:
+                raise ValueError("ECMAD 至少需要一个导联组")
+            for index, group in enumerate(self.channel_groups, start=1):
+                if len(group) < 2:
+                    raise ValueError(f"导联组 G{index} 至少需要两个导联")
+                if any(not channel.strip() for channel in group):
+                    raise ValueError(f"导联组 G{index} 包含空导联名")
+                if len(set(group)) != len(group):
+                    raise ValueError(f"导联组 G{index} 不能包含重复导联")
 
     @property
     def effective_phase_gate_rad(self) -> float:
@@ -125,6 +145,8 @@ class ProcessingSpec:
         payload["method"] = self.method.value
         payload["wiener_mode"] = self.wiener_mode.value
         payload["phase_gate_threshold_rad"] = self.effective_phase_gate_rad
+        if self.channel_groups is not None:
+            payload["channel_groups"] = [list(group) for group in self.channel_groups]
         return payload
 
     def as_fingerprint_dict(self) -> dict[str, Any]:
@@ -144,6 +166,7 @@ class ProcessingSpec:
             payload.update({
                 "wiener_mode": self.wiener_mode.value,
                 "coherence_threshold": self.coherence_threshold,
+                "channel_groups": self.channel_groups,
             })
             if self.wiener_mode != WienerMode.FREQUENCY:
                 payload["phase_gate_threshold_rad"] = self.effective_phase_gate_rad
@@ -170,6 +193,26 @@ def pipeline_fingerprint(processing: ProcessingSpec, extraction: ExtractionSpec)
 
 
 @dataclass
+class RecordingEvent:
+    onset_sec: float
+    duration_sec: float = 0.0
+    sample: int | None = None
+    trial_type: str = ""
+    value: str = ""
+    fields: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class RecordingSidecars:
+    eeg: dict[str, Any] = field(default_factory=dict)
+    channels: list[dict[str, str]] = field(default_factory=list)
+    events: list[RecordingEvent] = field(default_factory=list)
+    electrodes: list[dict[str, str]] = field(default_factory=list)
+    coordsystem: dict[str, Any] = field(default_factory=dict)
+    paths: dict[str, Path] = field(default_factory=dict)
+
+
+@dataclass
 class RecordingInfo:
     path: Path
     format: str
@@ -178,6 +221,7 @@ class RecordingInfo:
     duration_sec: float
     n_times: int
     warnings: list[str] = field(default_factory=list)
+    sidecars: RecordingSidecars = field(default_factory=RecordingSidecars)
 
 
 @dataclass

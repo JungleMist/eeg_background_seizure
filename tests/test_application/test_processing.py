@@ -142,6 +142,21 @@ def test_short_basic_selection_is_allowed(synthetic_fif):
     assert result.preview_raw.n_times == 125
 
 
+def test_custom_ecmad_channel_groups_override_default_config():
+    engine = ProcessingEngine()
+    spec = ProcessingSpec(
+        method=ProcessingMethod.WIENER,
+        channel_groups=(("FP1", "FP2", "Fz"), ("C3", "C4")),
+    )
+
+    cfg = engine.build_config(spec, n_channels=19)
+
+    assert cfg["channels"]["channel_groups"] == [
+        ["FP1", "FP2", "Fz"],
+        ["C3", "C4"],
+    ]
+
+
 def test_processing_honours_cancellation_before_loading(synthetic_fif):
     with pytest.raises(ProcessingCancelled):
         ProcessingEngine().process(

@@ -72,6 +72,10 @@ class ProcessingEngine:
                 int(round(spec.analysis_window_sec * spec.target_sfreq)),
             ),
         )
+        if spec.channel_groups is not None:
+            cfg["channels"]["channel_groups"] = [
+                list(group) for group in spec.channel_groups
+            ]
         auto_components = max(1, min(19, n_channels - 1))
         cfg["ica"]["n_components"] = min(
             int(spec.ica_n_components or auto_components), auto_components

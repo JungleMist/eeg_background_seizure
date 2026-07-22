@@ -19,6 +19,10 @@ def test_recording_format_accepts_edf_fif_and_eeglab_set():
 def test_eeglab_set_uses_eeglab_reader_and_marks_eog(monkeypatch, tmp_path):
     path = tmp_path / "subject.set"
     path.write_bytes(b"placeholder")
+    (tmp_path / "subject_events.tsv").write_text(
+        "onset\tduration\ttrial_type\tvalue\n1.5\t0.2\tstimulus\t11\n",
+        encoding="utf-8",
+    )
     raw = mne.io.RawArray(
         [[0.0] * 100, [0.0] * 100],
         mne.create_info(["FP1", "HEOG_left"], 100.0, ch_types="eeg"),
@@ -36,6 +40,8 @@ def test_eeglab_set_uses_eeglab_reader_and_marks_eog(monkeypatch, tmp_path):
     assert calls == [(str(path), False, False)]
     assert info.format == "set"
     assert info.ch_names == ["FP1"]
+    assert len(info.sidecars.events) == 1
+    assert info.sidecars.events[0].value == "11"
 
 
 def test_eeglab_set_reports_missing_fdt(monkeypatch, tmp_path):

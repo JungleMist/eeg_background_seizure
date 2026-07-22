@@ -85,3 +85,33 @@ def test_specs_normalize_string_backed_enum_values():
     assert extraction.mode is ExtractionMode.CONTINUOUS
     assert processing.as_serializable_dict()["method"] == "basic"
     assert extraction.as_serializable_dict()["mode"] == "continuous"
+
+
+def test_ecmad_channel_groups_are_normalized_validated_and_fingerprinted():
+    first = ProcessingSpec(
+        method=ProcessingMethod.WIENER,
+        channel_groups=[["FP1", "FP2"], ["F7", "T3", "T5"]],
+    )
+    second = ProcessingSpec(
+        method=ProcessingMethod.WIENER,
+        channel_groups=[["FP1", "Fz"]],
+    )
+
+    first.validate()
+    assert first.channel_groups == (("FP1", "FP2"), ("F7", "T3", "T5"))
+    assert first.as_serializable_dict()["channel_groups"] == [
+        ["FP1", "FP2"],
+        ["F7", "T3", "T5"],
+    ]
+    assert first.fingerprint != second.fingerprint
+
+    with pytest.raises(ValueError, match="至少需要一个导联组"):
+        ProcessingSpec(
+            method=ProcessingMethod.WIENER,
+            channel_groups=[],
+        ).validate()
+    with pytest.raises(ValueError, match="G1"):
+        ProcessingSpec(
+            method=ProcessingMethod.WIENER,
+            channel_groups=[["FP1"]],
+        ).validate()

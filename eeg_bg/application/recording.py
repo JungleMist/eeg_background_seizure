@@ -8,6 +8,7 @@ import mne
 import numpy as np
 
 from .models import OutputFormat, RecordingInfo
+from .sidecars import read_recording_sidecars
 
 
 SUPPORTED_SUFFIXES = (".edf", ".fif", ".fif.gz", ".set")
@@ -101,6 +102,7 @@ class RecordingService:
     def inspect(self, path: str | Path) -> RecordingInfo:
         raw = self.open_raw(path, preload=False)
         warnings = self._prepare_eeg_channels(raw)
+        sidecars, sidecar_warnings = read_recording_sidecars(path)
         return RecordingInfo(
             path=Path(path).resolve(),
             format=recording_format(path),
@@ -108,7 +110,8 @@ class RecordingService:
             sfreq=float(raw.info["sfreq"]),
             duration_sec=float(raw.n_times / raw.info["sfreq"]),
             n_times=int(raw.n_times),
-            warnings=warnings,
+            warnings=warnings + sidecar_warnings,
+            sidecars=sidecars,
         )
 
     def load_eeg(self, path: str | Path, *, preload: bool = True):
