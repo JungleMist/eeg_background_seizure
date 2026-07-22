@@ -10,7 +10,7 @@ import numpy as np
 from .models import OutputFormat, RecordingInfo
 
 
-SUPPORTED_SUFFIXES = (".edf", ".fif", ".fif.gz")
+SUPPORTED_SUFFIXES = (".edf", ".fif", ".fif.gz", ".set")
 
 
 def _normalize_channel_name(raw_name: str) -> str:
@@ -28,6 +28,8 @@ def recording_format(path: str | Path) -> str:
         return "edf"
     if name.endswith(".fif") or name.endswith(".fif.gz"):
         return "fif"
+    if name.endswith(".set"):
+        return "set"
     raise ValueError(f"不支持的 EEG 文件格式：{Path(path).name}")
 
 
@@ -54,7 +56,23 @@ class RecordingService:
             raise FileNotFoundError(f"EEG 文件不存在：{path}")
         if fmt == "edf":
             return mne.io.read_raw_edf(str(path), preload=preload, verbose=False)
-        return mne.io.read_raw_fif(str(path), preload=preload, verbose=False)
+        if fmt == "fif":
+            return mne.io.read_raw_fif(str(path), preload=preload, verbose=False)
+        try:
+            raw = mne.io.read_raw_eeglab(str(path), preload=preload, verbose=False)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "EEGLAB .set 引用的 .fdt 数据文件缺失；"
+                "请将原始 .set 与 .fdt 文件放在同一目录后重试"
+            ) from exc
+        eog_types = {
+            channel: "eog"
+            for channel in raw.ch_names
+            if "EOG" in channel.upper()
+        }
+        if eog_types:
+            raw.set_channel_types(eog_types, verbose=False)
+        return raw
 
     def _prepare_eeg_channels(self, raw) -> list[str]:
         warnings: list[str] = []
