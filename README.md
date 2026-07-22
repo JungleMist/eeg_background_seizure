@@ -1,6 +1,11 @@
-# EEG Background Seizure — Wiener Feature Engineering Framework
+# ECMAD — EEG Channel Matrix Adaptive Denoiser
 
-A research framework for studying **physical point-source Wiener decomposition** of background EEG as a feature engineering method. Scripts 01–07 support both the TUH EEG Epilepsy Corpus (TUEP) and TUH Abnormal EEG Corpus (TUAB).
+**EEG Channel Matrix Adaptive Denoiser (ECMAD)** is an EEG denoising framework
+that estimates and removes shared physical/artifact components across
+anatomically motivated channel matrices while preserving locally generated EEG.
+Its current core implementation uses channel-group matrix-adaptive vector Wiener
+decomposition. Scripts 01–07 support both the TUH EEG Epilepsy Corpus (TUEP) and
+TUH Abnormal EEG Corpus (TUAB) as downstream evaluation tracks.
 
 ---
 
@@ -20,12 +25,19 @@ A research framework for studying **physical point-source Wiener decomposition**
 
 ---
 
-## eeg_bg Studio
+## ECMAD Studio (`eeg_bg_studio`)
 
-The repository includes a Chinese PySide6 desktop application for interactive
-EEG preprocessing. It supports EDF/FIF input, EDF/FIF output, synchronized raw
-and processed waveform inspection, fixed-window or continuous extraction,
-standard ICA, and the frequency/phasegated/zerophase Wiener modes.
+The repository includes **ECMAD Studio**, a Chinese PySide6 desktop application
+for interactive ECMAD denoising and EEG preprocessing. It supports
+EDF/FIF/EEGLAB SET input, EDF/FIF output,
+synchronized raw and processed waveform inspection, fixed-window or continuous
+extraction, standard ICA, and ECMAD's frequency/phasegated/zerophase Wiener
+modes. The Python package and executable entry point retain the compatible
+internal names `eeg_bg` and `eeg_bg_studio`.
+
+EEGLAB `.set` recordings may store samples in a paired `.fdt` file. Keep the
+matching `.set` and `.fdt` files in the same directory; select the `.set` file
+in interactive preview, or scan their parent directory in batch processing.
 
 ```bash
 conda run -n eeg_pipeline pip install -r requirements-gui.txt
@@ -65,7 +77,11 @@ Use `configs/default.yaml` for TUEP and `configs/tuab.yaml` for TUAB. The two co
 
 ## Research Hypothesis
 
-Inter-channel coherent components in background EEG arise from **non-neural physical interference** — volume conduction, reference electrode contamination, and shared environmental noise. Removing these via a frequency-dependent vector Wiener filter reveals the **specific** (locally generated, cortical) signal component.
+ECMAD models inter-channel coherent components in background EEG as
+**non-neural physical interference** — volume conduction, reference electrode
+contamination, and shared environmental noise. Removing these through its
+frequency-dependent vector Wiener implementation reveals the **specific**
+(locally generated, cortical) signal component.
 
 **Decomposition identity (exact):**
 

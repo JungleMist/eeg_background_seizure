@@ -1,15 +1,17 @@
 # AGENTS.md
 
 This file provides guidance to ZCode / Claude Code agents working with this repository.
-Last updated: 2026-07-16.
+Last updated: 2026-07-22.
 
 ## Project identity and research scope
 
 - The local repository and GitHub repository are both named **`eeg_wiener_decomposition`**. The `origin` remote is `git@github.com:JungleMist/eeg_wiener_decomposition.git`.
-- The primary research question is **EEG denoising by Wiener decomposition**: remove shared physical/artifact components while preserving physiologically meaningful, locally generated EEG. Epilepsy/abnormality classification is an evaluation instrument, not the project identity or final scientific objective.
+- The EEG denoising scheme is named **EEG Channel Matrix Adaptive Denoiser (ECMAD)**. Use **ECMAD** in research- and user-facing descriptions; identify the current core algorithm as channel-group matrix-adaptive vector Wiener decomposition. Keep established implementation identifiers such as `wiener`, `wiener_frequency`, and `WienerMode` unchanged for code, configuration, cache, and result compatibility.
+- The primary research question is **EEG denoising with ECMAD**: remove shared physical/artifact components while preserving physiologically meaningful, locally generated EEG. Epilepsy/abnormality classification is an evaluation instrument, not the project identity or final scientific objective.
 - The established evaluation track uses TUEP/TUAB downstream performance. Scripts 01–07 compare Raw, ICA, and Wiener variants with XGBoost/SHAP; script 08 adds a TUEP-only EEGNet comparison. AUROC/F1/accuracy quantify whether denoising preserves or improves task-relevant information, but they are indirect denoising metrics.
 - A direct signal-quality track is now being added with ERP-CORE Flankers. The current working tree contains an initial script 10 implementation comparing Raw, standard ICA, and Wiener on response-locked ERN/LRP signals. This track reports ERP SNR, waveform preservation, peak amplitude/latency, baseline noise, and related diagnostics, with trial classification retained only as a secondary measure.
 - Future evaluation work should keep these two tracks conceptually separate: **downstream utility on TUEP/TUAB** and **direct ERP denoising/signal preservation on ERP-CORE**. Do not describe the repository as merely a seizure or abnormal-EEG classifier.
+- The PySide6 desktop frontend is branded **ECMAD Studio**. Its visible title, navigation identity, and Wiener-processing labels should use ECMAD, while the internal package and executable entry points remain `eeg_bg` / `eeg_bg_studio` unless a separate compatibility-breaking rename is explicitly requested.
 
 ## Environment
 
