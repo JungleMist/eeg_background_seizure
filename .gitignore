@@ -9,6 +9,7 @@ __pycache__/
 .claude/
 .zcode/
 /.vscode
+/.idea/
 .DS_Store
 .Rhistory
 configs/local*.yaml
