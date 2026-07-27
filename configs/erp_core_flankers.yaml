@@ -51,6 +51,26 @@ erp_core:
     tmax: 0.2
     decim: 4
     random_state: 42
+  phase_search:
+    output_dir: results/erp_core_ern_phase_search
+    cache_subdir: erp_core_ern_phase_search
+    metric: auroc
+    test_size: 0.2
+    cv_folds: 5
+    random_state: 42
+    phase_start: 0.0
+    phase_stop: 3.141592653589793
+    phase_step: 0.1
+    random_search_iterations: 50
+    device: cpu
+    baseline_xgboost:
+      max_depth: 4
+      learning_rate: 0.05
+      n_estimators: 200
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_alpha: 0.1
+      reg_lambda: 1.0
   visualization:
     segment_start_sec: 60.0
     segment_duration_sec: 10.0

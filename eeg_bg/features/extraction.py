@@ -27,6 +27,7 @@ and their own unit tests remain in the codebase, untouched, for future use.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,7 +39,12 @@ from tqdm import tqdm
 from eeg_bg.features.band_power import relative_band_power, BANDS
 from eeg_bg.features.hjorth import hjorth_parameters
 from eeg_bg.features.spectral_entropy import spectral_entropy as _spectral_entropy
-from eeg_bg.features.asymmetry import hemispheric_asymmetry, ASYMMETRY_NAMES
+from eeg_bg.features.asymmetry import (
+    ASYMMETRY_NAMES,
+    SYMMETRIC_PAIRS,
+    build_asymmetry_names,
+    hemispheric_asymmetry,
+)
 from eeg_bg.features._constants import _STANDARD_19
 
 # Feature name suffixes in inner-loop order
@@ -58,6 +64,18 @@ FEATURE_NAMES: list[str] = (
     ]
     + ASYMMETRY_NAMES
 )  # length == 211
+
+
+def build_feature_names(
+    channel_order: Sequence[str],
+    symmetric_pairs: Sequence[tuple[str, str]],
+) -> list[str]:
+    """Build feature names for a 9-per-channel plus asymmetry layout."""
+    return [
+        f"{ch}_{suffix}"
+        for ch in channel_order
+        for suffix in _FEAT_SUFFIXES
+    ] + build_asymmetry_names(symmetric_pairs)
 
 # Cache subdirectory names keyed by condition label
 _CONDITION_TO_SUBDIR: dict[str, str] = {
@@ -133,6 +151,33 @@ def extract_epoch_features(
         First 171 entries are per-channel statistics; last 40 are hemispheric
         asymmetry features.
     """
+    return extract_epoch_features_for_layout(
+        epoch,
+        ch_names,
+        sfreq,
+        channel_order=_STANDARD_19,
+        symmetric_pairs=SYMMETRIC_PAIRS,
+        nperseg=nperseg,
+        freq_band=freq_band,
+    )
+
+
+def extract_epoch_features_for_layout(
+    epoch: np.ndarray,
+    ch_names: list[str],
+    sfreq: float,
+    channel_order: Sequence[str],
+    symmetric_pairs: Sequence[tuple[str, str]],
+    nperseg: int = 250,
+    freq_band: tuple[float, float] = (0.5, 40.0),
+) -> np.ndarray:
+    """Extract the standard feature blocks for an explicit channel layout.
+
+    The output contains nine features per channel followed by five
+    band-asymmetry values per ordered left/right pair.  The legacy
+    :func:`extract_epoch_features` wrapper continues to provide the fixed
+    TUEP/TUAB 211-dimensional layout.
+    """
     # O(1) channel lookup — avoids O(n) list.index() inside the loop.
     ch_map = {name: i for i, name in enumerate(ch_names)}
 
@@ -142,10 +187,10 @@ def extract_epoch_features(
     # welch() is called at most once per unique channel per epoch.
     psd_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
-    for ch in _STANDARD_19:
+    for ch in channel_order:
         idx = ch_map.get(ch)
         if idx is None:
-            # Channel absent — fill with zeros so vector length is always 211
+            # Channel absent — preserve the configured layout with zero fill.
             features.extend([0.0] * len(_FEAT_SUFFIXES))
             continue
 
@@ -173,7 +218,8 @@ def extract_epoch_features(
     # use the PSDs already computed above instead of calling welch() again.
     asym = hemispheric_asymmetry(epoch, ch_names, sfreq=sfreq,
                                   nperseg=nperseg, freq_band=freq_band,
-                                  psd_cache=psd_cache)
+                                  psd_cache=psd_cache,
+                                  pairs=symmetric_pairs)
     return np.concatenate(
         [np.asarray(features, dtype=np.float64), asym]
     ).astype(np.float64)

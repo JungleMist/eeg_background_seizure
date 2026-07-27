@@ -13,6 +13,8 @@ dominates.  Zero-padded when either electrode in a pair is absent.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
 from eeg_bg.features.band_power import relative_band_power, BANDS
@@ -39,6 +41,17 @@ ASYMMETRY_NAMES: list[str] = [
 ]  # length == 40
 
 
+def build_asymmetry_names(
+    pairs: Sequence[tuple[str, str]],
+) -> list[str]:
+    """Build stable feature names for an ordered set of channel pairs."""
+    return [
+        f"asym_{left}_{right}_{band}"
+        for left, right in pairs
+        for band in BANDS
+    ]
+
+
 def hemispheric_asymmetry(
     epoch: np.ndarray,
     ch_names: list[str],
@@ -46,6 +59,7 @@ def hemispheric_asymmetry(
     nperseg: int = 250,
     freq_band: tuple[float, float] = (0.5, 40.0),
     psd_cache: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+    pairs: Sequence[tuple[str, str]] = SYMMETRIC_PAIRS,
 ) -> np.ndarray:
     """Compute a 40-dimensional hemispheric asymmetry vector.
 
@@ -67,17 +81,20 @@ def hemispheric_asymmetry(
         redundant ``welch()`` calls when this function is called as part of a
         larger feature extraction loop.  If ``None`` (default), PSDs are
         computed on demand.
+    pairs : sequence of (str, str)
+        Ordered left/right channel pairs.  Defaults to
+        :data:`SYMMETRIC_PAIRS`.
 
     Returns
     -------
     np.ndarray
-        Shape ``(40,)``, dtype float64.  Feature order matches
-        :data:`ASYMMETRY_NAMES`.  Any pair where one or both electrodes are
-        absent yields five zeros (one per band).
+        Shape ``(5 * len(pairs),)``, dtype float64.  With the default pairs,
+        feature order matches :data:`ASYMMETRY_NAMES`.  Any pair where one or
+        both electrodes are absent yields five zeros (one per band).
     """
     ch_map = {name: i for i, name in enumerate(ch_names)}
     features: list[float] = []
-    for left, right in SYMMETRIC_PAIRS:
+    for left, right in pairs:
         left_idx  = ch_map.get(left)
         right_idx = ch_map.get(right)
         if left_idx is None or right_idx is None:
