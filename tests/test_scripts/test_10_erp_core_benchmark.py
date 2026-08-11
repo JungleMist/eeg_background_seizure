@@ -8,15 +8,13 @@ import pandas as pd
 
 SCRIPT_PATH = Path("scripts/10_benchmark_erp_core_flankers.py")
 EXPECTED_CHANNEL_GROUPS = [
-    ["FCz", "Cz", "Fz", "FC3", "FC4"],
-    ["FC3", "C3", "C5", "P3"],
-    ["FC4", "C4", "C6", "P4"],
-    ["P7", "P8", "P9", "P10", "PO3", "PO4", "PO7", "PO8", "O1", "O2", "Oz"],
-    ["Pz", "CPz", "FCz", "Cz"],
+    ["FP1", "F3", "F7", "FCz", "Fz", "FP2", "F4", "F8"],
+    ["F3", "C3", "C5", "P3", "FC3"],
+    ["F4", "C4", "C6", "P4", "FC4"],
+    ["P7", "P8", "PO3", "PO4", "PO7", "PO8", "O1", "O2"],
+    ["Cz", "CPz", "Oz", "Pz"],
 ]
-EXPECTED_PASSTHROUGH = [
-    "FP1", "F3", "F7", "FP2", "F4", "F8",
-]
+EXPECTED_PASSTHROUGH = ["P9", "P10"]
 
 
 def _load_script():

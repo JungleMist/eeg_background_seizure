@@ -21,8 +21,8 @@ channels:
     - [ F3, C3, C5, P3, FC3 ]                         # G2: 左前-中央
     - [ F4, C4, C6, P4, FC4 ]                         # G3: 右前-中央
     - [ P7, P8, PO3, PO4, PO7, PO8, O1, O2 ]          # G4: 枕区
-    - [ Cz, CPz, Oz, Pz ]                             # G5: 中央顶（占位，无通道）
-  passthrough: [FP1, F3, F7, FP2, F4, F8]
+    - [ Cz, CPz, Oz, Pz ]                             # G5: 中央-顶枕
+  passthrough: [P9, P10]
 
 wiener:
   mode: phasegated
