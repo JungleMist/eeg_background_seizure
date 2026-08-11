@@ -4,6 +4,7 @@ extends: default.yaml
 # defaults are inherited from default.yaml; only dataset-specific sampling,
 # passband, and channel-name mappings are changed here.
 paths:
+  cache_dir: cache
   results_dir: results/erp_core_flankers
 
 preprocessing:
@@ -16,15 +17,18 @@ preprocessing:
 # Only EEG channels absent from every group pass through unchanged.
 channels:
   channel_groups:
-    - [FCz, Cz, Fz, FC3, FC4]
-    - [FC3, C3, C5, P3]
-    - [FC4, C4, C6, P4]
-    - [P7, P8, P9, P10, PO3, PO4, PO7, PO8, O1, O2, Oz]
-    - [Pz, CPz, FCz, Cz]
+    - [ FP1, F3, F7, FCz, Fz, FP2, F4, F8 ]           # G1: 前额
+    - [ F3, C3, C5, P3, FC3 ]                         # G2: 左前-中央
+    - [ F4, C4, C6, P4, FC4 ]                         # G3: 右前-中央
+    - [ P7, P8, PO3, PO4, PO7, PO8, O1, O2 ]          # G4: 枕区
+    - [ Cz, CPz, Oz, Pz ]                             # G5: 中央顶（占位，无通道）
   passthrough: [FP1, F3, F7, FP2, F4, F8]
 
 wiener:
+  mode: phasegated
+  phase_gate_threshold_rad: 0.050
   freq_band: [0.5, 30.0]
+
 
 erp_core:
   data_dir: ~/Data/ERP_CORE
@@ -71,6 +75,13 @@ erp_core:
       colsample_bytree: 0.8
       reg_alpha: 0.1
       reg_lambda: 1.0
+  component_xgboost:
+    output_dir: results/erp_core_ern_component_xgboost
+    cache_subdir: erp_core_ern_components
+    test_size: 0.2
+    random_state: 42
+    device: cpu
+    decision_threshold: 0.5
   visualization:
     segment_start_sec: 60.0
     segment_duration_sec: 10.0
