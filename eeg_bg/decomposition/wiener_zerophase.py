@@ -31,6 +31,8 @@ from eeg_bg.decomposition.wiener import (
     WienerSolveError,
     apply_wiener_filter,
     decompose_epoch_with_fusion,
+    protected_band_from_config,
+    zero_protected_filter_bins,
 )
 
 
@@ -88,6 +90,8 @@ def decompose_epoch(
     epoch_idx: int = 0,
 ) -> WienerResult:
     phase_gate_threshold = phase_gate_threshold_from_config(cfg)
+    sfreq = float(cfg["preprocessing"]["target_sfreq"])
+    protected_band_hz = protected_band_from_config(cfg)
 
     def candidate_fn(group_data, S, target_idx, freq_mask, n_times):
         h = compute_zerophase_filter(
@@ -95,8 +99,14 @@ def decompose_epoch(
             target_idx=target_idx,
             phase_gate_threshold_rad=phase_gate_threshold,
         )
+        h = zero_protected_filter_bins(h, sfreq, protected_band_hz)
         _, coherent = apply_wiener_filter(
-            group_data, h, target_idx, n_times
+            group_data,
+            h,
+            target_idx,
+            n_times,
+            sfreq=sfreq,
+            protected_band_hz=protected_band_hz,
         )
         pass_frac = phase_gate_pass_fraction(
             S, target_idx, phase_gate_threshold, freq_mask,

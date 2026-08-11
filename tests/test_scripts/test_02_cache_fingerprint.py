@@ -24,15 +24,18 @@ def _cfg():
         "wiener": {
             "nperseg": 500,
             "coherence_threshold": 0.15,
+            "coherent_gate_enabled": True,
+            "coherent_gate_threshold_uv": 100.0,
             "filter_magnitude_threshold": 50.0,
             "overlap_policy": "coherence_weighted",
             "phase_gate_threshold_rad": 0.392,
             "freq_band": [0.5, 40.0],
+            "protected_band_hz": [5.0, 20.0],
         },
     }
 
 
-def _write_cached_output(tmp_path, cfg, schema_version=3):
+def _write_cached_output(tmp_path, cfg, schema_version=5):
     epoch_root = tmp_path / "epochs"
     out_root = tmp_path / "wiener_frequency"
     npz_path = epoch_root / "subject" / "data.npz"
@@ -88,6 +91,9 @@ def test_new_wiener_cache_stores_schema_and_fingerprint(tmp_path):
         assert str(data["wiener_config_fingerprint"]) == (
             make_wiener_cache_fingerprint(cfg, "frequency")
         )
+        assert data["group_gate_keys"].tolist() == ["FP1-FP2"]
+        assert data["group_coherent_gate_open"].shape == (1, 1)
+        assert data["group_max_bin_rms_uv"].shape == (1, 1)
 
 
 def test_changed_wiener_config_requires_force(tmp_path):
@@ -108,6 +114,73 @@ def test_changed_wiener_config_requires_force(tmp_path):
                 str(out_root),
                 "frequency",
                 False,
+            )
+        )
+
+
+def test_changed_protected_band_requires_force(tmp_path):
+    script02 = _load_script02()
+    cached_cfg = _cfg()
+    npz_path, epoch_root, out_root = _write_cached_output(
+        tmp_path, cached_cfg
+    )
+    current_cfg = _cfg()
+    current_cfg["wiener"]["protected_band_hz"] = None
+
+    with pytest.raises(ValueError, match="configuration mismatch.*--force"):
+        script02._process_wiener_file(
+            (
+                str(npz_path),
+                current_cfg,
+                str(epoch_root),
+                str(out_root),
+                "frequency",
+                False,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("coherent_gate_enabled", False),
+        ("coherent_gate_threshold_uv", 250.0),
+    ],
+)
+def test_changed_coherent_gate_requires_force(tmp_path, key, value):
+    cached_cfg = _cfg()
+    npz_path, epoch_root, out_root = _write_cached_output(
+        tmp_path, cached_cfg
+    )
+    current_cfg = _cfg()
+    current_cfg["wiener"][key] = value
+    script02 = _load_script02()
+
+    with pytest.raises(ValueError, match="configuration mismatch.*--force"):
+        script02._process_wiener_file(
+            (
+                str(npz_path),
+                current_cfg,
+                str(epoch_root),
+                str(out_root),
+                "frequency",
+                False,
+            )
+        )
+
+
+def test_schema_v4_requires_force(tmp_path):
+    script02 = _load_script02()
+    cfg = _cfg()
+    npz_path, epoch_root, out_root = _write_cached_output(
+        tmp_path, cfg, schema_version=4
+    )
+
+    with pytest.raises(ValueError, match="Old Wiener cache schema.*--force"):
+        script02._process_wiener_file(
+            (
+                str(npz_path), cfg, str(epoch_root), str(out_root),
+                "frequency", False,
             )
         )
 

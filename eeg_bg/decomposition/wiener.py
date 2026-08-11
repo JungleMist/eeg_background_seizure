@@ -12,6 +12,7 @@ CANDIDATE_BELOW_COHERENCE = 1
 CANDIDATE_UNSTABLE_FILTER = 2
 CANDIDATE_SOLVE_FAILED    = 3
 CANDIDATE_MISSING_CHANNEL = 4
+CANDIDATE_COHERENT_GATE_CLOSED = 5
 CANDIDATE_UNUSED          = 255
 
 
@@ -41,6 +42,10 @@ class WienerResult:
     candidate_max_abs_h: np.ndarray | None = None       # float64 (n_candidates,)
     phase_gate_pass_fraction: np.ndarray | None = None  # float64 (n_candidates,)
     candidate_fusion_weight: np.ndarray | None = None   # float64 (n_candidates,)
+    # Group-level coherent power-gate diagnostics in channel_groups order.
+    group_gate_keys: list[str] | None = None
+    group_coherent_gate_open: np.ndarray | None = None  # bool (n_groups,)
+    group_max_bin_rms_uv: np.ndarray | None = None      # float64 (n_groups,)
 
 
 def estimate_cross_psd(
@@ -134,13 +139,18 @@ def apply_wiener_filter(
     h: np.ndarray,           # (n_ref, n_freqs_welch)  where n_freqs_welch = nperseg//2+1
     target_idx: int,
     n_times: int,
+    sfreq: float | None = None,
+    protected_band_hz: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply Wiener filter in the frequency domain.
 
     When nperseg == n_times (and the rectangular window was used for estimation),
     this is exact. When nperseg < n_times the filter is linearly interpolated
     to the full rfft grid; specific + coherent == raw is guaranteed by
-    construction regardless of interpolation accuracy.
+    construction regardless of interpolation accuracy.  When
+    ``protected_band_hz`` is provided, the corresponding full-resolution FFT
+    bins are forced to zero after interpolation so no coherent component is
+    reconstructed inside that closed frequency interval.
     """
     ref_indices = [i for i in range(group_data.shape[0]) if i != target_idx]
     n_ref, n_freqs_welch = h.shape
@@ -157,6 +167,17 @@ def apply_wiener_filter(
         for r in range(n_ref):
             h_full[r].real = np.interp(full_bins, welch_bins, h[r].real)
             h_full[r].imag = np.interp(full_bins, welch_bins, h[r].imag)
+
+    if protected_band_hz is not None:
+        if sfreq is None:
+            raise ValueError(
+                "sfreq is required when protected_band_hz is enabled"
+            )
+        low_hz, high_hz = protected_band_hz
+        full_freqs = np.fft.rfftfreq(n_times, d=1.0 / float(sfreq))
+        protected_mask = (full_freqs >= low_hz) & (full_freqs <= high_hz)
+        h_full = h_full.copy()
+        h_full[:, protected_mask] = 0.0
 
     ref_fft = np.fft.rfft(group_data[ref_indices], axis=-1)  # (n_ref, n_freqs_full)
     coherent_fft = np.sum(h_full * ref_fft, axis=0)          # (n_freqs_full,)
@@ -190,15 +211,124 @@ def _max_target_ref_coherence(
     return max_coh
 
 
+def protected_band_from_config(
+    cfg: dict,
+) -> tuple[float, float] | None:
+    """Return the optional closed frequency band protected from ECMAD."""
+    value = cfg["wiener"].get("protected_band_hz", [5.0, 20.0])
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("wiener.protected_band_hz must be null or [low, high]")
+    low_hz, high_hz = (float(value[0]), float(value[1]))
+    if not np.isfinite(low_hz) or not np.isfinite(high_hz):
+        raise ValueError("wiener.protected_band_hz values must be finite")
+    if low_hz >= high_hz:
+        raise ValueError(
+            "wiener.protected_band_hz must satisfy low < high"
+        )
+    return low_hz, high_hz
+
+
+def coherent_gate_from_config(cfg: dict) -> tuple[bool, float]:
+    """Return and validate the group-level coherent power-gate settings."""
+    wiener = cfg["wiener"]
+    enabled = wiener.get("coherent_gate_enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("wiener.coherent_gate_enabled must be a boolean")
+    threshold = wiener.get("coherent_gate_threshold_uv", 100.0)
+    if isinstance(threshold, bool):
+        raise ValueError(
+            "wiener.coherent_gate_threshold_uv must be a finite positive number"
+        )
+    threshold_uv = float(threshold)
+    if not np.isfinite(threshold_uv) or threshold_uv <= 0.0:
+        raise ValueError(
+            "wiener.coherent_gate_threshold_uv must be a finite positive number"
+        )
+    return enabled, threshold_uv
+
+
+def group_max_bin_rms_uv(
+    S: np.ndarray,
+    freqs: np.ndarray,
+    freq_mask: np.ndarray,
+) -> float:
+    """Maximum single-bin RMS amplitude across a channel group, in microvolts."""
+    delta_f = float(freqs[1] - freqs[0])
+    diagonal_psd = np.stack(
+        [np.real(S[index, index]) for index in range(S.shape[0])],
+        axis=0,
+    )
+    bin_power = np.maximum(diagonal_psd[:, freq_mask], 0.0) * delta_f
+    return float(np.sqrt(bin_power).max())
+
+
+def build_frequency_masks(
+    freqs: np.ndarray,
+    freq_band: tuple[float, float] | list[float],
+    protected_band_hz: tuple[float, float] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build the analysis and protected-band-excluding score masks."""
+    low_hz, high_hz = (float(freq_band[0]), float(freq_band[1]))
+    analysis_mask = (freqs >= low_hz) & (freqs <= high_hz)
+    if protected_band_hz is None:
+        score_mask = analysis_mask.copy()
+    else:
+        protected_low, protected_high = protected_band_hz
+        if protected_low < low_hz or protected_high > high_hz:
+            raise ValueError(
+                "wiener.protected_band_hz must be within wiener.freq_band"
+            )
+        protected_mask = (
+            (freqs >= protected_low) & (freqs <= protected_high)
+        )
+        score_mask = analysis_mask & ~protected_mask
+    if not np.any(score_mask):
+        raise ValueError(
+            "wiener.protected_band_hz leaves no frequency bins for "
+            "coherence scoring"
+        )
+    return analysis_mask, score_mask
+
+
+def zero_protected_filter_bins(
+    h: np.ndarray,
+    sfreq: float,
+    protected_band_hz: tuple[float, float] | None,
+) -> np.ndarray:
+    """Zero protected Welch-grid filter bins without modifying the input."""
+    if protected_band_hz is None or h.shape[1] <= 1:
+        return h
+    freqs = np.linspace(0.0, float(sfreq) / 2.0, h.shape[1])
+    low_hz, high_hz = protected_band_hz
+    protected_mask = (freqs >= low_hz) & (freqs <= high_hz)
+    masked = h.copy()
+    masked[:, protected_mask] = 0.0
+    return masked
+
+
 def _frequency_candidate(
     group_data: np.ndarray,
     S: np.ndarray,
     target_idx: int,
     freq_mask: np.ndarray,
     n_times: int,
+    *,
+    sfreq: float | None = None,
+    protected_band_hz: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     h = compute_wiener_filter(S, target_idx=target_idx)
-    _, coherent = apply_wiener_filter(group_data, h, target_idx, n_times)
+    if sfreq is not None:
+        h = zero_protected_filter_bins(h, sfreq, protected_band_hz)
+    _, coherent = apply_wiener_filter(
+        group_data,
+        h,
+        target_idx,
+        n_times,
+        sfreq=sfreq,
+        protected_band_hz=protected_band_hz,
+    )
     return h, coherent, {}
 
 
@@ -211,7 +341,7 @@ def decompose_epoch_with_fusion(
     candidate_fn: Callable[
         [np.ndarray, np.ndarray, int, np.ndarray, int],
         tuple[np.ndarray, np.ndarray, dict],
-    ] = _frequency_candidate,
+    ] | None = None,
 ) -> WienerResult:
     """Decompose one epoch using target-level gating and overlap fusion.
 
@@ -226,6 +356,10 @@ def decompose_epoch_with_fusion(
     overlap_policy = cfg["wiener"].get("overlap_policy", "coherence_weighted")
     channel_groups = cfg["channels"]["channel_groups"]
     freq_band = cfg["wiener"]["freq_band"]
+    protected_band_hz = protected_band_from_config(cfg)
+    coherent_gate_enabled, coherent_gate_threshold_uv = (
+        coherent_gate_from_config(cfg)
+    )
     n_times = epoch.shape[1]
 
     if overlap_policy != "coherence_weighted":
@@ -243,15 +377,37 @@ def decompose_epoch_with_fusion(
     _candidate_coherence: list[float] = []
     _candidate_max_abs_h: list[float] = []
     _candidate_phase_pass: list[float] = []
+    _group_gate_keys: list[str] = []
+    _group_coherent_gate_open: list[bool] = []
+    _group_max_bin_rms_uv: list[float] = []
 
     freqs, _ = welch(epoch[0], fs=sfreq, nperseg=nperseg, window="boxcar")
-    freq_mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
+    _, freq_mask = build_frequency_masks(
+        freqs,
+        freq_band,
+        protected_band_hz,
+    )
+
+    if candidate_fn is None:
+        def candidate_fn(group_data, S, target_idx, freq_mask, n_times):
+            return _frequency_candidate(
+                group_data,
+                S,
+                target_idx,
+                freq_mask,
+                n_times,
+                sfreq=sfreq,
+                protected_band_hz=protected_band_hz,
+            )
 
     for pair in channel_groups:
         pair_key = "-".join(pair)
+        _group_gate_keys.append(pair_key)
         try:
             indices = [ch_names.index(ch) for ch in pair]
         except ValueError:
+            _group_coherent_gate_open.append(False)
+            _group_max_bin_rms_uv.append(float("nan"))
             # Record all targets as missing_channel, then skip the group.
             for ch in pair:
                 _candidate_keys.append(f"{pair_key}::{ch}")
@@ -263,6 +419,8 @@ def decompose_epoch_with_fusion(
             continue
 
         if len(indices) < 2:
+            _group_coherent_gate_open.append(False)
+            _group_max_bin_rms_uv.append(float("nan"))
             for ch in pair:
                 _candidate_keys.append(f"{pair_key}::{ch}")
                 _candidate_status.append(CANDIDATE_MISSING_CHANNEL)
@@ -274,6 +432,23 @@ def decompose_epoch_with_fusion(
 
         group_data = epoch[indices]
         _, S = estimate_cross_psd(group_data, sfreq, nperseg)
+        max_bin_rms_uv = group_max_bin_rms_uv(S, freqs, freq_mask)
+        coherent_gate_open = (
+            not coherent_gate_enabled
+            or max_bin_rms_uv > coherent_gate_threshold_uv
+        )
+        _group_coherent_gate_open.append(coherent_gate_open)
+        _group_max_bin_rms_uv.append(max_bin_rms_uv)
+        if not coherent_gate_open:
+            for ch in pair:
+                _candidate_keys.append(f"{pair_key}::{ch}")
+                _candidate_status.append(CANDIDATE_COHERENT_GATE_CLOSED)
+                _candidate_coherence.append(0.0)
+                _candidate_max_abs_h.append(0.0)
+                _candidate_phase_pass.append(0.0)
+            skipped.append(pair_key)
+            continue
+
         pair_filters: dict[str, np.ndarray] = {}
 
         for local_idx, (ch, global_idx) in enumerate(zip(pair, indices)):
@@ -395,6 +570,13 @@ def decompose_epoch_with_fusion(
         candidate_max_abs_h=candidate_max_abs_h,
         phase_gate_pass_fraction=phase_gate_pass_fraction,
         candidate_fusion_weight=candidate_fusion_weight,
+        group_gate_keys=_group_gate_keys,
+        group_coherent_gate_open=np.asarray(
+            _group_coherent_gate_open, dtype=bool
+        ),
+        group_max_bin_rms_uv=np.asarray(
+            _group_max_bin_rms_uv, dtype=np.float64
+        ),
     )
 
 
@@ -411,7 +593,6 @@ def decompose_epoch(
         cfg,
         subject_id=subject_id,
         epoch_idx=epoch_idx,
-        candidate_fn=_frequency_candidate,
     )
 
 

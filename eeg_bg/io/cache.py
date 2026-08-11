@@ -35,6 +35,12 @@ def make_wiener_cache_fingerprint(cfg: dict, mode: str) -> str:
         "channel_groups": cfg["channels"]["channel_groups"],
         "nperseg": wiener["nperseg"],
         "coherence_threshold": wiener["coherence_threshold"],
+        "coherent_gate_enabled": wiener.get(
+            "coherent_gate_enabled", True
+        ),
+        "coherent_gate_threshold_uv": wiener.get(
+            "coherent_gate_threshold_uv", 100.0
+        ),
         "filter_magnitude_threshold": wiener.get(
             "filter_magnitude_threshold", 50.0
         ),
@@ -45,6 +51,9 @@ def make_wiener_cache_fingerprint(cfg: dict, mode: str) -> str:
             "phase_gate_threshold_rad", 0.392
         ),
         "freq_band": wiener["freq_band"],
+        "protected_band_hz": wiener.get(
+            "protected_band_hz", [5.0, 20.0]
+        ),
     }
     raw = json.dumps(fingerprint, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()

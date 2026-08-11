@@ -693,10 +693,16 @@ def _plot_ern(
     axes[0].set(ylabel="Amplitude (µV)", title="FCz incorrect trials")
     axes[1].set(ylabel="Incorrect − correct (µV)", title="FCz ERN difference wave")
     axes[0].legend(frameon=False)
+    coherent_gate_label = (
+        f"{float(cfg['wiener'].get('coherent_gate_threshold_uv', 100.0)):g} µV"
+        if bool(cfg["wiener"].get("coherent_gate_enabled", True))
+        else "off"
+    )
     fig.suptitle(
         "Wiener "
         f"mode={cfg['wiener'].get('mode', 'frequency')}, "
         f"coherence={float(cfg['wiener']['coherence_threshold']):.3f}, "
+        f"coherent_gate={coherent_gate_label}, "
         f"phase={float(cfg['wiener']['phase_gate_threshold_rad']):.3f} rad"
         + ("\nShading: mean ±1 trial SD" if show_trial_variance else "")
     )
@@ -993,7 +999,16 @@ def _run_subject(
         },
         "wiener_parameters": {
             "coherence_threshold": float(cfg["wiener"]["coherence_threshold"]),
+            "coherent_gate_enabled": bool(cfg["wiener"].get(
+                "coherent_gate_enabled", True
+            )),
+            "coherent_gate_threshold_uv": float(cfg["wiener"].get(
+                "coherent_gate_threshold_uv", 100.0
+            )),
             "phase_gate_threshold_rad": float(cfg["wiener"]["phase_gate_threshold_rad"]),
+            "protected_band_hz": cfg["wiener"].get(
+                "protected_band_hz", [5.0, 20.0]
+            ),
         },
         "fairness": "Filtering, resampling, events, rejection, epoch windows, and baselines are shared across all branches.",
     }
@@ -1188,7 +1203,16 @@ def run(
         "subjects": [result["summary"] for result in results],
         "wiener_parameters": {
             "coherence_threshold": float(cfg["wiener"]["coherence_threshold"]),
+            "coherent_gate_enabled": bool(cfg["wiener"].get(
+                "coherent_gate_enabled", True
+            )),
+            "coherent_gate_threshold_uv": float(cfg["wiener"].get(
+                "coherent_gate_threshold_uv", 100.0
+            )),
             "phase_gate_threshold_rad": float(cfg["wiener"]["phase_gate_threshold_rad"]),
+            "protected_band_hz": cfg["wiener"].get(
+                "protected_band_hz", [5.0, 20.0]
+            ),
         },
         "statistical_note": "Group metrics are equal-weight means of the available participants; this local ERP-CORE subset is not the complete release.",
         "fairness": "Each participant uses shared filtering, resampling, events, rejection, epoch windows, and baselines across all three branches.",

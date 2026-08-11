@@ -9,8 +9,10 @@ import numpy as np
 
 from eeg_bg.decomposition.wiener import (
     WienerResult,
+    apply_wiener_filter,
     compute_wiener_filter,
     decompose_epoch_with_fusion,
+    protected_band_from_config,
 )
 
 
@@ -26,15 +28,20 @@ def decompose_epoch(
     subject_id: str = "",
     epoch_idx: int = 0,
 ) -> WienerResult:
+    sfreq = float(cfg["preprocessing"]["target_sfreq"])
+    protected_band_hz = protected_band_from_config(cfg)
+
     def candidate_fn(group_data, S, target_idx, freq_mask, n_times):
         h_freq = compute_wiener_filter(S, target_idx=target_idx)
         h_scalar = _scalar_from_filter(h_freq, freq_mask)
-
-        ref_indices = [
-            i for i in range(group_data.shape[0]) if i != target_idx
-        ]
-        ref_data = group_data[ref_indices]  # (n_ref, n_times)
-        coherent_signal = np.sum(h_scalar.real * ref_data, axis=0)
+        _, coherent_signal = apply_wiener_filter(
+            group_data,
+            h_scalar.real,
+            target_idx,
+            n_times,
+            sfreq=sfreq,
+            protected_band_hz=protected_band_hz,
+        )
         return h_scalar, coherent_signal, {}
 
     return decompose_epoch_with_fusion(

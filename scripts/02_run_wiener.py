@@ -11,7 +11,7 @@ from eeg_bg.config.settings import load_config
 from eeg_bg.io.cache import copy_cache_metadata, make_wiener_cache_fingerprint
 
 
-WIENER_CACHE_SCHEMA_VERSION = 3
+WIENER_CACHE_SCHEMA_VERSION = 5
 
 
 def _process_wiener_file(args):
@@ -70,6 +70,9 @@ def _process_wiener_file(args):
              "candidate_max_abs_h": r.candidate_max_abs_h,
              "phase_gate_pass_fraction": r.phase_gate_pass_fraction,
              "candidate_fusion_weight": r.candidate_fusion_weight,
+             "group_gate_keys": r.group_gate_keys,
+             "group_coherent_gate_open": r.group_coherent_gate_open,
+             "group_max_bin_rms_uv": r.group_max_bin_rms_uv,
              "skipped_pairs": r.skipped_pairs,
              }
         )
@@ -77,7 +80,8 @@ def _process_wiener_file(args):
     # ── Build diagnostic arrays from per-epoch dicts ──────────────────────
     _diag_keys = ["candidate_status", "candidate_coherence",
                   "candidate_max_abs_h", "phase_gate_pass_fraction",
-                  "candidate_fusion_weight"]
+                  "candidate_fusion_weight", "group_coherent_gate_open",
+                  "group_max_bin_rms_uv"]
     _diag_arrays: dict[str, np.ndarray] = {}
     for k in _diag_keys:
         arrs = [r[k] for r in results]
@@ -97,6 +101,11 @@ def _process_wiener_file(args):
     _first = results[0] if results else {}
     ck = _first.get("candidate_keys")
     _ck_arr = np.array(ck, dtype=object) if ck else np.array([], dtype=object)
+    group_keys = _first.get("group_gate_keys")
+    group_keys_arr = (
+        np.array(group_keys, dtype=object)
+        if group_keys else np.array([], dtype=object)
+    )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -107,6 +116,7 @@ def _process_wiener_file(args):
         schema_version=WIENER_CACHE_SCHEMA_VERSION,
         wiener_config_fingerprint=expected_fingerprint,
         candidate_keys=_ck_arr,
+        group_gate_keys=group_keys_arr,
         skipped_pairs=skipped_arr,
         **copy_cache_metadata(data),
         **_diag_arrays,

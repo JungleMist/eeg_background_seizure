@@ -252,6 +252,11 @@ wiener:
                               #   value are skipped. This is a Tier 2 setting:
                               #   changing it requires rebuilding Wiener cache
                               #   and downstream features/models.
+  coherent_gate_enabled: true # group/window power gate for coherent candidates.
+  coherent_gate_threshold_uv: 100.0  # strict threshold on the maximum
+                                     #   single-bin RMS amplitude across all
+                                     #   group channels in the effective score
+                                     #   band. Units: microvolts.
   overlap_policy: "coherence_weighted"  # default and only supported policy.
                               #   Overlapping channel-group candidates are
                               #   fused by target-reference coherence instead
@@ -263,13 +268,17 @@ wiener:
                                     #   skipped (passthrough).  Guards against
                                     #   near-singular cross-PSD matrices in
                                     #   3-electrode chains.
-  phase_gate_threshold_rad: 0.392    # radians; zero-referenced hard gate for
+  phase_gate_threshold_rad: 0.050    # radians; zero-referenced hard gate for
                                     #   phasegated and zerophase modes. 0 keeps
                                     #   only strictly in-phase coherence; pi
                                     #   admits all phases. Phase pi is treated
                                     #   as the maximum phase difference.
   freq_band: [0.5, 40.0]      # [low_hz, high_hz]; coherence gate and V1/V2/V3
                               #   verification band.  PAIRED: must be ⊆ bandpass.
+  protected_band_hz: [5.0, 20.0]  # closed [low_hz, high_hz] interval excluded
+                                   #   from coherence admission/fusion scoring
+                                   #   and forced to zero in the reconstructed
+                                   #   coherent component. Set null to disable.
 
 # -----------------------------------------------------------------------------
 # ICA  [Tier 3 — re-run 03+]

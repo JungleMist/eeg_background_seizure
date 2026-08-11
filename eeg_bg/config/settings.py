@@ -43,6 +43,11 @@ def _load_yaml(config_path: Path, seen: set[Path] | None = None) -> dict:
 def load_config(config_path: str | Path = "configs/default.yaml") -> dict:
     config_path = Path(config_path)
     cfg = _load_yaml(config_path)
+    cfg.setdefault("wiener", {}).setdefault(
+        "protected_band_hz", [5.0, 20.0]
+    )
+    cfg["wiener"].setdefault("coherent_gate_enabled", True)
+    cfg["wiener"].setdefault("coherent_gate_threshold_uv", 100.0)
     project_root = config_path.parent.parent.resolve()
     for key in ("cache_dir", "results_dir"):
         if key in cfg.get("paths", {}):

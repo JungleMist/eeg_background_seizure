@@ -2,10 +2,14 @@ import numpy as np
 import pytest
 from scipy.signal import coherence as scipy_coherence
 from eeg_bg.decomposition.wiener import (
+    CANDIDATE_BELOW_COHERENCE,
+    CANDIDATE_COHERENT_GATE_CLOSED,
+    CANDIDATE_MISSING_CHANNEL,
     CANDIDATE_PROCESSED,
     CANDIDATE_SOLVE_FAILED,
     WienerResult,
     WienerSolveError,
+    build_frequency_masks,
     estimate_cross_psd,
     compute_wiener_filter,
     apply_wiener_filter,
@@ -34,9 +38,12 @@ def _fusion_cfg(
         "wiener": {
             "nperseg": 250,
             "coherence_threshold": coherence_threshold,
+            "coherent_gate_enabled": False,
+            "coherent_gate_threshold_uv": 100.0,
             "filter_magnitude_threshold": filter_magnitude_threshold,
             "phase_gate_threshold_rad": np.pi,
             "freq_band": [0.5, 40.0],
+            "protected_band_hz": None,
             "overlap_policy": "coherence_weighted",
         },
         "channels": {
@@ -254,6 +261,123 @@ def test_target_level_gate_does_not_process_low_coherence_channel():
     assert "B" in result.filters["A-B-C"]
 
 
+def test_coherent_gate_opens_for_any_group_channel_above_threshold():
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = np.sin(2 * np.pi * 30.0 * times)
+    epoch = np.vstack([160.0 * shared, 80.0 * shared])
+    cfg = _fusion_cfg(
+        [["A", "B"]],
+        coherence_threshold=0.0,
+        filter_magnitude_threshold=1e6,
+    )
+    cfg["wiener"].update({
+        "coherent_gate_enabled": True,
+        "coherent_gate_threshold_uv": 100.0,
+    })
+
+    result = decompose_epoch(epoch, ["A", "B"], cfg)
+
+    assert result.group_gate_keys == ["A-B"]
+    np.testing.assert_array_equal(result.group_coherent_gate_open, [True])
+    np.testing.assert_allclose(
+        result.group_max_bin_rms_uv[0], 160.0 / np.sqrt(2.0), rtol=1e-12
+    )
+    assert set(result.channel_sources) == {"A", "B"}
+
+
+def test_coherent_gate_closes_at_or_below_threshold():
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = 120.0 * np.sin(2 * np.pi * 30.0 * times)
+    epoch = np.vstack([shared, shared])
+    cfg = _fusion_cfg([["A", "B"]], filter_magnitude_threshold=1e6)
+    cfg["wiener"]["coherent_gate_enabled"] = False
+    measured = decompose_epoch(epoch, ["A", "B"], cfg)
+    exact_threshold = float(measured.group_max_bin_rms_uv[0])
+    cfg["wiener"].update({
+        "coherent_gate_enabled": True,
+        "coherent_gate_threshold_uv": exact_threshold,
+    })
+
+    equal = decompose_epoch(epoch, ["A", "B"], cfg)
+    cfg["wiener"]["coherent_gate_threshold_uv"] = exact_threshold + 1.0
+    below = decompose_epoch(epoch, ["A", "B"], cfg)
+
+    for result in (equal, below):
+        np.testing.assert_array_equal(result.group_coherent_gate_open, [False])
+        np.testing.assert_array_equal(
+            result.candidate_status,
+            np.full(2, CANDIDATE_COHERENT_GATE_CLOSED, dtype=np.uint8),
+        )
+        np.testing.assert_array_equal(result.coherent, np.zeros_like(epoch))
+        np.testing.assert_array_equal(result.specific, epoch)
+
+
+@pytest.mark.parametrize("frequency_hz", [10.0, 50.0])
+def test_coherent_gate_ignores_protected_or_out_of_band_power(frequency_hz):
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = 1000.0 * np.sin(2 * np.pi * frequency_hz * times)
+    cfg = _fusion_cfg([["A", "B"]], filter_magnitude_threshold=1e6)
+    cfg["wiener"].update({
+        "coherent_gate_enabled": True,
+        "coherent_gate_threshold_uv": 100.0,
+        "protected_band_hz": [5.0, 20.0],
+    })
+
+    result = decompose_epoch(
+        np.vstack([shared, shared]), ["A", "B"], cfg
+    )
+
+    np.testing.assert_array_equal(result.group_coherent_gate_open, [False])
+    np.testing.assert_array_equal(result.coherent, np.zeros((2, n_times)))
+
+
+def test_closed_overlap_group_does_not_block_open_group_candidate():
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = np.sin(2 * np.pi * 30.0 * times)
+    epoch = np.vstack([shared, shared, 160.0 * shared])
+    cfg = _fusion_cfg(
+        [["A", "B"], ["B", "C"]],
+        coherence_threshold=0.0,
+        filter_magnitude_threshold=1e6,
+    )
+    cfg["wiener"].update({
+        "coherent_gate_enabled": True,
+        "coherent_gate_threshold_uv": 100.0,
+    })
+
+    result = decompose_epoch(epoch, ["A", "B", "C"], cfg)
+
+    np.testing.assert_array_equal(
+        result.group_coherent_gate_open, [False, True]
+    )
+    assert result.channel_sources["B"] == ["B-C"]
+    assert np.std(result.coherent[1]) > 0.99 * np.std(epoch[1])
+
+
+def test_missing_group_has_closed_nan_gate_diagnostics():
+    cfg = _fusion_cfg([["A", "B"]])
+    cfg["wiener"]["coherent_gate_enabled"] = True
+
+    result = decompose_epoch(
+        np.ones((1, 1000)), ["A"], cfg
+    )
+
+    np.testing.assert_array_equal(result.group_coherent_gate_open, [False])
+    assert np.isnan(result.group_max_bin_rms_uv[0])
+    np.testing.assert_array_equal(
+        result.candidate_status,
+        np.full(2, CANDIDATE_MISSING_CHANNEL, dtype=np.uint8),
+    )
+
+
 def test_unstable_filter_skips_only_that_target_candidate():
     n_times = 1000
     t = np.arange(n_times) / 125.0
@@ -319,6 +443,184 @@ def test_all_wiener_modes_preserve_raw_identity(synthetic_epoch, decomposer):
     epoch, ch_names, cfg, *_ = synthetic_epoch
     result = decomposer(epoch, ch_names, cfg)
     np.testing.assert_allclose(result.specific + result.coherent, result.raw)
+
+
+@pytest.mark.parametrize(
+    "decomposer",
+    [decompose_epoch, phasegated_decompose, zerophase_decompose, scalar_decompose],
+)
+def test_all_wiener_modes_apply_closed_coherent_gate(decomposer):
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = 20.0 * np.sin(2 * np.pi * 30.0 * times)
+    cfg = _fusion_cfg([["A", "B"]], filter_magnitude_threshold=1e6)
+    cfg["wiener"].update({
+        "coherent_gate_enabled": True,
+        "coherent_gate_threshold_uv": 100.0,
+    })
+
+    result = decomposer(np.vstack([shared, shared]), ["A", "B"], cfg)
+
+    np.testing.assert_array_equal(result.group_coherent_gate_open, [False])
+    np.testing.assert_array_equal(result.coherent, np.zeros((2, n_times)))
+    np.testing.assert_allclose(result.specific + result.coherent, result.raw)
+
+
+@pytest.mark.parametrize(
+    "decomposer",
+    [decompose_epoch, phasegated_decompose, zerophase_decompose, scalar_decompose],
+)
+def test_all_wiener_modes_protect_selected_frequency_band(decomposer):
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    protected = np.sin(2 * np.pi * 10.0 * times)
+    removable = 0.5 * np.sin(2 * np.pi * 30.0 * times)
+    epoch = np.vstack([protected + removable, protected + removable])
+    cfg = _fusion_cfg(
+        [["A", "B"]],
+        coherence_threshold=0.0,
+        filter_magnitude_threshold=1e6,
+    )
+    cfg["wiener"]["protected_band_hz"] = [5.0, 20.0]
+
+    result = decomposer(epoch, ["A", "B"], cfg)
+    frequencies = np.fft.rfftfreq(n_times, d=1.0 / sfreq)
+    protected_idx = int(np.argmin(np.abs(frequencies - 10.0)))
+    removable_idx = int(np.argmin(np.abs(frequencies - 30.0)))
+    raw_fft = np.fft.rfft(epoch[0])
+    coherent_fft = np.fft.rfft(result.coherent[0])
+    specific_fft = np.fft.rfft(result.specific[0])
+
+    assert abs(coherent_fft[protected_idx]) < 1e-8
+    np.testing.assert_allclose(
+        specific_fft[protected_idx],
+        raw_fft[protected_idx],
+        atol=1e-8,
+    )
+    assert (
+        abs(coherent_fft[removable_idx])
+        > 0.99 * abs(raw_fft[removable_idx])
+    )
+    assert abs(specific_fft[removable_idx]) < 0.01 * abs(
+        raw_fft[removable_idx]
+    )
+    np.testing.assert_allclose(
+        result.specific + result.coherent,
+        result.raw,
+        atol=1e-10,
+    )
+
+
+def test_disabled_protected_band_allows_frequency_extraction():
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = np.sin(2 * np.pi * 10.0 * times)
+    cfg = _fusion_cfg(
+        [["A", "B"]],
+        coherence_threshold=0.0,
+        filter_magnitude_threshold=1e6,
+    )
+    cfg["wiener"]["protected_band_hz"] = None
+
+    result = decompose_epoch(
+        np.vstack([shared, shared]),
+        ["A", "B"],
+        cfg,
+    )
+
+    assert np.std(result.coherent[0]) > 0.99 * np.std(shared)
+
+
+def test_protected_only_coherence_cannot_admit_candidate():
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared = 20.0 * np.sin(2 * np.pi * 10.0 * times)
+    rng = np.random.default_rng(456)
+    epoch = np.vstack([
+        shared + rng.standard_normal(n_times),
+        shared + rng.standard_normal(n_times),
+    ])
+    cfg = _fusion_cfg(
+        [["A", "B"]],
+        coherence_threshold=0.999999,
+        filter_magnitude_threshold=1e6,
+    )
+    cfg["wiener"]["protected_band_hz"] = [5.0, 20.0]
+
+    result = decompose_epoch(epoch, ["A", "B"], cfg)
+
+    np.testing.assert_array_equal(
+        result.candidate_status,
+        np.full(2, CANDIDATE_BELOW_COHERENCE, dtype=np.uint8),
+    )
+    np.testing.assert_array_equal(result.coherent, np.zeros_like(epoch))
+    np.testing.assert_array_equal(result.specific, epoch)
+
+
+def test_frequency_masks_exclude_closed_protected_band_boundaries():
+    frequencies = np.arange(0.0, 25.5, 0.5)
+
+    analysis_mask, score_mask = build_frequency_masks(
+        frequencies,
+        [0.5, 25.0],
+        (5.0, 20.0),
+    )
+
+    assert analysis_mask[frequencies == 5.0].item()
+    assert analysis_mask[frequencies == 20.0].item()
+    assert not score_mask[frequencies == 5.0].item()
+    assert not score_mask[frequencies == 20.0].item()
+    assert score_mask[frequencies == 4.5].item()
+    assert score_mask[frequencies == 20.5].item()
+
+
+@pytest.mark.parametrize(
+    ("protected_band_hz", "message"),
+    [
+        ([20.0, 5.0], "low < high"),
+        ([0.0, 10.0], "within wiener.freq_band"),
+        ([5.0, 45.0], "within wiener.freq_band"),
+        ([0.5, 40.0], "leaves no frequency bins"),
+        ([np.nan, 20.0], "must be finite"),
+    ],
+)
+def test_invalid_protected_band_is_rejected(
+    protected_band_hz,
+    message,
+):
+    cfg = _fusion_cfg([["A", "B"]], coherence_threshold=0.0)
+    cfg["wiener"]["protected_band_hz"] = protected_band_hz
+
+    with pytest.raises(ValueError, match=message):
+        decompose_epoch(_overlap_epoch()[:2], ["A", "B"], cfg)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("coherent_gate_enabled", "true", "must be a boolean"),
+        (
+            "coherent_gate_threshold_uv",
+            0.0,
+            "must be a finite positive number",
+        ),
+        (
+            "coherent_gate_threshold_uv",
+            np.nan,
+            "must be a finite positive number",
+        ),
+    ],
+)
+def test_invalid_coherent_gate_config_is_rejected(key, value, message):
+    cfg = _fusion_cfg([["A", "B"]])
+    cfg["wiener"][key] = value
+
+    with pytest.raises(ValueError, match=message):
+        decompose_epoch(_overlap_epoch()[:2], ["A", "B"], cfg)
 
 
 def test_decompose_subject_returns_list(synthetic_epochs_batch):

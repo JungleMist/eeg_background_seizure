@@ -72,3 +72,38 @@ def test_load_config_default_path_works():
     assert "paths" in cfg
     assert "wiener" in cfg
     assert "channels" in cfg
+    assert cfg["wiener"]["protected_band_hz"] == [5.0, 20.0]
+    assert cfg["wiener"]["coherent_gate_enabled"] is True
+    assert cfg["wiener"]["coherent_gate_threshold_uv"] == 100.0
+
+
+def test_load_config_defaults_and_can_disable_protected_band(tmp_path):
+    default_file = tmp_path / "defaulted.yaml"
+    default_file.write_text("wiener: {}\n")
+    disabled_file = tmp_path / "disabled.yaml"
+    disabled_file.write_text("wiener:\n  protected_band_hz: null\n")
+
+    assert load_config(default_file)["wiener"]["protected_band_hz"] == [
+        5.0,
+        20.0,
+    ]
+    assert load_config(disabled_file)["wiener"]["protected_band_hz"] is None
+
+
+def test_load_config_defaults_and_overrides_coherent_gate(tmp_path):
+    default_file = tmp_path / "defaulted.yaml"
+    default_file.write_text("wiener: {}\n")
+    override_file = tmp_path / "override.yaml"
+    override_file.write_text(
+        "wiener:\n"
+        "  coherent_gate_enabled: false\n"
+        "  coherent_gate_threshold_uv: 250.0\n"
+    )
+
+    defaulted = load_config(default_file)["wiener"]
+    overridden = load_config(override_file)["wiener"]
+
+    assert defaulted["coherent_gate_enabled"] is True
+    assert defaulted["coherent_gate_threshold_uv"] == 100.0
+    assert overridden["coherent_gate_enabled"] is False
+    assert overridden["coherent_gate_threshold_uv"] == 250.0
