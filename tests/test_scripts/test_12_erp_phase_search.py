@@ -1,4 +1,6 @@
 """Unit tests for ERP-CORE ERN ECMAD phase optimization helpers."""
+from concurrent.futures import Future
+from contextlib import contextmanager
 import importlib.util
 import math
 from pathlib import Path
@@ -170,3 +172,186 @@ def test_xgboost_oof_predicts_every_trial_without_subject_leakage():
     assert probabilities.shape == (len(y),)
     assert np.isfinite(probabilities).all()
     assert np.all((0.0 <= probabilities) & (probabilities <= 1.0))
+
+
+def test_subject_phase_jobs_use_serial_path_for_one_worker(monkeypatch, tmp_path):
+    module = _load_script()
+    calls = []
+    helper = object()
+
+    def fake_worker(args, helpers):
+        calls.append((args, helpers))
+        return args[0]
+
+    def fail_executor(*args, **kwargs):
+        raise AssertionError("serial path must not construct a process pool")
+
+    monkeypatch.setattr(module, "_extract_subject_phases_worker", fake_worker)
+    monkeypatch.setattr(module, "_load_script10", lambda: helper)
+    monkeypatch.setattr(module, "ProcessPoolExecutor", fail_executor)
+    phases = np.asarray([0.0, 0.1, math.pi])
+    subjects = ["sub-001", "sub-002"]
+    recordings = {
+        subject: tmp_path / f"{subject}_task-ERN_eeg.set"
+        for subject in subjects
+    }
+
+    module.extract_subjects_phases(
+        subjects,
+        recordings,
+        phases,
+        {"test": True},
+        tmp_path / "cache",
+        False,
+        workers=1,
+        stage="training",
+    )
+
+    assert [args[0][0] for args in calls] == subjects
+    assert all(args[0][2] == (0.0, 0.1, math.pi) for args in calls)
+    assert all(args[1] is helper for args in calls)
+
+
+def test_subject_phase_jobs_submit_one_full_phase_task_per_subject(
+    monkeypatch, tmp_path
+):
+    module = _load_script()
+    submitted = []
+    executors = []
+
+    class FakeExecutor:
+        def __init__(self, max_workers, mp_context):
+            self.max_workers = max_workers
+            self.mp_context = mp_context
+            self.shutdown_args = None
+            executors.append(self)
+
+        def submit(self, function, args):
+            submitted.append(args)
+            future = Future()
+            try:
+                future.set_result(function(args))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, wait, cancel_futures):
+            self.shutdown_args = (wait, cancel_futures)
+
+    monkeypatch.setattr(module, "ProcessPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        module, "_extract_subject_phases_worker", lambda args: args[0]
+    )
+    subjects = ["sub-001", "sub-002", "sub-003"]
+    recordings = {
+        subject: tmp_path / f"{subject}_task-ERN_eeg.set"
+        for subject in subjects
+    }
+    phases = np.asarray([0.0, 0.1, math.pi])
+
+    module.extract_subjects_phases(
+        subjects,
+        recordings,
+        phases,
+        {"test": True},
+        tmp_path / "cache",
+        False,
+        workers=2,
+        stage="training",
+    )
+
+    assert len(executors) == 1
+    assert executors[0].max_workers == 2
+    assert executors[0].mp_context.get_start_method() == "spawn"
+    assert executors[0].shutdown_args == (True, True)
+    assert [args[0] for args in submitted] == subjects
+    assert all(args[2] == (0.0, 0.1, math.pi) for args in submitted)
+
+
+def test_subject_phase_worker_loads_helpers_and_limits_native_threads(
+    monkeypatch, tmp_path
+):
+    module = _load_script()
+    helper = object()
+    calls = []
+    limits = []
+
+    @contextmanager
+    def fake_threadpool_limits(limits: int):
+        calls.append(("limit_enter", limits))
+        yield
+        calls.append(("limit_exit", limits))
+
+    def fake_extract(
+        subject_id, recording, phases, cfg, cache_root, helpers, force
+    ):
+        limits.append(
+            (
+                subject_id,
+                recording,
+                phases.tolist(),
+                cfg,
+                cache_root,
+                helpers,
+                force,
+            )
+        )
+
+    monkeypatch.setattr(module, "_load_script10", lambda: helper)
+    monkeypatch.setattr(module, "threadpool_limits", fake_threadpool_limits)
+    monkeypatch.setattr(module, "extract_subject_phases", fake_extract)
+
+    result = module._extract_subject_phases_worker(
+        (
+            "sub-001",
+            str(tmp_path / "sub-001.set"),
+            (0.0, 0.1),
+            {"test": True},
+            str(tmp_path / "cache"),
+            False,
+        )
+    )
+
+    assert result == "sub-001"
+    assert calls == [("limit_enter", 1), ("limit_exit", 1)]
+    assert limits[0][0] == "sub-001"
+    assert limits[0][2] == [0.0, 0.1]
+    assert limits[0][5] is helper
+
+
+def test_subject_phase_job_error_identifies_subject(monkeypatch, tmp_path):
+    module = _load_script()
+
+    def fail_worker(args, helpers):
+        raise ValueError("synthetic failure")
+
+    monkeypatch.setattr(module, "_extract_subject_phases_worker", fail_worker)
+    monkeypatch.setattr(module, "_load_script10", object)
+
+    with np.testing.assert_raises_regex(
+        RuntimeError, "training feature generation failed for sub-001"
+    ):
+        module.extract_subjects_phases(
+            ["sub-001"],
+            {"sub-001": tmp_path / "sub-001.set"},
+            np.asarray([0.0]),
+            {"test": True},
+            tmp_path / "cache",
+            False,
+            workers=1,
+            stage="training",
+        )
+
+
+def test_xgboost_worker_count_still_sets_n_jobs():
+    module = _load_script()
+
+    params = module._xgb_params(
+        {"max_depth": 2},
+        np.asarray([0, 0, 1]),
+        random_state=42,
+        workers=3,
+        device="cpu",
+    )
+
+    assert params["n_jobs"] == 3

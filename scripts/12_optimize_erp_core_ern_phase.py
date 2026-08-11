@@ -8,12 +8,14 @@ test subjects are processed once, after the phase and model are frozen.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import importlib.util
 import json
 import math
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import ParameterSampler, StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
+from threadpoolctl import threadpool_limits
 
 from eeg_bg.config.settings import load_config
 from eeg_bg.features.extraction import (
@@ -92,7 +95,10 @@ def _parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=1,
-        help="XGBoost CPU threads per fit (default: 1).",
+        help=(
+            "Subject processes for ECMAD/feature generation and XGBoost CPU "
+            "threads per fit (default: 1)."
+        ),
     )
     parser.add_argument(
         "--random-state",
@@ -446,6 +452,91 @@ def extract_subject_phases(
             fingerprints[phase],
             diagnostics,
         )
+
+
+def _extract_subject_phases_worker(
+    args: tuple[str, str, tuple[float, ...], dict, str, bool],
+    helpers: Any | None = None,
+) -> str:
+    """Process all requested phases for one subject in a child process."""
+    subject_id, recording, phases, cfg, cache_root, force = args
+    if helpers is None:
+        helpers = _load_script10()
+    with threadpool_limits(limits=1):
+        extract_subject_phases(
+            subject_id,
+            Path(recording),
+            np.asarray(phases, dtype=np.float64),
+            cfg,
+            Path(cache_root),
+            helpers,
+            force,
+        )
+    return subject_id
+
+
+def extract_subjects_phases(
+    subject_ids: list[str],
+    recordings_by_subject: dict[str, Path],
+    phases: np.ndarray,
+    cfg: dict,
+    cache_root: Path,
+    force: bool,
+    workers: int,
+    stage: str,
+) -> None:
+    """Generate subject/phase caches with subject-level process parallelism."""
+    jobs = [
+        (
+            subject_id,
+            str(recordings_by_subject[subject_id]),
+            tuple(float(phase) for phase in phases),
+            cfg,
+            str(cache_root),
+            force,
+        )
+        for subject_id in subject_ids
+    ]
+    if not jobs:
+        return
+
+    if workers == 1:
+        helpers = _load_script10()
+        for index, job in enumerate(jobs, start=1):
+            subject_id = job[0]
+            print(f"[{stage} features {index}/{len(jobs)}] {subject_id}")
+            try:
+                _extract_subject_phases_worker(job, helpers)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{stage} feature generation failed for {subject_id}"
+                ) from exc
+        return
+
+    executor = ProcessPoolExecutor(
+        max_workers=min(workers, len(jobs)),
+        mp_context=get_context("spawn"),
+    )
+    futures = {}
+    try:
+        for job in jobs:
+            future = executor.submit(_extract_subject_phases_worker, job)
+            futures[future] = job[0]
+        completed = 0
+        for future in as_completed(futures):
+            subject_id = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                for pending in futures:
+                    pending.cancel()
+                raise RuntimeError(
+                    f"{stage} feature generation failed for {subject_id}"
+                ) from exc
+            completed += 1
+            print(f"[{stage} features {completed}/{len(jobs)}] {subject_id}")
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def load_phase_dataset(
@@ -922,17 +1013,16 @@ def run(
         f"Eligible subjects: {len(eligible)}; train={len(train_subjects)}, "
         f"test={len(test_subjects)}; phases={len(phases)}"
     )
-    for index, subject_id in enumerate(train_subjects, start=1):
-        print(f"[training features {index}/{len(train_subjects)}] {subject_id}")
-        extract_subject_phases(
-            subject_id,
-            recordings_by_subject[subject_id],
-            phases,
-            cfg,
-            cache_root,
-            helpers,
-            force,
-        )
+    extract_subjects_phases(
+        train_subjects,
+        recordings_by_subject,
+        phases,
+        cfg,
+        cache_root,
+        force,
+        workers,
+        "training",
+    )
 
     reference = load_phase_dataset(
         train_subjects,
@@ -998,17 +1088,16 @@ def run(
     _save_json(best_params, out / "best_params.json")
 
     # The held-out subjects are first ECMAD-processed here, after all choices freeze.
-    for index, subject_id in enumerate(test_subjects, start=1):
-        print(f"[test features {index}/{len(test_subjects)}] {subject_id}")
-        extract_subject_phases(
-            subject_id,
-            recordings_by_subject[subject_id],
-            np.asarray([best_phase]),
-            cfg,
-            cache_root,
-            helpers,
-            force,
-        )
+    extract_subjects_phases(
+        test_subjects,
+        recordings_by_subject,
+        np.asarray([best_phase]),
+        cfg,
+        cache_root,
+        force,
+        workers,
+        "test",
+    )
     test_dataset = load_phase_dataset(
         test_subjects,
         recordings_by_subject,
@@ -1055,8 +1144,22 @@ def run(
         "phase_values_rad": phases.tolist(),
         "best_phase_rad": best_phase,
         "primary_metric": metric,
+        "protected_band_hz": resolved_cfg["wiener"].get(
+            "protected_band_hz"
+        ),
+        "coherent_gate_enabled": bool(resolved_cfg["wiener"].get(
+            "coherent_gate_enabled", True
+        )),
+        "coherent_gate_threshold_uv": float(resolved_cfg["wiener"].get(
+            "coherent_gate_threshold_uv", 100.0
+        )),
         "xgboost_device": device,
+        "feature_worker_processes": workers,
         "xgboost_workers": workers,
+        "feature_parallelism": (
+            "subject process pool; phases and trials are sequential within each "
+            "subject; native worker threads are limited to one"
+        ),
         "test_metrics": test_scores,
         "feature_count": len(ERP_ERN_FEATURE_NAMES),
         "feature_channels": ERP_ERN_CHANNELS,
