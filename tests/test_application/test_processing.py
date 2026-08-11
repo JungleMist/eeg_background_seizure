@@ -10,6 +10,8 @@ from eeg_bg.application.models import (
 )
 from eeg_bg.application.processing import ProcessingEngine
 from eeg_bg.exceptions import ProcessingCancelled
+from eeg_bg.preprocessing.continuous import wiener_continuous_raw
+from eeg_bg.decomposition.wiener import decompose_epoch
 
 
 def _continuous():
@@ -155,6 +157,139 @@ def test_custom_ecmad_channel_groups_override_default_config():
         ["FP1", "FP2", "Fz"],
         ["C3", "C4"],
     ]
+
+
+def test_processing_config_propagates_or_disables_protected_band():
+    engine = ProcessingEngine()
+
+    enabled = engine.build_config(
+        ProcessingSpec(
+            method=ProcessingMethod.WIENER,
+            protected_band_hz=(6.0, 18.0),
+        ),
+        n_channels=19,
+    )
+    disabled = engine.build_config(
+        ProcessingSpec(
+            method=ProcessingMethod.WIENER,
+            protected_band_hz=None,
+        ),
+        n_channels=19,
+    )
+
+    assert enabled["wiener"]["protected_band_hz"] == [6.0, 18.0]
+    assert disabled["wiener"]["protected_band_hz"] is None
+
+
+def test_processing_config_propagates_coherent_gate():
+    cfg = ProcessingEngine().build_config(
+        ProcessingSpec(
+            method=ProcessingMethod.WIENER,
+            coherent_gate_enabled=False,
+            coherent_gate_threshold_uv=250.0,
+        ),
+        n_channels=19,
+    )
+
+    assert cfg["wiener"]["coherent_gate_enabled"] is False
+    assert cfg["wiener"]["coherent_gate_threshold_uv"] == 250.0
+
+
+def test_continuous_wiener_preserves_protected_tone():
+    import mne
+
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    protected = np.sin(2 * np.pi * 10.0 * times)
+    removable = 0.5 * np.sin(2 * np.pi * 30.0 * times)
+    signal = protected + removable
+    raw = mne.io.RawArray(
+        np.vstack([signal, signal]) * 1e-6,
+        mne.create_info(["A", "B"], sfreq, ch_types="eeg"),
+        verbose=False,
+    )
+    cfg = {
+        "preprocessing": {
+            "target_sfreq": sfreq,
+            "epoch_length_sec": 4.0,
+        },
+        "wiener": {
+            "mode": "frequency",
+            "nperseg": 500,
+            "coherence_threshold": 0.0,
+            "coherent_gate_enabled": False,
+            "coherent_gate_threshold_uv": 100.0,
+            "filter_magnitude_threshold": 1e6,
+            "overlap_policy": "coherence_weighted",
+            "phase_gate_threshold_rad": np.pi,
+            "freq_band": [0.5, 40.0],
+            "protected_band_hz": [5.0, 20.0],
+        },
+        "channels": {"channel_groups": [["A", "B"]]},
+    }
+
+    denoised, _ = wiener_continuous_raw(raw, cfg)
+    coherent = raw.get_data()[0] - denoised.get_data()[0]
+    frequencies = np.fft.rfftfreq(n_times, d=1.0 / sfreq)
+    coherent_fft = np.fft.rfft(coherent)
+    protected_idx = int(np.argmin(np.abs(frequencies - 10.0)))
+    removable_idx = int(np.argmin(np.abs(frequencies - 30.0)))
+
+    assert abs(coherent_fft[protected_idx]) < 1e-12
+    assert abs(coherent_fft[removable_idx]) > 2e-4
+
+
+def test_continuous_wiener_gate_uses_microvolt_units_like_epoch_api():
+    import mne
+
+    sfreq = 125.0
+    n_times = 1000
+    times = np.arange(n_times) / sfreq
+    shared_uv = 160.0 * np.sin(2 * np.pi * 30.0 * times)
+    raw = mne.io.RawArray(
+        np.vstack([shared_uv, shared_uv]) * 1e-6,
+        mne.create_info(["A", "B"], sfreq, ch_types="eeg"),
+        verbose=False,
+    )
+    cfg = {
+        "preprocessing": {
+            "target_sfreq": sfreq,
+            "epoch_length_sec": n_times / sfreq,
+        },
+        "wiener": {
+            "mode": "frequency",
+            "nperseg": 500,
+            "coherence_threshold": 0.0,
+            "coherent_gate_enabled": True,
+            "coherent_gate_threshold_uv": 100.0,
+            "filter_magnitude_threshold": 1e6,
+            "overlap_policy": "coherence_weighted",
+            "phase_gate_threshold_rad": np.pi,
+            "freq_band": [0.5, 40.0],
+            "protected_band_hz": [5.0, 20.0],
+        },
+        "channels": {"channel_groups": [["A", "B"]]},
+    }
+
+    epoch_result = decompose_epoch(
+        raw.get_data() * 1e6, ["A", "B"], cfg
+    )
+    _, diagnostics = wiener_continuous_raw(raw, cfg)
+    central_window = diagnostics["window_diagnostics"][1]
+
+    assert central_window["group_coherent_gate_open"] == [True]
+    np.testing.assert_allclose(
+        central_window["group_max_bin_rms_uv"],
+        epoch_result.group_max_bin_rms_uv,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    expected_closed = sum(
+        not window["group_coherent_gate_open"][0]
+        for window in diagnostics["window_diagnostics"]
+    )
+    assert diagnostics["coherent_gate_closed_group_windows"] == expected_closed
 
 
 def test_processing_honours_cancellation_before_loading(synthetic_fif):

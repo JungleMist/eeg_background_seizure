@@ -197,7 +197,18 @@ class ErnComparisonService:
         cfg["preprocessing"]["epoch_length_sec"] = float(spec.analysis_window_sec)
         cfg["wiener"]["mode"] = spec.wiener_mode.value
         cfg["wiener"]["coherence_threshold"] = float(spec.coherence_threshold)
+        cfg["wiener"]["coherent_gate_enabled"] = bool(
+            spec.coherent_gate_enabled
+        )
+        cfg["wiener"]["coherent_gate_threshold_uv"] = float(
+            spec.coherent_gate_threshold_uv
+        )
         cfg["wiener"]["phase_gate_threshold_rad"] = spec.effective_phase_gate_rad
+        cfg["wiener"]["protected_band_hz"] = (
+            list(spec.protected_band_hz)
+            if spec.protected_band_hz is not None
+            else None
+        )
         cfg["wiener"]["freq_band"] = [
             float(spec.bandpass_low_hz),
             float(spec.bandpass_high_hz),

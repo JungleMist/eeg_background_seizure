@@ -204,8 +204,17 @@ class ParameterPanel(QWidget):
         self.wiener_mode.addItem("phasegated", WienerMode.PHASEGATED)
         self.wiener_mode.addItem("zerophase", WienerMode.ZEROPHASE)
         self.coherence = self._double(0.0, 1.0, 0.01, 0.15, 2)
+        self.coherent_gate_enabled = QCheckBox("启用 coherent 功率门控")
+        self.coherent_gate_enabled.setChecked(True)
+        self.coherent_gate_threshold_uv = self._double(
+            0.1, 100000.0, 10.0, 100.0, 1
+        )
         self.gate = self._double(0.0, 3.14, 0.01, 0.39, 2)
         self.gate.setToolTip("单位为弧度；3.14 会映射为精确 π")
+        self.protected_band_enabled = QCheckBox("启用相干成分频带保护")
+        self.protected_band_enabled.setChecked(True)
+        self.protected_low_hz = self._double(0.0, 1000.0, 0.5, 5.0, 1)
+        self.protected_high_hz = self._double(0.0, 1000.0, 0.5, 20.0, 1)
         self.channel_groups_button = QPushButton("加载 EEG 后编辑")
         self.channel_groups_button.setAccessibleName("编辑 ECMAD 导联组")
         self.channel_groups_button.setToolTip(
@@ -219,7 +228,14 @@ class ParameterPanel(QWidget):
         self.method_form.addRow("ICA 相关阈值", self.ica_threshold)
         self.method_form.addRow("ECMAD 模式", self.wiener_mode)
         self.method_form.addRow("coherence", self.coherence)
+        self.method_form.addRow(self.coherent_gate_enabled)
+        self.method_form.addRow(
+            "coherent 阈值 (µV)", self.coherent_gate_threshold_uv
+        )
         self.method_form.addRow("gate (rad)", self.gate)
+        self.method_form.addRow(self.protected_band_enabled)
+        self.method_form.addRow("保护低限 (Hz)", self.protected_low_hz)
+        self.method_form.addRow("保护高限 (Hz)", self.protected_high_hz)
         if allow_selection:
             self.method_form.addRow("导联组", self.channel_groups_button)
         layout.addWidget(method_group)
@@ -233,6 +249,10 @@ class ParameterPanel(QWidget):
         self.extraction_mode.currentIndexChanged.connect(self._sync_visibility)
         self.method.currentIndexChanged.connect(self._sync_visibility)
         self.wiener_mode.currentIndexChanged.connect(self._sync_visibility)
+        self.coherent_gate_enabled.toggled.connect(self._sync_visibility)
+        self.coherent_gate_enabled.toggled.connect(self.parametersChanged)
+        self.protected_band_enabled.toggled.connect(self._sync_visibility)
+        self.protected_band_enabled.toggled.connect(self.parametersChanged)
         self.artifact_enabled.toggled.connect(self.artifact_store.set_enabled)
         self.artifact_uv.valueChanged.connect(self.artifact_store.set_threshold_uv)
         self.artifact_store.changed.connect(self._artifact_settings_changed)
@@ -261,7 +281,10 @@ class ParameterPanel(QWidget):
             "ica_components": self.ica_components,
             "ica_threshold": self.ica_threshold,
             "coherence": self.coherence,
+            "coherent_gate_threshold_uv": self.coherent_gate_threshold_uv,
             "gate": self.gate,
+            "protected_low_hz": self.protected_low_hz,
+            "protected_high_hz": self.protected_high_hz,
         }
         combos = {
             "extraction_mode": self.extraction_mode,
@@ -281,6 +304,24 @@ class ParameterPanel(QWidget):
                 if getattr(value, "value", value) == stored:
                     combo.setCurrentIndex(index)
                     break
+        stored_protected = settings.value(f"{prefix}/protected_band_enabled")
+        if stored_protected is not None:
+            enabled = (
+                stored_protected.lower() in {"1", "true", "yes", "on"}
+                if isinstance(stored_protected, str)
+                else bool(stored_protected)
+            )
+            self.protected_band_enabled.setChecked(enabled)
+        stored_coherent_gate = settings.value(
+            f"{prefix}/coherent_gate_enabled"
+        )
+        if stored_coherent_gate is not None:
+            enabled = (
+                stored_coherent_gate.lower() in {"1", "true", "yes", "on"}
+                if isinstance(stored_coherent_gate, str)
+                else bool(stored_coherent_gate)
+            )
+            self.coherent_gate_enabled.setChecked(enabled)
         self._sync_visibility()
 
         def save():
@@ -289,6 +330,14 @@ class ParameterPanel(QWidget):
             for key, combo in combos.items():
                 value = combo.currentData()
                 settings.setValue(f"{prefix}/{key}", getattr(value, "value", value))
+            settings.setValue(
+                f"{prefix}/protected_band_enabled",
+                self.protected_band_enabled.isChecked(),
+            )
+            settings.setValue(
+                f"{prefix}/coherent_gate_enabled",
+                self.coherent_gate_enabled.isChecked(),
+            )
 
         self.parametersChanged.connect(save)
 
@@ -343,6 +392,26 @@ class ParameterPanel(QWidget):
         self._set_row_visible(self.method_form, self.ica_threshold, is_ica)
         self._set_row_visible(self.method_form, self.wiener_mode, is_wiener)
         self._set_row_visible(self.method_form, self.coherence, is_wiener)
+        self._set_row_visible(
+            self.method_form, self.coherent_gate_enabled, is_wiener
+        )
+        self._set_row_visible(
+            self.method_form,
+            self.coherent_gate_threshold_uv,
+            is_wiener and self.coherent_gate_enabled.isChecked(),
+        )
+        self._set_row_visible(
+            self.method_form, self.protected_band_enabled, is_wiener
+        )
+        protected_enabled = (
+            is_wiener and self.protected_band_enabled.isChecked()
+        )
+        self._set_row_visible(
+            self.method_form, self.protected_low_hz, protected_enabled
+        )
+        self._set_row_visible(
+            self.method_form, self.protected_high_hz, protected_enabled
+        )
         if self.allow_selection:
             self._set_row_visible(
                 self.method_form, self.channel_groups_button, is_wiener
@@ -453,7 +522,17 @@ class ParameterPanel(QWidget):
             ica_artifact_corr_threshold=self.ica_threshold.value(),
             wiener_mode=WienerMode(self.wiener_mode.currentData()),
             coherence_threshold=self.coherence.value(),
+            coherent_gate_enabled=self.coherent_gate_enabled.isChecked(),
+            coherent_gate_threshold_uv=self.coherent_gate_threshold_uv.value(),
             phase_gate_threshold_rad=self.gate.value(),
+            protected_band_hz=(
+                (
+                    self.protected_low_hz.value(),
+                    self.protected_high_hz.value(),
+                )
+                if self.protected_band_enabled.isChecked()
+                else None
+            ),
             channel_groups=(
                 self._channel_groups
                 if self.allow_selection and method == ProcessingMethod.WIENER

@@ -137,6 +137,8 @@ def test_preview_enables_and_starts_ern_comparison_with_current_parameters(
         page.parameters.wiener_mode.findData(WienerMode.PHASEGATED)
     )
     page.parameters.coherence.setValue(0.45)
+    page.parameters.coherent_gate_threshold_uv.setValue(250.0)
+    page.parameters.coherent_gate_enabled.setChecked(False)
     page.parameters.gate.setValue(0.1)
     captured = []
 
@@ -150,6 +152,8 @@ def test_preview_enables_and_starts_ern_comparison_with_current_parameters(
     assert isinstance(captured[0], ErnComparisonWorker)
     assert captured[0].processing.wiener_mode is WienerMode.PHASEGATED
     assert captured[0].processing.coherence_threshold == 0.45
+    assert captured[0].processing.coherent_gate_enabled is False
+    assert captured[0].processing.coherent_gate_threshold_uv == 250.0
     assert captured[0].processing.phase_gate_threshold_rad == 0.1
 
 
@@ -382,6 +386,9 @@ def test_parameter_panel_returns_typed_specs_and_large_step_targets(qtbot):
 
     assert panel.processing_spec().method is ProcessingMethod.BASIC
     assert panel.processing_spec().wiener_mode is WienerMode.FREQUENCY
+    assert panel.processing_spec().protected_band_hz == (5.0, 20.0)
+    assert panel.processing_spec().coherent_gate_enabled is True
+    assert panel.processing_spec().coherent_gate_threshold_uv == 100.0
     assert panel.extraction_spec().mode is ExtractionMode.SELECTION
 
     option = QStyleOptionSpinBox()
@@ -406,6 +413,59 @@ def test_parameter_panel_returns_typed_specs_and_large_step_targets(qtbot):
     )
     qtbot.mouseClick(panel.low_hz, Qt.LeftButton, pos=down_target.center())
     assert panel.low_hz.value() == initial
+
+
+def test_parameter_panel_persists_protected_band(qtbot, tmp_path):
+    settings_path = tmp_path / "protected-band.ini"
+    settings = QSettings(str(settings_path), QSettings.IniFormat)
+    panel = ParameterPanel(allow_selection=True)
+    qtbot.addWidget(panel)
+    panel.bind_settings(settings, "preview")
+    panel.method.setCurrentIndex(
+        panel.method.findData(ProcessingMethod.WIENER)
+    )
+    panel.protected_low_hz.setValue(6.0)
+    panel.protected_high_hz.setValue(18.0)
+    panel.protected_band_enabled.setChecked(False)
+    settings.sync()
+
+    restored = ParameterPanel(allow_selection=True)
+    qtbot.addWidget(restored)
+    restored.bind_settings(
+        QSettings(str(settings_path), QSettings.IniFormat),
+        "preview",
+    )
+
+    assert not restored.protected_band_enabled.isChecked()
+    assert restored.protected_low_hz.value() == 6.0
+    assert restored.protected_high_hz.value() == 18.0
+    assert restored.processing_spec().protected_band_hz is None
+
+
+def test_parameter_panel_persists_coherent_gate(qtbot, tmp_path):
+    settings_path = tmp_path / "coherent-gate.ini"
+    settings = QSettings(str(settings_path), QSettings.IniFormat)
+    panel = ParameterPanel(allow_selection=True)
+    qtbot.addWidget(panel)
+    panel.bind_settings(settings, "preview")
+    panel.method.setCurrentIndex(
+        panel.method.findData(ProcessingMethod.WIENER)
+    )
+    panel.coherent_gate_threshold_uv.setValue(250.0)
+    panel.coherent_gate_enabled.setChecked(False)
+    settings.sync()
+
+    restored = ParameterPanel(allow_selection=True)
+    qtbot.addWidget(restored)
+    restored.bind_settings(
+        QSettings(str(settings_path), QSettings.IniFormat),
+        "preview",
+    )
+
+    assert not restored.coherent_gate_enabled.isChecked()
+    assert restored.coherent_gate_threshold_uv.value() == 250.0
+    assert restored.processing_spec().coherent_gate_enabled is False
+    assert restored.processing_spec().coherent_gate_threshold_uv == 250.0
 
 
 def test_global_artifact_settings_sync_persist_and_hide_threshold(qtbot, tmp_path):

@@ -396,10 +396,20 @@ class PreviewPage(ThreadedPage):
             f"ECMAD {processing.wiener_mode.value} · "
             f"coherence {processing.coherence_threshold:g}"
         )
+        label += (
+            f" · coherent 门控 {processing.coherent_gate_threshold_uv:g} µV"
+            if processing.coherent_gate_enabled
+            else " · coherent 门控关闭"
+        )
         if processing.channel_groups is not None:
             label += f" · 导联组 {len(processing.channel_groups)}"
         if processing.wiener_mode != WienerMode.FREQUENCY:
             label += f" · gate {processing.phase_gate_threshold_rad:g} rad"
+        if processing.protected_band_hz is None:
+            label += " · 保护频带关闭"
+        else:
+            low_hz, high_hz = processing.protected_band_hz
+            label += f" · 保护 {low_hz:g}–{high_hz:g} Hz"
         return f"{label} · {band}"
 
     def _preview_failed(self, message: str):

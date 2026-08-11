@@ -3,7 +3,12 @@ from pathlib import Path
 
 import mne
 
-from eeg_bg.application.batch import BatchProcessor, scan_recordings, validate_batch_roots
+from eeg_bg.application.batch import (
+    BatchProcessor,
+    output_label,
+    scan_recordings,
+    validate_batch_roots,
+)
 from eeg_bg.application.models import (
     ArtifactSettings,
     ExtractionMode,
@@ -29,6 +34,20 @@ def test_scan_recordings_is_recursive_and_format_limited(synthetic_fif, tmp_path
     assert eeglab_set in found
     assert all(path.suffix in {".fif", ".edf", ".set"} for path in found)
     assert not any(path.suffix == ".fdt" for path in found)
+
+
+def test_wiener_output_label_includes_coherent_gate():
+    enabled = output_label(ProcessingSpec(
+        method=ProcessingMethod.WIENER,
+        coherent_gate_threshold_uv=250.0,
+    ))
+    disabled = output_label(ProcessingSpec(
+        method=ProcessingMethod.WIENER,
+        coherent_gate_enabled=False,
+    ))
+
+    assert "_cg250" in enabled
+    assert "_cg-off" in disabled
 
 
 def test_batch_mirrors_tree_and_writes_manifest(synthetic_fif, tmp_path):

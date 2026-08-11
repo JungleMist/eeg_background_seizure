@@ -52,13 +52,27 @@ class ErnComparisonDialog(QDialog):
         title.setObjectName("PageTitle")
         layout.addWidget(title)
         spec = result.processing_spec
+        protected = (
+            "保护关闭"
+            if spec.protected_band_hz is None
+            else (
+                f"保护={spec.protected_band_hz[0]:g}–"
+                f"{spec.protected_band_hz[1]:g} Hz"
+            )
+        )
+        coherent_gate = (
+            f"{spec.coherent_gate_threshold_uv:g} µV"
+            if spec.coherent_gate_enabled
+            else "off"
+        )
         summary = QLabel(
             f"{result.source.name}   ·   保留 {result.n_epochs}/{result.n_paired_trials} 试次"
             f"（正确 {result.n_correct} / 错误 {result.n_incorrect}）   ·   "
             f"{spec.bandpass_low_hz:g}–{spec.bandpass_high_hz:g} Hz @ "
             f"{spec.target_sfreq:g} Hz   ·   ECMAD {spec.wiener_mode.value}, "
             f"coherence={spec.coherence_threshold:.3f}, "
-            f"phase={spec.effective_phase_gate_rad:.3f} rad"
+            f"coherent gate={coherent_gate}, "
+            f"phase={spec.effective_phase_gate_rad:.3f} rad, {protected}"
         )
         summary.setObjectName("Metadata")
         summary.setTextInteractionFlags(Qt.TextSelectableByMouse)

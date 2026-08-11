@@ -60,7 +60,18 @@ class ProcessingEngine:
         cfg["preprocessing"]["epoch_length_sec"] = float(spec.analysis_window_sec)
         cfg["wiener"]["mode"] = spec.wiener_mode.value
         cfg["wiener"]["coherence_threshold"] = float(spec.coherence_threshold)
+        cfg["wiener"]["coherent_gate_enabled"] = bool(
+            spec.coherent_gate_enabled
+        )
+        cfg["wiener"]["coherent_gate_threshold_uv"] = float(
+            spec.coherent_gate_threshold_uv
+        )
         cfg["wiener"]["phase_gate_threshold_rad"] = spec.effective_phase_gate_rad
+        cfg["wiener"]["protected_band_hz"] = (
+            list(spec.protected_band_hz)
+            if spec.protected_band_hz is not None
+            else None
+        )
         cfg["wiener"]["freq_band"] = [
             float(spec.bandpass_low_hz),
             float(spec.bandpass_high_hz),
@@ -239,6 +250,7 @@ class ProcessingEngine:
 
         segments: list[ProcessedSegment] = []
         solve_failures = 0
+        coherent_gate_closed_group_windows = 0
         window_diagnostics: list[dict] = []
         sfreq = float(raw.info["sfreq"])
         for pos, (window_index, epoch_uv) in enumerate(windows):
@@ -263,6 +275,16 @@ class ProcessingEngine:
                     solve_failures += int(np.count_nonzero(
                         result.candidate_status == CANDIDATE_SOLVE_FAILED
                     ))
+                if (
+                    result.group_coherent_gate_open is not None
+                    and result.group_max_bin_rms_uv is not None
+                ):
+                    coherent_gate_closed_group_windows += int(
+                        np.count_nonzero(
+                            ~result.group_coherent_gate_open
+                            & np.isfinite(result.group_max_bin_rms_uv)
+                        )
+                    )
                 window_diagnostics.append({
                     "window_index": window_index,
                     "start_sample": int(round(start * sfreq)),
@@ -287,6 +309,15 @@ class ProcessingEngine:
             "processed_windows": len(windows),
             "incomplete_tail_samples": int(raw.n_times - len(windows) * n_times),
             "solve_failures": solve_failures,
+            "coherent_gate_enabled": bool(
+                cfg["wiener"].get("coherent_gate_enabled", True)
+            ),
+            "coherent_gate_threshold_uv": float(
+                cfg["wiener"].get("coherent_gate_threshold_uv", 100.0)
+            ),
+            "coherent_gate_closed_group_windows": (
+                coherent_gate_closed_group_windows
+            ),
             "window_diagnostics": window_diagnostics,
         }, warnings
 

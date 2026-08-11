@@ -85,12 +85,21 @@ class ProcessingSpec:
     ica_artifact_corr_threshold: float = 0.80
     wiener_mode: WienerMode = WienerMode.FREQUENCY
     coherence_threshold: float = 0.15
+    coherent_gate_enabled: bool = True
+    coherent_gate_threshold_uv: float = 100.0
     phase_gate_threshold_rad: float = 0.39
+    protected_band_hz: tuple[float, float] | None = (5.0, 20.0)
     channel_groups: tuple[tuple[str, ...], ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "method", ProcessingMethod(self.method))
         object.__setattr__(self, "wiener_mode", WienerMode(self.wiener_mode))
+        if self.protected_band_hz is not None:
+            object.__setattr__(
+                self,
+                "protected_band_hz",
+                tuple(float(value) for value in self.protected_band_hz),
+            )
         if self.channel_groups is not None:
             object.__setattr__(
                 self,
@@ -120,8 +129,37 @@ class ProcessingSpec:
             raise ValueError("ICA 相关阈值必须位于 [0, 1]")
         if not 0.0 <= self.coherence_threshold <= 1.0:
             raise ValueError("coherence 必须位于 [0, 1]")
+        if not isinstance(self.coherent_gate_enabled, bool):
+            raise ValueError("coherent 功率门控开关必须为布尔值")
+        if (
+            isinstance(self.coherent_gate_threshold_uv, bool)
+            or not math.isfinite(float(self.coherent_gate_threshold_uv))
+            or float(self.coherent_gate_threshold_uv) <= 0.0
+        ):
+            raise ValueError("coherent 功率门控阈值必须为有限正数")
         if not math.isfinite(self.phase_gate_threshold_rad) or not 0.0 <= self.phase_gate_threshold_rad <= 3.14:
             raise ValueError("gate 必须位于 [0, π]")
+        if (
+            self.method == ProcessingMethod.WIENER
+            and self.protected_band_hz is not None
+        ):
+            if len(self.protected_band_hz) != 2:
+                raise ValueError("保护频带必须包含低限和高限")
+            low_hz, high_hz = self.protected_band_hz
+            if not math.isfinite(low_hz) or not math.isfinite(high_hz):
+                raise ValueError("保护频带必须为有限数值")
+            if not (
+                self.bandpass_low_hz
+                <= low_hz
+                < high_hz
+                <= self.bandpass_high_hz
+            ):
+                raise ValueError("保护频带必须位于带通范围内且满足 low < high")
+            if (
+                math.isclose(low_hz, self.bandpass_low_hz)
+                and math.isclose(high_hz, self.bandpass_high_hz)
+            ):
+                raise ValueError("保护频带不能覆盖全部带通范围")
         if self.method == ProcessingMethod.WIENER and self.channel_groups is not None:
             if not self.channel_groups:
                 raise ValueError("ECMAD 至少需要一个导联组")
@@ -145,6 +183,8 @@ class ProcessingSpec:
         payload["method"] = self.method.value
         payload["wiener_mode"] = self.wiener_mode.value
         payload["phase_gate_threshold_rad"] = self.effective_phase_gate_rad
+        if self.protected_band_hz is not None:
+            payload["protected_band_hz"] = list(self.protected_band_hz)
         if self.channel_groups is not None:
             payload["channel_groups"] = [list(group) for group in self.channel_groups]
         return payload
@@ -166,6 +206,9 @@ class ProcessingSpec:
             payload.update({
                 "wiener_mode": self.wiener_mode.value,
                 "coherence_threshold": self.coherence_threshold,
+                "coherent_gate_enabled": self.coherent_gate_enabled,
+                "coherent_gate_threshold_uv": self.coherent_gate_threshold_uv,
+                "protected_band_hz": self.protected_band_hz,
                 "channel_groups": self.channel_groups,
             })
             if self.wiener_mode != WienerMode.FREQUENCY:

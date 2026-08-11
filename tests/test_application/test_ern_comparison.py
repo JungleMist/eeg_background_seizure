@@ -58,7 +58,10 @@ def test_ern_config_uses_current_parameters_and_erp_channel_groups():
         ica_artifact_corr_threshold=0.72,
         wiener_mode=WienerMode.PHASEGATED,
         coherence_threshold=0.45,
+        coherent_gate_enabled=False,
+        coherent_gate_threshold_uv=250.0,
         phase_gate_threshold_rad=0.1,
+        protected_band_hz=(5.0, 20.0),
     )
 
     cfg = service._build_config(spec, n_channels=30)
@@ -69,7 +72,10 @@ def test_ern_config_uses_current_parameters_and_erp_channel_groups():
     assert cfg["erp_core"]["standard_ica"]["n_components"] == 15
     assert cfg["wiener"]["mode"] == "phasegated"
     assert cfg["wiener"]["coherence_threshold"] == 0.45
+    assert cfg["wiener"]["coherent_gate_enabled"] is False
+    assert cfg["wiener"]["coherent_gate_threshold_uv"] == 250.0
     assert cfg["wiener"]["phase_gate_threshold_rad"] == 0.1
+    assert cfg["wiener"]["protected_band_hz"] == [5.0, 20.0]
     assert "FCz" in cfg["channels"]["channel_groups"][0]
 
 

@@ -63,8 +63,18 @@ def _source_stem(path: Path) -> str:
 def output_label(spec: ProcessingSpec) -> str:
     if spec.method == ProcessingMethod.WIENER:
         label = f"wiener-{spec.wiener_mode.value}__c{spec.coherence_threshold:.2f}"
+        label += (
+            f"_cg{spec.coherent_gate_threshold_uv:g}"
+            if spec.coherent_gate_enabled
+            else "_cg-off"
+        )
         if spec.wiener_mode != WienerMode.FREQUENCY:
             label += f"_g{spec.phase_gate_threshold_rad:.2f}"
+        if spec.protected_band_hz is None:
+            label += "_pb-off"
+        else:
+            low_hz, high_hz = spec.protected_band_hz
+            label += f"_pb{low_hz:g}-{high_hz:g}"
         return label
     return spec.method.value
 
