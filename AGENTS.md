@@ -1,7 +1,7 @@
 # AGENTS.md
 
 This file provides guidance to ZCode / Claude Code agents working with this repository.
-Last updated: 2026-07-22.
+Last updated: 2026-07-30.
 
 ## Project identity and research scope
 
@@ -9,17 +9,17 @@ Last updated: 2026-07-22.
 - The EEG denoising scheme is named **EEG Channel Matrix Adaptive Denoiser (ECMAD)**. Use **ECMAD** in research- and user-facing descriptions; identify the current core algorithm as channel-group matrix-adaptive vector Wiener decomposition. Keep established implementation identifiers such as `wiener`, `wiener_frequency`, and `WienerMode` unchanged for code, configuration, cache, and result compatibility.
 - The primary research question is **EEG denoising with ECMAD**: remove shared physical/artifact components while preserving physiologically meaningful, locally generated EEG. Epilepsy/abnormality classification is an evaluation instrument, not the project identity or final scientific objective.
 - The established evaluation track uses TUEP/TUAB downstream performance. Scripts 01–07 compare Raw, ICA, and Wiener variants with XGBoost/SHAP; script 08 adds a TUEP-only EEGNet comparison. AUROC/F1/accuracy quantify whether denoising preserves or improves task-relevant information, but they are indirect denoising metrics.
-- A direct signal-quality track is now being added with ERP-CORE Flankers. The current working tree contains an initial script 10 implementation comparing Raw, standard ICA, and Wiener on response-locked ERN/LRP signals. This track reports ERP SNR, waveform preservation, peak amplitude/latency, baseline noise, and related diagnostics, with trial classification retained only as a secondary measure.
+- The direct signal-quality track uses ERP-CORE Flankers. Script 10 compares Raw, standard ICA, and Wiener on response-locked ERN/LRP signals; script 11 performs paired participant-level statistics on script 10 outputs; script 12 performs leakage-safe ECMAD phase selection for ERN trial classification. Signal-quality measures remain primary in script 10, with trial classification retained as a secondary measure.
 - Future evaluation work should keep these two tracks conceptually separate: **downstream utility on TUEP/TUAB** and **direct ERP denoising/signal preservation on ERP-CORE**. Do not describe the repository as merely a seizure or abnormal-EEG classifier.
 - The PySide6 desktop frontend is branded **ECMAD Studio**. Its visible title, navigation identity, and Wiener-processing labels should use ECMAD, while the internal package and executable entry points remain `eeg_bg` / `eeg_bg_studio` unless a separate compatibility-breaking rename is explicitly requested.
 
 ## Environment
 
-- Python via **conda env `eeg_pipeline`**, Python 3.11. Use `conda run -n eeg_pipeline` to run commands. The conda base env has NumPy 2.x which is incompatible with the pinned scipy/matplotlib.
-- **macOS**: conda env is at `/Users/jsu/miniconda3/envs/eeg_pipeline` (miniconda3). On Linux/AutoDL it may be under `/root/miniconda3/`.
+- Python via **conda env `eeg_pipeline`**, Python 3.11. Use `conda run -n eeg_pipeline` to run commands.
+- Conda's install path is not fixed by the repository; use `conda info --base` / `conda env list` instead of assuming `/Users/jsu/miniconda3` or `/root/miniconda3`.
 - To recreate: `conda env create -f environment.yaml` (Windows export — `C:\` paths baked in, UTF-16). On macOS, maintain a local gitignored `environment_macos.yaml` instead.
 - Install the package in development mode: `pip install -e .`
-- Core dependencies: numpy 2.4.6, scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, joblib 1.5.3, pandas 2.3.3, matplotlib 3.10.8, pyyaml 6.0.3, pytest 9.0.2, tqdm 4.67.3, xgboost 3.2.0, shap 0.51.0, pywavelets ≥1.4 (DWT features), torch (CNN pipeline, script 08 — CPU or CUDA build).
+- `requirements.txt` pins numpy 2.4.6, scipy 1.17.1, mne 1.11.0, scikit-learn 1.8.0, joblib 1.5.3, edfio 0.4.13, pandas 2.3.3, matplotlib 3.10.8, pyyaml 6.0.3, pytest 9.0.2, tqdm 4.67.3, xgboost 3.2.0, shap 0.51.0, PyWavelets 1.9.0, and torch 2.12.0+cu130. `requirements-gui.txt` separately pins the ECMAD Studio/PyInstaller stack.
 - **Note**: `np.trapezoid` is used (not `np.trapz`, removed in NumPy 2.0).
 
 ## Common Commands
@@ -43,7 +43,7 @@ conda run -n eeg_pipeline python -m pytest tests/test_decomposition/test_wiener.
 
 ## Pipeline Scripts
 
-Scripts 01–08 form the cached TUEP/TUAB pipeline and are run in numerical order except for documented parallel stages. Scripts 09 and 10 are analysis/benchmark entry points with their own arguments; script 10 defaults to `configs/erp_core_flankers.yaml`, not `configs/default.yaml`.
+Scripts 01–08 form the cached TUEP/TUAB pipeline. Scripts 09–12 are analysis, ERP benchmarking/statistics, and ERP phase-search entry points with their own arguments; scripts 10 and 12 default to `configs/erp_core_flankers.yaml`, not `configs/default.yaml`.
 
 ```bash
 # 01 — Extract background epochs from EDF files → cache/epochs/
@@ -55,10 +55,11 @@ conda run -n eeg_pipeline python scripts/02_run_wiener.py [--mode frequency|phas
 # 03 — ICA ablation → cache/ica/
 conda run -n eeg_pipeline python scripts/03_run_ica.py [--force] [--workers N]
 
-# 04 — Verification experiments V1/V2/V3 → results/verification/*.csv
-conda run -n eeg_pipeline python scripts/04_run_verification.py [--workers N]
+# 04 — Cache-driven V1/gate/connectivity verification by default
+conda run -n eeg_pipeline python scripts/04_run_verification.py [--source cache|recompute] [--mode frequency|phasegated|scalar|zerophase] [--checks v1,gate,connectivity] [--workers N]
 
-# Scripts 02, 03, and 04 all read only from cache/epochs/ — they can run in parallel after 01.
+# After 01, scripts 02 and 03 are independent. Script 04's default cache mode
+# requires the matching script 02 output; legacy --source recompute reads epochs.
 
 # 05 — Per-subject waveform and PSD figures → results/figures/{subject_id}/
 conda run -n eeg_pipeline python scripts/05_run_visualization.py [--n-subjects N] [--epoch-idx I] [--channels "FP1,FP2,T3"] [--export-edf] [--export-edf-max-epochs N]
@@ -78,6 +79,12 @@ conda run -n eeg_pipeline python scripts/09_analyze_wiener_phase_grid.py [--resu
 # 10 — ERP-CORE Flankers Raw vs standard ICA vs Wiener benchmark
 conda run -n eeg_pipeline python scripts/10_benchmark_erp_core_flankers.py [--data-dir PATH] [--fif PATH] [--config configs/erp_core_flankers.yaml] [--force]
 
+# 11 — Paired participant-level statistics from script 10 subject_metrics.csv
+conda run -n eeg_pipeline python scripts/11_analyze_erp_denoising_statistics.py [--results-dir PATH] [--output-dir PATH]
+
+# 12 — Leakage-safe ERP-CORE ERN ECMAD phase/XGBoost search
+conda run -n eeg_pipeline python scripts/12_optimize_erp_core_ern_phase.py [--data-dir PATH] [--metric auroc|f1|accuracy] [--workers N] [--force]
+
 # ERP-CORE counterpart of the fixed 8-cell Wiener phase/coherence experiment
 bash scripts/run_erp_core_wiener_phase_grid.sh [--data-dir PATH] [--fif PATH]
 ```
@@ -92,25 +99,32 @@ The TUAB counterpart of the fixed 8-cell Wiener phase/coherence experiment is `b
 
 - Shared preprocessing: EEG selection, standard montage, optional 60 Hz notch, 0.1–30 Hz bandpass, resampling to 125 Hz, response-event pairing, epoch rejection, epoch windows, and baseline correction are identical for all three branches.
 - Compared branches: `raw` (no denoising), `standard` (MNE FastICA with FP1/FP2 EOG proxies), and `wiener` (the repository Wiener implementation).
-- Wiener is applied to continuous data as 20 s windows with 50% weighted overlap-add. The ERP configuration targets `[FCz, Cz, Fz, FC3, FC4]`; all other listed ERP-CORE EEG channels pass through unchanged.
+- Wiener is applied to continuous data as 20 s windows with 50% weighted overlap-add. The ERP config defines five overlapping groups spanning midline, sensorimotor, and posterior channels; channels outside those groups are effectively unchanged. Its `passthrough` list records that intended complement as `[FP1, F3, F7, FP2, F4, F8]`.
 - Primary signal measures in `metrics.csv`: `ern_snr_db`, `ern_waveform_r`, `ern_rmse_vs_standard_uv`, ERN peak amplitude/latency, baseline noise SD, LRP peak amplitude/latency and half-peak onset, FP1/FP2 proxy variance, and target-channel RMS change. Root metrics are equal-weight participant means; `subject_metrics.csv` retains every participant/method row. Trial-level correctness classification accuracy/F1/AUC is secondary.
 - `standard` ICA is a comparison reference, not clean ground truth. Therefore `ern_rmse_vs_standard_uv` and `ern_waveform_r` measure agreement with ICA, not absolute denoising error or proof of physiological correctness.
 - Each participant is processed independently before aggregation. The local directory may contain only a subset of ERP-CORE, so outputs support paired participant-level analysis of the available sample but must not be described as results from the complete release.
 - `scripts/run_erp_core_wiener_phase_grid.sh` runs the same fixed eight phase/coherence cells as the TUEP/TUAB experiment. Additional `configs/exp_erp_core_*` files cover high-coherence phase-gate sweeps and a zerophase case, but there is currently no ERP grid-summary aggregator analogous to script 09.
 
-### Cache invalidation tiers
+### ERP-CORE statistics and phase search (scripts 11–12)
 
-Changing a `configs/default.yaml` key requires re-running all scripts at or after its tier with `--force`:
+- Script 11 reads only `subject_metrics.csv` (plus optional `run_summary.json`) from a completed script 10 result directory. It writes `statistics/paired_tests.csv`, `equivalence_tests.csv`, `summary.json`, and `report.md`; it does not reload EEG or compute trial-level SME/synthetic recovery.
+- Script 12 discovers ERN `.set` recordings, creates one deterministic subject holdout, selects phase/model/decision threshold using training subjects only, and first generates held-out ECMAD features after those choices are frozen. Its 211 features use a 19-channel ERP layout plus 8 symmetric pairs, distinct from the TUEP/TUAB `_STANDARD_19` layout.
+- Script 12's phase grid comes from `erp_core.phase_search.phase_start/phase_stop/phase_step` and includes the exact stop value (currently π). `--workers` controls subject processes for ECMAD/feature generation and XGBoost threads per fit; one subject process handles all requested phases sequentially with native threads capped at one.
 
-| Tier | Scripts to re-run | Config sections that trigger it |
-|------|-------------------|----------------------------------|
-| 1 | `01+` (all scripts) | `paths`, `dataset`, `split`, `preprocessing`, `channels.standard_19` |
-| 2 | `02+` | `channels.channel_groups`, `channels.passthrough`, `wiener` |
-| 3 | `03+` | `ica` |
-| 4 | `06` only | `ml.xgboost`, `ml.shap`, and feature-profile settings used by `base211_conn80` |
-| 5 | `08` only | `ml.cnn` |
+### Cache invalidation dependencies
 
-Scripts 04 and 05 produce no cache and always re-run from existing caches — changing `verification` or `visualization` keys requires no `--force`. This includes `visualization.export_edf`/`export_edf_max_epochs` — plain output-gating flags for script 05's optional `.edf` export step, not cache keys. `export_edf_max_epochs` must be a positive integer (`>=1`). Script 06 additionally has a **shape guard**: if a cached `cache/features/{condition}_{split}.npz` has a different column count than the current `FEATURE_NAMES` (e.g. after a feature-engineering code change bumped the vector length), `_load_or_extract_features` raises `ValueError` naming `--force` rather than silently training on a stale/misaligned feature matrix.
+The pipeline is branched rather than a single linear tier chain:
+
+| Changed inputs | Rebuild |
+|---|---|
+| dataset discovery/splits, preprocessing, or `channels.standard_19` | Script 01 with `--force`, then every derived condition actually used (02/03, verification/visualization, 06, and/or 08) |
+| `channels.channel_groups` or Wiener numerical settings | Script 02 with `--force`, then cache-mode 04, Wiener visualizations/features/models, and archives as needed |
+| `ica` | Script 03 with `--force`, then ICA visualizations/features/models and archives |
+| `ml.features.connectivity.nperseg` or a feature-schema change | Script 06 with `--force` for the affected feature profile |
+| `ml.xgboost` or `ml.shap` only | Rerun script 06; training/SHAP always regenerate, so feature `--force` is unnecessary |
+| `ml.cnn` | Script 08 with `--force` |
+
+Changing cache/results paths relocates inputs/outputs rather than mutating existing cache contents. Scripts 04 and 05 produce no processing cache. `visualization.export_edf` and `export_edf_max_epochs` only gate script 05 output; the latter must be a positive integer. Script 06 validates a profile-aware schema hash and expected dimension (211 or 291), raising a `--force` error instead of silently loading stale features.
 
 Script 02 stores a Wiener configuration fingerprint in schema-v3 output caches. When `--force` is omitted, a legacy schema or any mismatch in the effective mode, sampling rate, channel groups, or Wiener decomposition settings raises `ValueError` naming `--force` instead of silently reusing stale output.
 
@@ -142,9 +156,9 @@ EDF files (TUEP v3.1.0, /root/autodl-tmp/EEGdata/TUEP/v3.1.0)
   → decomposition/wiener.py — vector Wiener decomposition (core method)
   → decomposition/ica.py    — FastICA ablation baseline
   → cache/wiener_frequency|ica/ — checkpoint 2
-  → verification/           — V1 coherence, V2 transitivity, V3 frequency variation
+  → verification/           — cache mode: V1/gate/fusion/connectivity; legacy recompute: V1/V2/V3
   → visualization/          — matplotlib figures returned as plt.Figure (never call plt.show())
-  → features/extraction.py  — extract_epoch_features() → 211-dim vector per epoch (per-channel + asymmetry)
+  → features/extraction.py  — base211, optionally +80 connectivity features
   → ml/xgb_pipeline.py      — patient-grouped CV; TUEP patient / TUAB recording aggregation
   → ml/shap_analysis.py     — TreeExplainer SHAP; band/channel aggregation; comparison plot
   → results/xgboost/        — model.joblib, metrics JSON, SHAP plots
@@ -154,7 +168,7 @@ EDF files (TUEP v3.1.0, /root/autodl-tmp/EEGdata/TUEP/v3.1.0)
 
 **ERP-CORE direct denoising branch:**
 ```
-ERP-CORE Flankers FIF
+ERP-CORE Flankers EEGLAB SET recordings (or legacy one-subject FIF)
   → common filter/resample/event pairing
   → Raw | standard ICA | 20 s overlap-add Wiener
   → shared response-locked rejection, ERN and LRP epoching/baselines
@@ -184,13 +198,14 @@ ERP-CORE Flankers FIF
 | `eeg_bg/preprocessing/reference.py` | `detect_reference` infers AR/LE from montage dir name; `filter_by_reference` subsets the subject index to one scheme. |
 | `eeg_bg/io/dataset.py` | Dataset adapter for TUEP/TUAB recording discovery, patient-safe split assignment, and dataset-specific eligible intervals. TUAB official eval is test; official train produces patient-grouped train/val. |
 | `eeg_bg/io/cache.py` | Cache fingerprinting plus shared dataset/patient/recording/evaluation metadata helpers. |
-| `eeg_bg/features/_constants.py` | `_STANDARD_19` — the canonical 19-channel order. Extracted to its own module (not `extraction.py`) purely to avoid a circular import: `connectivity.py` needs the channel list to build `ALL_PAIRS` at import time, but `extraction.py` imports `connectivity.py`. |
+| `eeg_bg/features/_constants.py` | `_STANDARD_19` — the canonical positional feature order shared by extraction, connectivity, and optional feature modules. |
 | `eeg_bg/features/asymmetry.py` | `hemispheric_asymmetry(epoch, ch_names, sfreq)` → `(40,)` vector; `ASYMMETRY_NAMES` — 40 strings (`"asym_{left}_{right}_{band}"`). Order is fixed; reordering invalidates saved SHAP `.npy` arrays. 8 symmetric pairs × 5 bands, formula: `(P_left − P_right) / (P_left + P_right + ε)`. |
-| `eeg_bg/features/wavelet.py` | `wavelet_features(signal)` → `(27,)` per channel (513 total across 19 channels). PyWavelets `db4`, 6-level DWT (`level 1` ≈ 32–62 Hz γ … `level 6` ≈ 0.5–2 Hz δ). 27 features/channel: detail energy per level (6), modulus-maxima mean per level (6), reconstructed-band signal stats (15). Cut from an original 66/channel (7 subgroups) on 2026-07-01 — entropy, coefficient stats, approximation-coefficient stats, modulus-maxima counts, and scale-energy ratios were dropped as redundant with existing Welch-based features and absent from SHAP top-20s. `WAVELET_NAMES` built at import time. **Not called from `extraction.py`** — `master` was reverted to the original 211-dim vector (per-channel + asymmetry only); this module and its own unit tests remain in the codebase, untouched, for potential future use. |
-| `eeg_bg/features/connectivity.py` | `connectivity_features(epoch, ch_names, sfreq, nperseg)` → `(80,)`. Magnitude-squared coherence + Phase-Locking Value (PLV, via Hilbert transform) for `ALL_PAIRS` = the 8 homotopic pairs in `asymmetry.SYMMETRIC_PAIRS` × 5 bands × 2 metrics. Restricted from all C(19,2) = 171 pairs on 2026-07-01 — inter-hemispheric coherence/PLV is a physiologically distinct signal from power-asymmetry (already captured in `asymmetry.py`) and a documented correlate of lateralized epileptogenic networks. Bandpass+Hilbert phase is computed once per channel per band and reused across pairs for efficiency. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
-| `eeg_bg/features/complexity.py` | `complexity_features(epoch, ch_names, m, r_factor)` → `(38,)`. Sample Entropy (embedding dim `m=2`, tolerance `r=0.2×std`, `scipy.spatial.cKDTree` for O(n log n) template matching) + Lempel-Ziv Complexity (binarised at median, normalised by `n/log2(n)`) per channel. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
-| `eeg_bg/features/temporal_stats.py` | `epoch_temporal_stats(epoch, ch_names, scales)` → `(228,)`. Mean/variance/skewness/kurtosis computed per non-overlapping window then averaged across windows, at 3 scales (125/375/750 samples = 1 s/3 s/6 s at 125 Hz) per channel. **Not called from `extraction.py`** — same reversion as `wavelet.py` above; module and tests untouched. |
+| `eeg_bg/features/wavelet.py` | `wavelet_features(signal)` → `(27,)` per channel (513 total across 19 channels). PyWavelets `db4`, 6-level DWT; currently not selected by either feature profile. |
+| `eeg_bg/features/connectivity.py` | `connectivity_features(epoch, ch_names, sfreq, nperseg)` → `(80,)`: coherence + PLV for 8 homotopic pairs × 5 bands × 2 metrics. It is appended by the `base211_conn80` profile. |
+| `eeg_bg/features/complexity.py` | `complexity_features(epoch, ch_names, m, r_factor)` → `(38,)`; implemented and tested but not selected by either current profile. |
+| `eeg_bg/features/temporal_stats.py` | `epoch_temporal_stats(epoch, ch_names, scales)` → `(228,)`; implemented and tested but not selected by either current profile. |
 | `eeg_bg/features/extraction.py` | `extract_epoch_features(epoch, ch_names, sfreq)` → `(211,)` vector; `build_dataset(cache_root, condition, split, ...)` → `(X, y, subject_ids)`. Feature cache in `cache/features/{condition}_{split}.npz`. |
+| `eeg_bg/features/profiles.py` | Registry for `base211` (211 dims) and `base211_conn80` (291 dims); profile names and ordered feature names define cache/SHAP schema identity. |
 | `eeg_bg/ml/xgb_pipeline.py` | `train_xgboost`: Phase 1 GridSearchCV, Phase 2 early-stopping refit. `subject_level_predict`: epoch-level proba → subject-mean. `evaluate_subject_level`: AUROC/F1/Acc. `find_optimal_threshold`: also reused by the CNN pipeline. |
 | `eeg_bg/ml/shap_analysis.py` | `compute_shap_values` (TreeExplainer), `aggregate_shap_by_band/channel`, `plot_shap_summary` (beeswarm), `plot_shap_comparison` (2×5 cross-condition publication figure: raw/ica/wiener/wiener_phasegated/wiener_zerophase). |
 | `eeg_bg/ml/cnn_model.py` | `EEGNet(n_channels=19, n_times=1000, F1, D, dropout)` — compact EEG CNN (Lawhern et al. 2018): temporal conv → depthwise spatial conv → separable conv → sigmoid. `n_times=1000` is just the constructor default; `cnn_pipeline.py` always derives the real value from the data (currently 2500, `epoch_length_sec × target_sfreq`). Input `(batch, 1, 19, n_times)`, output `(batch, 1)` probability. |
@@ -215,7 +230,7 @@ The Wiener filter operates on **movement-artifact conduction pathways**, not bil
 - G5 `[F8, T4]` — right SCM
 - G6 `[T4, T6, O2]` — right posterior neck (3-channel chain)
 
-Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
+Channels absent from every group (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz` in the default config) are never filtered. `channels.passthrough` documents this intended complement, but `decompose_epoch` derives the effective passthrough set from group membership and does not read that list; changing the list alone has no numerical effect.
 
 `scripts/run_chgroups_experiment.sh` runs a 5-way ablation over alternative `channel_groups` definitions (`configs/exp_chgroups_{1..5}.yaml`, e.g. exp 1 = frontal-only `[FP1, FP2]`) to measure how the choice of conduction-pathway grouping affects downstream AUROC. It separates invariant work (epoch extraction, ICA, raw/ica XGBoost — run once) from per-experiment work (Wiener decomposition + wiener-only XGBoost + archive, run 5×), and writes a per-step runtime log to `results/exp_chgroups/runtime_<timestamp>.log`. Usage: `bash scripts/run_chgroups_experiment.sh [--workers N] [--from N]` (`--from` resumes at experiment N, skipping the one-time pre-steps).
 
@@ -223,8 +238,8 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 
 - PSD estimated with **boxcar window** so that when `nperseg == n_times` the filter can be applied exactly via rfft without windowing mismatch.
 - When `nperseg < n_times`, filter coefficients are linearly interpolated to the full rfft grid; `specific + coherent == raw` is guaranteed by construction regardless.
-- A coherence gate (max pairwise coherence across all pairs in the group, over the target frequency band) skips groups below `coherence_threshold` (default 0.15).
-- `nperseg` in `wiener:` is for filter estimation; V1 coherence uses `freq_resolution_hz` (125 / 0.5 = 250 samples = 10 segments per 2500-sample epoch) to avoid trivial coherence=1.
+- A target-level coherence gate uses the maximum target-to-reference coherence in the group over the target band; individual target candidates below `coherence_threshold` (default 0.15) are skipped.
+- `nperseg` in `wiener:` is for filter estimation (currently 500 samples, 0.25 Hz bins). V1 derives its own 250-sample window from `freq_resolution_hz=0.5`; SciPy's default 50% overlap provides multiple estimates per 2500-sample epoch and avoids trivial single-window coherence.
 
 ### Feature vector layout
 
@@ -235,12 +250,7 @@ Passthrough channels (`F3, F4, C3, C4, P3, P4, Fz, Cz, Pz`) are never filtered.
 | `[0:171]` | 171 | Per-channel statistics | 19 channels × 9 features (`delta/theta/alpha/beta/gamma_power, hjorth_activity/mobility/complexity, spectral_entropy`), in `_STANDARD_19` order |
 | `[171:211]` | 40 | Hemispheric asymmetry | 8 pairs × 5 bands, see `ASYMMETRY_NAMES` |
 
-**This vector is positionally stable** — reordering `standard_19` or `SYMMETRIC_PAIRS` invalidates saved SHAP `.npy` arrays (indexed by position, not name). A wavelet DWT + connectivity + complexity + multi-scale temporal-stats expansion (up to 1070 dims) was integrated on top of this vector and later reverted back to it; `eeg_bg/features/{wavelet,connectivity,complexity,temporal_stats}.py` and their unit tests still exist in the codebase (see the module table above) but are not called from `extraction.py`. `aggregate_shap_by_band` in `eeg_bg/ml/shap_analysis.py` still reports `"wavelet"`/`"connectivity"`/`"complexity"`/`"temporal"` keys in `shap_by_band.json` — these will correctly show `0.0` under this 211-dim vector since no matching feature names exist (pattern-matching degrades gracefully; not a bug).
-
-The wavelet, complexity, and temporal-stat blocks remain disconnected. The
-`base211_conn80` profile now calls `connectivity_features()` and uses
-`ml.features.connectivity.nperseg`; `base211` remains the original 211-dim
-vector. `ml.shap.pruning_threshold` remains unused.
+**This vector is positionally stable** — changing `_STANDARD_19`, `SYMMETRIC_PAIRS`, or block order invalidates saved SHAP arrays (indexed by position, not name). `base211_conn80` appends the 80 connectivity names/features and uses `ml.features.connectivity.nperseg`, producing 291 dimensions; `base211` remains the original 211-dimensional vector. Wavelet, complexity, and temporal-stat blocks remain outside both profiles. Consequently `shap_by_band.json` reports non-zero `"connectivity"` only for `base211_conn80`, while `"wavelet"`, `"complexity"`, and `"temporal"` remain `0.0` for both current profiles. `ml.shap.pruning_threshold` remains unused.
 
 ### Label encoding
 
@@ -250,15 +260,17 @@ Label 1 is always the probability returned by `predict_proba[:, 1]`. TUEP uses 0
 
 ```
 cache/
-├── epochs/{label_prefix}_{subject_id}/{sha256_key}.npz   — keys: epochs, ch_names, label, subject_id, split
-├── wiener_frequency/ (same tree)                          — keys: specific, coherent, label, subject_id, split
-├── wiener_scalar/ (same tree)                             — keys: specific, coherent, label, subject_id, split (--mode scalar output)
-├── wiener_phasegated/ (same tree)                         — keys: specific, coherent, label, subject_id, split (--mode phasegated output)
-├── wiener_zerophase/ (same tree)                          — keys: specific, coherent, label, subject_id, split (--mode zerophase output)
-├── ica/ (same tree)                                       — keys: specific, n_artifacts_removed, label, subject_id, split
-└── features/{condition}_{split}.npz                       — keys: X, y, subject_ids
+├── epochs/{evaluation_id}/{sha256_key}.npz
+├── wiener_frequency/ (same tree)
+├── wiener_scalar/ (same tree)
+├── wiener_phasegated/ (same tree)
+├── wiener_zerophase/ (same tree)
+├── ica/ (same tree)
+└── features/
+    ├── {condition}_{split}.npz                       — base211 compatibility path
+    └── base211_conn80/{condition}_{split}.npz        — 291-dim profile
 ```
-The `wiener` condition in `build_dataset` / `--condition` maps to `cache/wiener_frequency/` (not `cache/wiener/`); `wiener_phasegated` maps to `cache/wiener_phasegated/`; `wiener_zerophase` maps to `cache/wiener_zerophase/`. Both phase-gated Wiener conditions are wired into `scripts/06_train_xgboost.py` (included in `all`) but **not** into the CNN pipeline — `eeg_bg/ml/cnn_dataset.py`'s `EEGEpochDataset` and `scripts/08_train_cnn.py` still only support `raw`/`ica`/`wiener`. `EEGEpochDataset` reads the same `cache/{epochs,wiener_frequency,ica}/` trees directly (no separate CNN cache) — it loads raw `(19, n_times)` tensors (currently `(19, 2500)`) rather than the 211-dim feature vectors.
+Epoch and derived caches also carry shared dataset/patient/recording/evaluation metadata. Wiener caches add schema/fingerprint and target-candidate diagnostics. The `wiener` condition in feature extraction maps to `cache/wiener_frequency/` (not `cache/wiener/`); `wiener_phasegated` maps to `cache/wiener_phasegated/`; `wiener_zerophase` maps to `cache/wiener_zerophase/`. Both phase-gated Wiener conditions are wired into script 06 (included in `all`) but **not** into the CNN pipeline, which supports only `raw`/`ica`/`wiener` and reads `(19, n_times)` tensors (currently `(19, 2500)`) directly.
 
 ### Output directory structure
 
@@ -271,23 +283,26 @@ results/
 │       epochs, each with raw/wiener/wiener_phasegated/wiener_zerophase/ica grouped in one folder for
 │       side-by-side comparison
 ├── verification/
-│   ├── v1_coherence.csv
-│   ├── v2_transitivity.csv
-│   └── v3_frequency_variation.csv
+│   ├── verification_metadata.json
+│   ├── v1_subject.csv / v1_role_subject.csv / v1_summary.csv
+│   ├── gate_subject.csv / gate_summary.csv
+│   ├── fusion_subject.csv / fusion_summary.csv
+│   ├── skipped_pairs_subject.csv / skipped_pairs_summary.csv
+│   └── connectivity_subject.csv / connectivity_role_subject.csv / connectivity_summary.csv
+│       # Legacy --source recompute instead writes v1_coherence.csv,
+│       # v2_transitivity.csv, and v3_frequency_variation.csv.
 ├── xgboost/
-│   ├── {base211,base211_conn80}/
-│   │   ├── {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
-│   │   ├── model.joblib              — fitted XGBClassifier
-│   │   ├── scaler.joblib             — StandardScaler (fit on train)
-│   │   ├── best_params.json          — GridSearchCV best hyperparameters
-│   │   ├── val_metrics.json / test_metrics.json  — {auroc, f1, accuracy}
-│   │   ├── val_predictions.csv / test_predictions.csv  — subject_id, pred_proba, true_label
-│   │   ├── shap_values_test.npy      — (n_test_epochs, 211) raw SHAP values
-│   │   ├── shap_summary.png          — beeswarm plot (top 20 features)
-│   │   ├── shap_by_band.json         — mean |SHAP| per feature-type group
-│   │   └── shap_by_channel.json      — mean |SHAP| per EEG channel
-│   │   ├── comparison_summary.csv    — profile-specific condition summary
-│   │   └── shap_comparison.png       — profile-specific comparison figure
+│   └── {base211,base211_conn80}/
+│       ├── {raw,ica,wiener,wiener_phasegated,wiener_zerophase}/
+│       │   ├── model.joblib / scaler.joblib
+│       │   ├── best_params.json / data_stats.json
+│       │   ├── val_metrics.json / test_metrics.json
+│       │   ├── val_predictions.csv / test_predictions.csv
+│       │   ├── shap_values_test.npy  — (n_test_epochs, 211 or 291)
+│       │   ├── shap_summary.png
+│       │   └── shap_by_band.json / shap_by_channel.json
+│       ├── comparison_summary.csv
+│       └── shap_comparison.png       — written after all five conditions
 ├── cnn/
 │   ├── {raw,ica,wiener}/
 │   │   ├── best_model.pt             — EEGNet state_dict
@@ -303,7 +318,9 @@ results/
 │   ├── config_resolved.yaml
 │   ├── ern_fcz_difference.png / lrp_c3_c4.png  — participant-equal waveforms
 │   ├── subjects/sub-*/               — per-participant metrics, trials, and six figures
+│   ├── statistics/                    — script 11 paired/TOST outputs
 │   └── phase_grid/exp{1..8}/         — per-cell script 10 outputs
+├── erp_core_ern_phase_search/         — script 12 phase/model/test artifacts
 └── exp_chgroups/                     — output of scripts/run_chgroups_experiment.sh
     ├── runtime_<timestamp>.log
     └── {1..5}/xgboost/base211/{raw,ica,wiener}/  — per-channel-group-config results
@@ -326,7 +343,7 @@ experiments/<timestamp>_<name>/
 
 ### Matplotlib backend
 
-Any script that saves figures must call `matplotlib.use("Agg")` **before** any `import matplotlib.pyplot`. Scripts 05, 06, 08, and 10 already do this. Visualization functions in `eeg_bg/visualization/` return `plt.Figure` objects and never call `plt.show()`.
+Any script that saves figures must call `matplotlib.use("Agg")` **before** any `import matplotlib.pyplot`. Scripts 05, 06, 08, 10, and 12 already do this. Visualization functions in `eeg_bg/visualization/` return `plt.Figure` objects and never call `plt.show()`.
 
 ## Smoke Testing
 
@@ -334,13 +351,15 @@ Any script that saves figures must call `matplotlib.use("Agg")` **before** any `
 
 ## Tests
 
-All tests run without real EDF data. There are four conftest scopes:
+The default unit suite runs without real EDF data. Important fixture groups include:
 
 - **`tests/conftest.py`** (root): `synthetic_epoch` (19-ch 1000-sample epoch with a single point source, SNR ≈ 50:1), `synthetic_epochs_batch` (batch of 5), `tmp_cache_dir`, `cfg` (deep-copied `BASE_CFG` dict).
 - **`tests/test_features/conftest.py`**: `ch_names_19`, `sfreq`, `synthetic_epoch` (simple random — independent of root fixture), `pure_sine_signal` (10 Hz sine), `constant_signal`.
 - **`tests/test_ml/conftest.py`**: `tiny_xgb_model` (10-feature, 5-estimator, session-scoped), `full_feature_xgb_model` (211-feature, session-scoped).
 - **`tests/test_ml/test_cnn_*.py`** fixtures build a `tiny_cache` tmp_path fixture: minimal `epochs/{subject_id}/data.npz` files with `epochs`/`label`/`subject_id`/`split` keys, used to smoke-test `EEGEpochDataset`, `EEGNet`, and `train_cnn` without real data or GPU.
 - **`tests/test_scripts/test_10_erp_core_benchmark.py`** covers the ERP channel partition, eight-cell phase/coherence config inheritance, supported Wiener modes, high-coherence experimental configs, semantic/numeric response-event pairing, and LRP sign convention. It does not run the full FIF benchmark.
+- **`tests/test_scripts/test_11_erp_denoising_statistics.py`** covers participant pairing, bootstrap/TOST outputs, and report summaries without rerunning script 10.
+- **`tests/test_scripts/test_12_erp_phase_search.py`** covers phase-grid endpoints, subject-safe folds, feature-cache identity, held-out policy helpers, and serial/subject-process worker behavior without running the full ERP search.
 
 Test files under `tests/test_visualization/` must call `matplotlib.use("Agg")` **before** any `import matplotlib.pyplot` (same rule as scripts).
 
@@ -359,7 +378,7 @@ Changes to the pipeline (new scripts, new config keys, new output directories, o
 ## Non-obvious constraints and gotchas
 
 - **Dataset selection**: `dataset.active` selects `dataset.tuep` or `dataset.tuab`. Inside the active block, `reference_scheme` and `montage_dir` must agree (`"ar"` ↔ `"01_tcp_ar"`, `"le"` ↔ `"02_tcp_le"`). TUAB reads only the first `max_recording_sec` (1200 s by default), requires all 19 standard channels, and must use cache/results paths separate from TUEP.
-- **ERP-CORE is not selected through `dataset.active`**: script 10 is a standalone EEGLAB/FIF path that inherits shared numerical Wiener defaults from `default.yaml` through `configs/erp_core_flankers.yaml`. Do not send ERP-CORE through scripts 01–08 or the TUEP/TUAB cache layout.
+- **ERP-CORE is not selected through `dataset.active`**: scripts 10–12 are standalone ERP paths that inherit shared numerical Wiener defaults from `default.yaml` through `configs/erp_core_flankers.yaml`. Do not send ERP-CORE through scripts 01–08 or the TUEP/TUAB cache layout.
 - **ERP comparisons must remain branch-fair**: filtering, resampling, response events, rejection decisions, epoch windows, and baselines must be shared across Raw/standard-ICA/Wiener. Only the denoising operation may differ. Preserve `_make_shared_epochs()` selection semantics when modifying script 10.
 - **ERP metrics do not currently have clean ground truth**: standard ICA is only a baseline/reference. Treat SNR, baseline noise, waveform correlation, ICA-relative RMSE, ERN/LRP morphology, and downstream correctness classification as complementary evidence; no single value establishes denoising quality by itself.
 - **ERP statistics reflect the available local subset**: script 10 processes each discovered participant independently and writes participant-level metrics, but `~/Data/ERP_CORE` may not contain the complete ERP-CORE release. Do not claim complete-dataset results from a partial local download.
@@ -367,16 +386,16 @@ Changes to the pipeline (new scripts, new config keys, new output directories, o
 - **XGBoost `n_estimators` in `param_grid` is ignored during Phase 1**: `xgb_pipeline.py` overrides it to 500 for the grid search and uses early stopping in Phase 2 to find the final tree count. The entry in `configs/default.yaml` is documentation only.
 - **`device="cuda"` automatically sets `n_jobs=1`**: `xgb_pipeline.py` detects the CUDA device setting and overrides GridSearchCV's `n_jobs` to avoid CUDA context conflicts across parallel workers. No manual change needed.
 - **ICA fits on a 1 Hz high-pass copy but applies to 0.5 Hz data**: `fit_ica()` creates a temporary high-pass-filtered copy for FastICA convergence (MNE best practice), then applies the fitted mixing matrix to the original 0.5 Hz bandpass epochs. The `specific` output in the ICA cache is in the original 0.5 Hz bandpass domain. `max_iter` (default 1000) is read from `ica.max_iter` in the config and passed directly to the MNE ICA constructor — the scikit-learn default of 200 is too low for 19-channel EEG and causes frequent `ConvergenceWarning`.
-- **`FEATURE_NAMES` (211 entries) must stay positionally stable**: SHAP `.npy` arrays `(n_test_epochs, 211)` are indexed by position against `FEATURE_NAMES`. Any reordering of channels in `configs/default.yaml` `standard_19`, of pairs in `asymmetry.SYMMETRIC_PAIRS`, or of the block order in `eeg_bg/features/extraction.py` invalidates saved SHAP arrays. Script 06 guards against a stale feature-dim mismatch and raises `ValueError` pointing at `--force`.
+- **Feature profiles must stay positionally stable**: `base211` uses `FEATURE_NAMES` (211 entries); `base211_conn80` appends `CONNECTIVITY_NAMES` (291 total). Changing `_STANDARD_19`, `SYMMETRIC_PAIRS`, connectivity-name order, or block order invalidates saved SHAP arrays. Script 06 checks both a profile-aware schema hash and feature dimension and points stale caches at `--force`.
 - **`reference_scheme` filter is applied before any EDF is loaded**: Script 01 only processes recordings under the `montage_dir` subdirectory (default `01_tcp_ar`). Linked-ears (`tcp_le`) recordings are silently excluded.
-- **Scripts 01–04, 06, and 08 use `ProcessPoolExecutor`** (default `os.cpu_count()` workers; script 08 uses PyTorch `DataLoader(num_workers=...)` instead). On Windows, multiprocessing uses `spawn`, so each worker re-imports the full module graph at startup — worker startup overhead is higher than on Linux. Use `--workers N` to cap concurrency on memory-constrained machines or when other processes need CPU. Script 04 additionally runs V1/V2/V3 concurrently via `ThreadPoolExecutor` in Phase 2 after decomposition. Script 05 is sequential (no `--workers` flag). Script 06 runs conditions sequentially but parallelises feature extraction within each condition. Script 08 defaults `num_workers=0` (main-process loading) because it's Windows-safe by default; override via `ml.cnn.num_workers` or `--workers`.
+- **Multiprocessing differs by script**: scripts 01–04 and 06 use `ProcessPoolExecutor`; script 12 uses an explicit spawn-based subject process pool when `--workers > 1`. On Windows, process workers re-import the module graph, so cap `--workers` on memory-constrained machines. Script 04 only runs V1/V2/V3 via `ThreadPoolExecutor` in legacy `--source recompute`; default cache mode parallelises recordings. Script 05 is sequential. Script 06 runs conditions sequentially and parallelises per-file feature extraction. Script 08 uses PyTorch `DataLoader(num_workers=...)`, defaulting to 0; its `--workers` override controls that loader setting, not a `ProcessPoolExecutor`.
 - **Cache key composition for script 01**: the SHA-256 fingerprint covers the EDF path, active dataset, sample rate, bandpass, canonical channels, epoch length, artifact threshold, TUEP seizure buffer, and TUAB recording-duration cap. Scripts 02 and 03 still require `--force` after their own method settings change.
-- **`--force` does not cascade and does not clean up orphaned files**: running `01_extract_epochs.py --force` does not force-rerun scripts 02–08; each script must be passed `--force` independently. Old `.npz` files at old key paths are orphaned on disk (not deleted). For script 06, `--force` only bypasses the feature-extraction cache (`cache/features/`); model training, SHAP computation, and all output files always regenerate regardless. Script 08's `--force` behaves analogously: it re-trains and rewrites `results/cnn/{condition}/` even if metrics already exist there.
+- **`--force` does not cascade and does not clean up orphaned files**: running `01_extract_epochs.py --force` does not force-rerun scripts 02–08; each script must be passed `--force` independently. Old `.npz` files at old key paths are orphaned on disk (not deleted). For script 06, `--force` bypasses the feature cache; model training and SHAP outputs regenerate on every invocation. Script 08 skips a condition when metrics exist unless `--force` is passed. Script 12 refuses a non-empty output directory without `--force` and otherwise recomputes its subject/phase caches as requested.
 - **`create_smoke_data.py` writes to a hardcoded Windows-style path** (`D:/EEGdata/TUEP/v3.1.0`) — edit `DATA_ROOT` at the top of the script if generating smoke data on a non-Windows machine or a different data root, and make sure `configs/smoke_test.yaml`'s `paths.data_root` matches.
 
 ## Reference Documentation
 
 - **`docs/Developer_qa.md`** — Detailed Q&A: epoch validity criteria (4 criteria with decision flow), `.npz` cache file schemas (exact keys/shapes/dtypes per cache family), feature extraction internals (band definitions, Hjorth formulae, spectral entropy formula, per-condition signal mapping). Its 211-dim feature-layout description is accurate again now that `master` has been reverted to this vector, but it predates the CNN pipeline and may still have stale label-dtype info — cross-check non-feature-layout numeric claims against the code before relying on them.
 - **`docs/preprocessing.md`** — Every transformation applied to raw TUEP EDF recordings before epochs are written to `cache/epochs/`: dataset discovery, reference filtering, split assignment, EDF loading, channel normalisation, bandpass filtering, resampling, unit conversion, epoch slicing, and artifact rejection.
-- **`docs/superpowers/plans/`** and **`docs/superpowers/specs/`** — implementation plans and design specs for major feature additions (Wiener framework, experiment organizer, feature-engineering expansion, CNN training). Useful for the *rationale* behind a module's design; treat exact dimension/line-number claims as historical snapshots, not current truth — the feature-engineering expansion plan targeted a 2415-dim vector, and `FEATURE_NAMES` briefly grew to 3441-dim, then 1070-dim, before the wavelet/connectivity/complexity/temporal blocks were disconnected entirely and `master` reverted to the original 211-dim vector (see "Feature vector layout" above).
-- **`eeg_bg/README.md`** — Full package API reference: every public function signature, return type, parameter table, and usage example.
+- **`docs/superpowers/plans/`** and **`docs/superpowers/specs/`** — implementation plans and design specs for major feature additions. Treat exact dimensions and line numbers as historical snapshots: the current profiles are `base211` (211) and `base211_conn80` (291), while wavelet/complexity/temporal blocks are not selected.
+- **`eeg_bg/README.md`** — Core package API reference and implementation notes; verify unlisted specialist modules directly in their source and tests.
