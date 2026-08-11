@@ -299,6 +299,25 @@ def test_held_out_shap_aggregation_reports_component_shares():
     assert set(tables["channel"]["component"]) == {"specific", "coherent"}
 
 
+def test_classification_metrics_report_minority_class_performance():
+    module = _load_script()
+    scores = module.classification_metrics(
+        np.asarray([0, 0, 0, 1], dtype=np.int8),
+        np.asarray([0.1, 0.2, 0.8, 0.9]),
+        0.5,
+    )
+
+    assert scores["auroc"] == 1.0
+    assert scores["auprc"] == 1.0
+    assert np.isclose(scores["f1"], 2.0 / 3.0)
+    assert scores["precision"] == 0.5
+    assert scores["recall"] == 1.0
+    assert np.isclose(scores["specificity"], 2.0 / 3.0)
+    assert np.isclose(scores["balanced_accuracy"], 5.0 / 6.0)
+    assert scores["accuracy"] == 0.75
+    assert scores["confusion_matrix"] == [[2, 1], [0, 1]]
+
+
 class _FakeClassifier:
     def __init__(self, **params):
         self.params = params
@@ -447,10 +466,21 @@ def test_full_run_writes_one_metric_row_per_condition_and_test_shap(
     manifest = pd.read_csv(out / "split_manifest.csv")
     assert len(condition_metrics) == 7
     assert condition_metrics["condition"].nunique() == 7
-    assert condition_metrics["grid_best_inner_auroc"].eq(0.75).all()
+    expected_test_metrics = {
+        "auprc",
+        "precision",
+        "recall",
+        "specificity",
+        "balanced_accuracy",
+    }
+    assert expected_test_metrics.issubset(condition_metrics.columns)
+    assert condition_metrics["grid_best_inner_auprc"].eq(0.75).all()
     assert len(_FakeGridSearchCV.calls) == 7
     assert all(len(search.cv) == 5 for search in _FakeGridSearchCV.calls)
-    assert all(search.scoring == "roc_auc" for search in _FakeGridSearchCV.calls)
+    assert all(
+        search.scoring == "average_precision"
+        for search in _FakeGridSearchCV.calls
+    )
     assert predictions.groupby("condition").size().eq(8).all()
     assert len(manifest) == len(subjects)
     assert manifest["split"].value_counts().to_dict() == {"train": 8, "test": 2}
@@ -463,3 +493,11 @@ def test_full_run_writes_one_metric_row_per_condition_and_test_shap(
     assert (
         out / "conditions" / "raw" / "grid_search_results.csv"
     ).is_file()
+    grid_results = pd.read_csv(
+        out / "conditions" / "raw" / "grid_search_results.csv"
+    )
+    assert {
+        "rank_test_auprc",
+        "mean_test_auprc",
+        "std_test_auprc",
+    }.issubset(grid_results.columns)

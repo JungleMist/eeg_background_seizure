@@ -28,7 +28,16 @@ import numpy as np
 import pandas as pd
 import yaml
 import xgboost as xgb
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import GridSearchCV, StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -744,7 +753,7 @@ def fit_grid_search_xgboost(
         pipeline,
         build_grid_param_space(cfg),
         cv=inner_folds,
-        scoring="roc_auc",
+        scoring="average_precision",
         n_jobs=grid_jobs,
         verbose=0,
         refit=True,
@@ -762,9 +771,9 @@ def fit_grid_search_xgboost(
     cv_results = pd.DataFrame(
         {
             "candidate": np.arange(1, len(search.cv_results_["params"]) + 1),
-            "rank_test_auroc": search.cv_results_["rank_test_score"],
-            "mean_test_auroc": search.cv_results_["mean_test_score"],
-            "std_test_auroc": search.cv_results_["std_test_score"],
+            "rank_test_auprc": search.cv_results_["rank_test_score"],
+            "mean_test_auprc": search.cv_results_["mean_test_score"],
+            "std_test_auprc": search.cv_results_["std_test_score"],
             "mean_fit_time_sec": search.cv_results_["mean_fit_time"],
             "mean_score_time_sec": search.cv_results_["mean_score_time"],
             "params": [
@@ -778,7 +787,7 @@ def fit_grid_search_xgboost(
                 for params in search.cv_results_["params"]
             ],
         }
-    ).sort_values("rank_test_auroc", kind="mergesort")
+    ).sort_values("rank_test_auprc", kind="mergesort")
     return scaler, model, best_params, float(search.best_score_), cv_results
 
 
@@ -788,14 +797,21 @@ def classification_metrics(
     threshold: float,
 ) -> dict[str, Any]:
     predictions = (probabilities >= threshold).astype(np.int8)
+    matrix = confusion_matrix(y, predictions, labels=[0, 1])
+    true_negative, false_positive, _, _ = matrix.ravel()
     return {
         "auroc": float(roc_auc_score(y, probabilities)),
+        "auprc": float(average_precision_score(y, probabilities)),
         "f1": float(f1_score(y, predictions, zero_division=0)),
+        "precision": float(precision_score(y, predictions, zero_division=0)),
+        "recall": float(recall_score(y, predictions, zero_division=0)),
+        "specificity": float(
+            true_negative / (true_negative + false_positive)
+        ),
+        "balanced_accuracy": float(balanced_accuracy_score(y, predictions)),
         "accuracy": float(accuracy_score(y, predictions)),
         "threshold": float(threshold),
-        "confusion_matrix": confusion_matrix(
-            y, predictions, labels=[0, 1]
-        ).tolist(),
+        "confusion_matrix": matrix.tolist(),
     }
 
 
@@ -977,9 +993,14 @@ def _comparison_summary(condition_metrics: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "condition",
         "auroc",
+        "auprc",
         "f1",
+        "precision",
+        "recall",
+        "specificity",
+        "balanced_accuracy",
         "accuracy",
-        "grid_best_inner_auroc",
+        "grid_best_inner_auprc",
         "n_train_subjects",
         "n_test_subjects",
         "n_train_trials",
@@ -1012,7 +1033,16 @@ def _condition_deltas(condition_metrics: pd.DataFrame) -> pd.DataFrame:
     indexed = condition_metrics.set_index("condition")
     rows = []
     for label, target, reference in comparisons:
-        for metric in ("auroc", "f1", "accuracy"):
+        for metric in (
+            "auroc",
+            "auprc",
+            "f1",
+            "precision",
+            "recall",
+            "specificity",
+            "balanced_accuracy",
+            "accuracy",
+        ):
             rows.append(
                 {
                     "comparison": label,
@@ -1258,10 +1288,15 @@ def run(
                 "n_train_trials": len(train_index),
                 "n_test_trials": len(test_index),
                 "auroc": scores["auroc"],
+                "auprc": scores["auprc"],
                 "f1": scores["f1"],
+                "precision": scores["precision"],
+                "recall": scores["recall"],
+                "specificity": scores["specificity"],
+                "balanced_accuracy": scores["balanced_accuracy"],
                 "accuracy": scores["accuracy"],
                 "threshold": threshold,
-                "grid_best_inner_auroc": grid_best_score,
+                "grid_best_inner_auprc": grid_best_score,
                 "best_params": json.dumps(best_params, sort_keys=True),
                 "confusion_matrix": json.dumps(scores["confusion_matrix"]),
             }
@@ -1362,7 +1397,7 @@ def run(
         "random_state": random_state,
         "decision_threshold": threshold,
         "xgboost_grid_cv_folds": grid_cv_folds,
-        "xgboost_grid_scoring": "roc_auc",
+        "xgboost_grid_scoring": "average_precision",
         "xgboost_grid_param_space": build_grid_param_space(cfg),
         "xgboost_grid_n_estimators_policy": (
             "Ignore configured n_estimators candidates and fix 500 during "
