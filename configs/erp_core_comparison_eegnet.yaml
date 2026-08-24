@@ -1,0 +1,29 @@
+extends: erp_core_flankers_2.yaml
+
+paths:
+  cache_dir: cache/erp_core_comparison_eegnet
+  results_dir: results/erp_core_comparison_eegnet
+
+erp_core:
+  data_dir: ~/Data/comparison
+  comparison_eegnet:
+    output_dir: results/erp_core_comparison_eegnet
+    cache_subdir: cache/erp_core_comparison_eegnet
+    test_size: 0.2
+    validation_size: 0.2
+    random_state: 42
+    device: mps
+    num_workers: 0
+    F1: 8
+    D: 2
+    dropout: 0.25
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 64
+    max_epochs: 200
+    patience: 20
+    lr_patience: 10
+    lr_factor: 0.5
+    early_stopping_metric: validation_auprc
+    threshold_selection: validation_balanced_accuracy
+    grid_search: false
