@@ -1,0 +1,173 @@
+extends: default.yaml
+
+# Standalone ERP-CORE Flankers benchmark (script 10).  The Wiener numerical
+# defaults are inherited from default.yaml; only dataset-specific sampling,
+# passband, and channel-name mappings are changed here.
+paths:
+  cache_dir: cache
+  results_dir: results/erp_core_flankers
+
+preprocessing:
+  target_sfreq: 250
+  bandpass: [0.5, 45.0]
+  epoch_length_sec: 12
+  artifact_threshold_uv: 250.0
+
+# ERP-CORE Wiener groups covering midline, sensorimotor, and posterior channels.
+# Only EEG channels absent from every group pass through unchanged.
+channels:
+  channel_groups:
+    - [ FP1, F3, F7, FCz, Fz, FP2, F4, F8 ]           # G1: 前额
+    - [ F3, C3, C5, P3, FC3 ]                         # G2: 左前-中央
+    - [ F4, C4, C6, P4, FC4 ]                         # G3: 右前-中央
+    - [ P7, P8, PO3, PO4, PO7, PO8, O1, O2 ]          # G4: 枕区
+    - [ Cz, CPz, Oz, Pz ]                             # G5: 中央-顶枕
+  passthrough: [P9, P10]
+
+wiener:
+  mode: phasegated
+  phase_gate_threshold_rad: 0.500
+  freq_band: [0.5, 45.0]
+
+  coherent_gate_enabled: true # group/window power gate for coherent candidates.
+  coherent_gate_threshold_uv: 60.0
+
+  nperseg: 250
+
+erp_core:
+  data_dir: ~/Data/ERP_CORE
+  line_freq: 60.0
+  ern:
+    tmin: -0.6
+    tmax: 0.4
+    baseline: [-0.4, -0.2]
+    peak_window: [0.0, 0.15]
+  lrp:
+    tmin: -0.8
+    tmax: 0.2
+    baseline: [-0.8, -0.6]
+    measure_window: [-0.2, 0.05]
+  response_pairing_window_sec: 1.5
+  standard_ica:
+    n_components: 15
+    eog_proxy_channels: [FP1, FP2]
+    random_state: 42
+    max_iter: 1000
+  classification:
+    cv_folds: 5
+    tmin: -0.2
+    tmax: 0.2
+    decim: 4
+    random_state: 42
+  phase_search:
+    output_dir: results/erp_core_ern_phase_search
+    cache_subdir: erp_core_ern_phase_search
+    metric: auroc
+    test_size: 0.2
+    cv_folds: 5
+    random_state: 42
+    phase_start: 0.0
+    phase_stop: 3.141592653589793
+    phase_step: 0.1
+    random_search_iterations: 50
+    device: cpu
+    baseline_xgboost:
+      max_depth: 4
+      learning_rate: 0.05
+      n_estimators: 200
+      subsample: 0.8
+      colsample_bytree: 0.8
+      reg_alpha: 0.1
+      reg_lambda: 1.0
+  distributed_component_models:
+    output_dir: results/erp_core_ern_distributed_component_models
+    test_size: 0.2
+    random_state: 42
+    decision_threshold: 0.5
+    xgboost:
+      device: cpu
+      grid_search_enabled: false
+    svm:
+      kernel: rbf
+      C: 1.0
+      gamma: scale
+      class_weight: balanced
+      probability: true
+  component_eegnet:
+    output_dir: results/erp_core_ern_component_eegnet_2step_30ch
+    cache_subdir: cache/erp_core_ern_eegnet_2step_30ch
+    test_size: 0.2
+    validation_size: 0.2
+    random_state: 42
+    device: mps
+    num_workers: 0
+    F1: 8
+    D: 2
+    dropout: 0.25
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 64
+    max_epochs: 200
+    patience: 20
+    lr_patience: 10
+    lr_factor: 0.5
+    early_stopping_metric: validation_auprc
+    threshold_selection: validation_balanced_accuracy
+    grid_search: false
+    ica_wiener:
+      mode: phasegated
+      phase_gate_threshold_rad: 1.0
+      protected_band_hz: [5.0, 45.0]
+      coherent_gate_enabled: false
+      coherent_gate_threshold_uv: 100.0
+  distributed_component_eegnet:
+    output_dir: results/erp_core_ern_distributed_component_eegnet
+    test_size: 0.2
+    validation_size: 0.2
+    random_state: 42
+    device: mps
+    num_workers: 0
+    F1: 8
+    D: 1
+    dropout: 0.25
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 64
+    max_epochs: 200
+    patience: 20
+    lr_patience: 10
+    lr_factor: 0.5
+    early_stopping_metric: validation_auprc
+    threshold_selection: validation_balanced_accuracy
+    grid_search: false
+  distributed_components:
+    cache_subdir: cache/erp_core_ern_distributed_components
+    steps:
+      step1:
+        mode: phasegated
+        phase_gate_threshold_rad: 0.05
+        protected_band_hz: null
+        coherent_gate_enabled: false
+        coherent_gate_threshold_uv: 100.0
+        channel_groups:
+          - [FP1, F3, F7, FCz, Fz, FP2, F4, F8]
+          - [F3, C5, FC3, Cz]
+          - [F7, C3, P3, P7, PO7]
+          - [F4, C6, FC4, CPz]
+          - [F8, C4, P4, P8, PO8]
+          - [PO3, PO4, O1, O2, Oz, Pz]
+      step2:
+        mode: phasegated
+        phase_gate_threshold_rad: 0.5
+        protected_band_hz: [1.0, 25.0]
+        coherent_gate_enabled: false
+        coherent_gate_threshold_uv: 100.0
+        channel_groups:
+          - [FP1, F3, F7, FCz, Fz, FP2, F4, F8]
+          - [F3, C3, C5, P3, FC3]
+          - [F4, C4, C6, P4, FC4]
+          - [P7, P8, PO3, PO4, PO7, PO8, O1, O2]
+          - [Cz, CPz, Oz, Pz]
+  visualization:
+    segment_start_sec: 60.0
+    segment_duration_sec: 10.0
