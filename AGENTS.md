@@ -85,11 +85,19 @@ conda run -n eeg_pipeline python scripts/11_analyze_erp_denoising_statistics.py 
 # 12 — Leakage-safe ERP-CORE ERN ECMAD phase/XGBoost search
 conda run -n eeg_pipeline python scripts/12_optimize_erp_core_ern_phase.py [--data-dir PATH] [--metric auroc|f1|accuracy] [--workers N] [--force]
 
+# 17 — Continuous TUAB specific/coherent Wiener component caches
+conda run -n eeg_pipeline python scripts/17_cache_tuab_continuous_wiener.py [--data-dir PATH] [--cache-dir PATH] [--mode frequency|phasegated|zerophase] [--workers N] [--force]
+
 # ERP-CORE counterpart of the fixed 8-cell Wiener phase/coherence experiment
 bash scripts/run_erp_core_wiener_phase_grid.sh [--data-dir PATH] [--fif PATH]
 ```
 
 Scripts 01–07 support TUEP and TUAB. Use `configs/default.yaml` for TUEP and `configs/tuab.yaml` for TUAB. Script 08 is explicitly **TUEP-only** and fails fast when `dataset.active: tuab`; it has no dependency on script 06 for supported TUEP runs.
+
+Script 17 is a standalone TUAB continuous-cache path. It applies the shared
+19-channel preprocessing, keeps the configured first 1200 seconds, runs 50%
+overlap-add Wiener processing, and writes separate float32 NPZ sequences under
+`tuab_continuous_wiener_{mode}/{specific,coherent}/`.
 
 The TUAB counterpart of the fixed 8-cell Wiener phase/coherence experiment is `bash scripts/run_tuab_wiener_threshold_phase_experiment.sh [--workers N] [--from N]`. Its `configs/exp_tuab_wiener_phase_{1..8}.yaml` files inherit through `exp_tuab_wiener_phase_base.yaml` → `tuab.yaml`, share `cache_tuab`, and write isolated outputs under `results_tuab/exp_wiener_phase/`. The wrapper also runs script 09 with the TUAB config prefix after training and archiving. To limit disk use, the shared experiment driver keeps `epochs/` as the required common input but enforces that `wiener_frequency/`, `wiener_phasegated/`, and `ica/` never coexist; the active derived cache is deleted immediately after its XGBoost feature extraction finishes.
 
