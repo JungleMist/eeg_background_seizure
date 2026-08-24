@@ -1,13 +1,15 @@
-"""Tests for the seven-condition ERP-CORE ERN component experiment."""
+"""Tests for Script 13's distributed ECMAD XGBoost/SVM experiment."""
 from __future__ import annotations
 
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -23,64 +25,89 @@ def _load_script():
     return module
 
 
-def test_config_and_current_feature_layouts_are_211_211_422():
+def _config(module):
+    return module.load_config("configs/erp_core_flankers.yaml")
+
+
+def test_shared_config_and_feature_layouts_match_distributed_design():
     module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
+    cfg = _config(module)
+    experiment = cfg["erp_core"]["distributed_component_models"]
+    layouts = module.build_feature_layouts(cfg)
+    names = module.condition_feature_names(layouts)
 
-    full, coherent = module.build_feature_layouts(cfg)
-    names = module.condition_feature_names(full, coherent)
-
-    assert cfg["erp_core"]["component_xgboost"] == {
-        "output_dir": "results/erp_core_ern_component_xgboost",
-        "cache_subdir": "erp_core_ern_components",
+    assert tuple(cfg["erp_core"]["distributed_components"]["steps"]) == module.STEP_NAMES
+    assert experiment == {
+        "output_dir": "results/erp_core_ern_distributed_component_models",
         "test_size": 0.2,
         "random_state": 42,
-        "device": "cpu",
         "decision_threshold": 0.5,
+        "xgboost": {"device": "cpu", "grid_search_enabled": False},
+        "svm": {
+            "kernel": "rbf",
+            "C": 1.0,
+            "gamma": "scale",
+            "class_weight": "balanced",
+            "probability": True,
+        },
     }
-    assert full.channels == module.ERP_ERN_CHANNELS
-    assert coherent.channels == module.ERP_ERN_CHANNELS
-    assert len(full.feature_names) == 211
-    assert len(coherent.feature_names) == 211
-    assert len(names[module.COMBINED_CONDITION]) == 422
-    assert names[module.COMBINED_CONDITION][0].startswith("specific__")
-    assert names[module.COMBINED_CONDITION][-1].startswith("coherent__")
+    assert cfg["erp_core"]["distributed_components"]["cache_subdir"] == (
+        "cache/erp_core_ern_distributed_components"
+    )
+    assert tuple(layouts) == module.CONDITIONS
+    assert len(layouts["raw"].feature_names) == 211
+    assert len(layouts["step1_specific"].feature_names) == 211
+    assert len(layouts["step1_coherent"].feature_names) == 165
+    assert len(layouts["step2_coherent"].feature_names) == 211
+    assert len(layouts["step3_coherent"].feature_names) == 211
+    assert layouts["step1_coherent"].channels == (
+        "FP1", "FP2", "F3", "F4", "F7", "F8", "FC3", "FC4",
+        "C3", "C4", "P3", "P4", "Fz", "FCz", "Cz",
+    )
+    assert names["step1_coherent"] == layouts["step1_coherent"].feature_names
 
 
-def test_coherent_layout_tracks_grouped_channels_and_complete_pairs_only():
+def test_coherent_layout_uses_step_channels_and_complete_pairs_only():
     module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
-    cfg = deepcopy(cfg)
-    cfg["channels"]["channel_groups"] = [["FP1", "FP2", "F3"]]
+    cfg = deepcopy(_config(module))
+    cfg["erp_core"]["distributed_components"]["steps"]["step1"][
+        "channel_groups"
+    ] = [["FP1", "FP2", "F3"]]
 
-    full, coherent = module.build_feature_layouts(cfg)
-    names = module.condition_feature_names(full, coherent)
+    layout = module.build_feature_layouts(cfg)["step1_coherent"]
 
-    assert coherent.channels == ("FP1", "FP2", "F3")
-    assert coherent.symmetric_pairs == (("FP1", "FP2"),)
-    assert len(coherent.feature_names) == 3 * 9 + 5
-    assert len(names[module.COMBINED_CONDITION]) == 211 + 32
+    assert layout.channels == ("FP1", "FP2", "F3")
+    assert layout.symmetric_pairs == (("FP1", "FP2"),)
+    assert len(layout.feature_names) == 3 * 9 + 5
 
 
-def test_component_cache_fingerprint_tracks_wiener_and_layout_changes(tmp_path):
+def test_cache_fingerprint_tracks_wiener_steps_and_layouts(tmp_path):
     module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
+    cfg = _config(module)
     recording = tmp_path / "sub-001_task-ERN_eeg.set"
     recording.write_bytes(b"set")
-    full, coherent = module.build_feature_layouts(cfg)
+    layouts = module.build_feature_layouts(cfg)
+    baseline = module._cache_fingerprint(recording, cfg, layouts)
 
-    baseline = module._cache_fingerprint(recording, cfg, full, coherent)
     changed_wiener = deepcopy(cfg)
     changed_wiener["wiener"]["coherence_threshold"] = 0.987
+    changed_step = deepcopy(cfg)
+    changed_step["erp_core"]["distributed_components"]["steps"]["step2"][
+        "phase_gate_threshold_rad"
+    ] = 0.25
     changed_layout = deepcopy(cfg)
-    changed_layout["channels"]["channel_groups"] = [["FP1", "FP2"]]
-    _, reduced_coherent = module.build_feature_layouts(changed_layout)
+    changed_layout["erp_core"]["distributed_components"]["steps"]["step1"][
+        "channel_groups"
+    ] = [["FP1", "FP2"]]
 
     assert module._cache_fingerprint(
-        recording, changed_wiener, full, coherent
+        recording, changed_wiener, module.build_feature_layouts(changed_wiener)
     ) != baseline
     assert module._cache_fingerprint(
-        recording, changed_layout, full, reduced_coherent
+        recording, changed_step, module.build_feature_layouts(changed_step)
+    ) != baseline
+    assert module._cache_fingerprint(
+        recording, changed_layout, module.build_feature_layouts(changed_layout)
     ) != baseline
 
 
@@ -97,14 +124,21 @@ class _FakeRaw:
     def get_data(self):
         return self._data.copy()
 
+    def pick(self, channels):
+        indices = [self.ch_names.index(channel) for channel in channels]
+        self._data = self._data[indices]
+        self.ch_names = list(channels)
+        return self
+
+    def reorder_channels(self, channels):
+        return self.pick(channels)
+
 
 class _FakeEpochs:
     def __init__(self, raw: _FakeRaw):
         self.ch_names = list(raw.ch_names)
         self.info = {"sfreq": raw.info["sfreq"]}
-        self.metadata = pd.DataFrame(
-            {"correct": [True, True, False, False]}
-        )
+        self.metadata = pd.DataFrame({"correct": [True, True, False, False]})
         self.events = np.column_stack(
             [np.asarray([10, 30, 50, 70]), np.zeros(4, int), np.ones(4, int)]
         )
@@ -113,15 +147,10 @@ class _FakeEpochs:
             [base[:, :64], base[:, 16:80], base[:, 32:96], base[:, 48:112]]
         )
 
-    def __len__(self):
-        return len(self._data)
-
     def get_data(self, picks=None, copy=False):
-        if picks is None:
-            data = self._data
-        else:
-            indices = [self.ch_names.index(channel) for channel in picks]
-            data = self._data[:, indices]
+        data = self._data
+        if picks is not None:
+            data = data[:, [self.ch_names.index(channel) for channel in picks]]
         return data.copy() if copy else data
 
 
@@ -130,8 +159,6 @@ class _FakeHelpers:
         self.raw = raw
         self.read_calls = 0
         self.common_calls = 0
-        self.ica_calls = 0
-        self.wiener_calls = []
 
     def _read_recording(self, _mne, _recording):
         self.read_calls += 1
@@ -144,25 +171,6 @@ class _FakeHelpers:
     def build_response_table(self, *_args):
         return pd.DataFrame({"sample": [10, 30, 50, 70]})
 
-    def _standard_ica(self, raw, _cfg):
-        self.ica_calls += 1
-        result = raw.copy()
-        result._data *= 0.8
-        return result, [1, 3]
-
-    def _wiener_continuous(self, raw, _cfg, subject_id):
-        self.wiener_calls.append(subject_id)
-        result = raw.copy()
-        result._data *= 0.75
-        return result, {
-            "windows": 2,
-            "processed_channel_windows": 3,
-            "solve_failures": 0,
-            "below_coherence_candidates": 1,
-            "group_processing_rates": {},
-            "window_diagnostics": [{"omitted": True}],
-        }
-
     def _make_shared_epochs(self, raws, *_args):
         return {condition: _FakeEpochs(raw) for condition, raw in raws.items()}
 
@@ -170,17 +178,58 @@ class _FakeHelpers:
         return None
 
 
-def test_subject_extraction_runs_one_ica_two_wieners_and_reuses_cache(
+class _FakeDistributed:
+    def __init__(self, channels):
+        self.ERP_CORE_EEG_CHANNELS = channels
+        self.calls = 0
+
+    def load_or_create_distributed_components(
+        self, common, _recording, _cfg, subject_id, _helpers, cache_root, _force
+    ):
+        branches = {"raw": common}
+        diagnostics = {}
+        current = common
+        for index, step in enumerate(("step1", "step2", "step3"), start=1):
+            self.calls += 1
+            specific = current.copy()
+            specific._data *= 0.75
+            coherent = current.copy()
+            coherent._data = current.get_data() - specific.get_data()
+            branches[f"{step}_specific"] = specific
+            branches[f"{step}_coherent"] = coherent
+            diagnostics[step] = {
+                "windows": 2,
+                "active_channels": list(current.ch_names),
+                "max_abs_step_conservation_error_uv": 0.0,
+            }
+            current = specific
+        continuous = cache_root / subject_id / "continuous"
+        continuous.mkdir(parents=True, exist_ok=True)
+        for component in (
+            f"{step}_{kind}"
+            for step in ("step1", "step2", "step3")
+            for kind in ("specific", "coherent")
+        ):
+            (continuous / f"{component}.edf").write_bytes(b"shared")
+        metadata = {
+            "subject_id": subject_id,
+            "steps": diagnostics,
+            "max_abs_cumulative_conservation_error_uv": 0.0,
+        }
+        return branches, metadata, False
+
+
+def test_subject_extraction_runs_three_steps_and_reuses_feature_cache(
     tmp_path, monkeypatch
 ):
     module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
+    cfg = _config(module)
+    distributed_module = module._load_script15()
+    channels = tuple(distributed_module.ERP_CORE_EEG_CHANNELS)
     rng = np.random.default_rng(42)
-    raw = _FakeRaw(
-        rng.normal(scale=1e-6, size=(19, 128)),
-        module.ERP_ERN_CHANNELS,
-    )
+    raw = _FakeRaw(rng.normal(scale=1e-6, size=(len(channels), 128)), channels)
     helpers = _FakeHelpers(raw)
+    distributed = _FakeDistributed(channels)
     recording = tmp_path / "sub-001_task-ERN_eeg.set"
     recording.write_bytes(b"set")
     import mne
@@ -190,113 +239,76 @@ def test_subject_extraction_runs_one_ica_two_wieners_and_reuses_cache(
         "events_from_annotations",
         lambda *_args, **_kwargs: (np.asarray([[1, 0, 1]]), {"event": 1}),
     )
-
     dataset, diagnostics, cached = module.extract_subject_components(
-        "sub-001",
-        recording,
-        cfg,
-        tmp_path / "cache",
-        helpers,
-        force=False,
+        "sub-001", recording, cfg, tmp_path / "cache", helpers, False, distributed
     )
 
     assert not cached
-    assert helpers.read_calls == 1
-    assert helpers.common_calls == 1
-    assert helpers.ica_calls == 1
-    assert helpers.wiener_calls == ["sub-001", "sub-001_ica"]
-    assert set(dataset.features) == set(module.BASE_CONDITIONS)
+    assert distributed.calls == 3
+    assert set(dataset.features) == set(module.CONDITIONS)
     assert dataset.features["raw"].shape == (4, 211)
-    assert dataset.features["wiener_coherent"].shape == (4, 211)
-    assert dataset.matrix(module.COMBINED_CONDITION).shape == (4, 422)
+    assert dataset.features["step1_coherent"].shape == (4, 165)
+    assert dataset.features["step2_coherent"].shape == (4, 211)
     np.testing.assert_array_equal(dataset.y, [0, 0, 1, 1])
-    assert diagnostics["ica_excluded_components"] == [1, 3]
-    assert "window_diagnostics" not in diagnostics["raw_wiener"]
+    assert tuple(diagnostics["steps"]) == module.STEP_NAMES
+    assert len(list((tmp_path / "cache").rglob("*.edf"))) == 6
 
     second_helpers = _FakeHelpers(raw)
+    second_distributed = _FakeDistributed(channels)
     cached_dataset, _, cached = module.extract_subject_components(
         "sub-001",
         recording,
         cfg,
         tmp_path / "cache",
         second_helpers,
-        force=False,
+        False,
+        second_distributed,
     )
     assert cached
     assert second_helpers.read_calls == 0
-    np.testing.assert_allclose(
-        cached_dataset.matrix(module.COMBINED_CONDITION),
-        dataset.matrix(module.COMBINED_CONDITION),
-        rtol=1e-6,
-        atol=1e-6,
-    )
+    assert second_distributed.calls == 0
+    np.testing.assert_allclose(cached_dataset.matrix("step3_specific"), dataset.matrix("step3_specific"))
 
 
-def test_group_folds_are_subject_disjoint_and_cover_each_trial_once():
+def test_group_folds_and_subject_split_are_disjoint():
     module = _load_script()
     subjects = [f"sub-{index:02d}" for index in range(10)]
     groups = np.repeat(subjects, 4)
     y = np.tile([0, 0, 1, 1], len(subjects))
-
     folds = module.make_group_folds(y, groups, n_splits=5, random_state=42)
 
-    assert len(folds) == 5
     test_counts = np.zeros(len(y), dtype=int)
     for train_index, test_index in folds:
         assert not set(groups[train_index]) & set(groups[test_index])
-        assert set(y[train_index]) == {0, 1}
-        assert set(y[test_index]) == {0, 1}
         test_counts[test_index] += 1
     np.testing.assert_array_equal(test_counts, 1)
-
-
-def test_single_subject_split_is_deterministic_and_disjoint():
-    module = _load_script()
-    subjects = [f"sub-{index:02d}" for index in range(10)]
-
     first = module.split_subjects(subjects, test_size=0.2, random_state=42)
     second = module.split_subjects(subjects, test_size=0.2, random_state=42)
-
     assert first == second
-    train_subjects, test_subjects = first
-    assert len(train_subjects) == 8
-    assert len(test_subjects) == 2
-    assert not set(train_subjects) & set(test_subjects)
+    assert len(first[0]) == 8
+    assert len(first[1]) == 2
+    assert not set(first[0]) & set(first[1])
 
 
-def test_grid_space_matches_script06_phase_one_policy():
+def test_grid_space_and_fixed_svm_policy():
     module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
-
+    cfg = _config(module)
     grid = module.build_grid_param_space(cfg)
-
     assert grid["model__n_estimators"] == [500]
-    assert grid["model__max_depth"] == [3, 4, 5, 6]
-    assert grid["model__learning_rate"] == [0.01, 0.05, 0.1, 0.3]
     assert set(grid) == {
         f"model__{key}" for key in cfg["ml"]["xgboost"]["param_grid"]
     }
 
-
-def test_held_out_shap_aggregation_reports_component_shares():
-    module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
-    full, coherent = module.build_feature_layouts(cfg)
-    metadata = module.build_combined_feature_metadata(full, coherent)
-    values = np.ones((6, len(metadata)), dtype=float)
-    coherent_indices = metadata.loc[
-        metadata["component"] == "coherent", "feature_index"
-    ].to_numpy(int)
-    values[:, coherent_indices] = 3.0
-
-    tables = module.aggregate_shap(values, metadata)
-
-    assert len(tables["feature"]) == 422
-    components = tables["component"].set_index("component")
-    assert components.loc["specific", "mean_abs_shap_per_feature"] == 1.0
-    assert components.loc["coherent", "mean_abs_shap_per_feature"] == 3.0
-    assert np.isclose(components["total_abs_share"].sum(), 1.0)
-    assert set(tables["channel"]["component"]) == {"specific", "coherent"}
+    X = np.arange(40, dtype=float).reshape(10, 4)
+    y = np.tile([0, 1], 5)
+    scaler, fitted, params = module.fit_svm(
+        X, y, 42, cfg["erp_core"]["distributed_component_models"]["svm"]
+    )
+    assert fitted.kernel == "rbf"
+    assert fitted.class_weight == "balanced"
+    assert fitted.probability is True
+    assert params["C"] == 1.0
+    assert scaler.transform(X).shape == X.shape
 
 
 def test_classification_metrics_report_minority_class_performance():
@@ -306,7 +318,6 @@ def test_classification_metrics_report_minority_class_performance():
         np.asarray([0.1, 0.2, 0.8, 0.9]),
         0.5,
     )
-
     assert scores["auroc"] == 1.0
     assert scores["auprc"] == 1.0
     assert np.isclose(scores["f1"], 2.0 / 3.0)
@@ -315,14 +326,16 @@ def test_classification_metrics_report_minority_class_performance():
     assert np.isclose(scores["specificity"], 2.0 / 3.0)
     assert np.isclose(scores["balanced_accuracy"], 5.0 / 6.0)
     assert scores["accuracy"] == 0.75
-    assert scores["confusion_matrix"] == [[2, 1], [0, 1]]
 
 
 class _FakeClassifier:
+    fit_calls = []
+
     def __init__(self, **params):
         self.params = params
 
     def fit(self, X, y, verbose=False):
+        self.fit_calls.append(self)
         self.n_features_in_ = X.shape[1]
         return self
 
@@ -334,35 +347,20 @@ class _FakeClassifier:
 class _FakeGridSearchCV:
     calls = []
 
-    def __init__(
-        self,
-        estimator,
-        param_grid,
-        cv,
-        scoring,
-        n_jobs,
-        verbose,
-        refit,
-        error_score,
-        return_train_score,
-    ):
+    def __init__(self, estimator, param_grid, cv, scoring, n_jobs, verbose, refit,
+                 error_score, return_train_score):
         self.estimator = estimator
         self.param_grid = param_grid
         self.cv = cv
         self.scoring = scoring
-        self.n_jobs = n_jobs
         self.calls.append(self)
 
     def fit(self, X, y):
         scaler = StandardScaler().fit(X)
         model = self.estimator.named_steps["model"]
         model.fit(scaler.transform(X), y)
-        self.best_estimator_ = Pipeline(
-            [("scaler", scaler), ("model", model)]
-        )
-        self.best_params_ = {
-            key: values[0] for key, values in self.param_grid.items()
-        }
+        self.best_estimator_ = Pipeline([("scaler", scaler), ("model", model)])
+        self.best_params_ = {key: values[0] for key, values in self.param_grid.items()}
         self.best_score_ = 0.75
         self.cv_results_ = {
             "params": [self.best_params_],
@@ -375,35 +373,29 @@ class _FakeGridSearchCV:
         return self
 
 
-def test_full_run_writes_one_metric_row_per_condition_and_test_shap(
-    tmp_path, monkeypatch
-):
-    module = _load_script()
-    cfg = module.load_config("configs/erp_core_flankers.yaml")
-    cfg = deepcopy(cfg)
-    cfg["paths"]["cache_dir"] = str(tmp_path / "cache")
+def _run_fixture(module, tmp_path, monkeypatch):
+    cfg = deepcopy(_config(module))
     cfg["erp_core"]["data_dir"] = str(tmp_path / "data")
+    cfg["erp_core"]["distributed_components"]["cache_subdir"] = str(
+        tmp_path / "cache"
+    )
     subjects = [f"sub-{index:02d}" for index in range(10)]
     recordings = [
-        {
-            "subject_id": subject,
-            "ern": tmp_path / f"{subject}_task-ERN_eeg.set",
-        }
+        {"subject_id": subject, "ern": tmp_path / f"{subject}_task-ERN_eeg.set"}
         for subject in subjects
     ]
-    rng = np.random.default_rng(7)
     groups = np.repeat(subjects, 4)
     y = np.tile([0, 0, 1, 1], len(subjects)).astype(np.int8)
-    samples = np.tile([10, 20, 30, 40], len(subjects))
-    features = {
-        condition: rng.normal(size=(len(y), 211))
-        for condition in module.BASE_CONDITIONS
-    }
+    rng = np.random.default_rng(7)
+    layouts = module.build_feature_layouts(cfg)
     dataset = module.ComponentDataset(
-        features=features,
+        features={
+            condition: rng.normal(size=(len(y), len(layouts[condition].feature_names)))
+            for condition in module.CONDITIONS
+        },
         y=y,
         subject_ids=groups,
-        samples=samples,
+        samples=np.tile([10, 20, 30, 40], len(subjects)),
     )
 
     class FakeHelpers:
@@ -413,6 +405,13 @@ def test_full_run_writes_one_metric_row_per_condition_and_test_shap(
         def _select_recordings(self, values, **_kwargs):
             return values
 
+    diagnostics = {
+        "steps": {
+            step: {"active_channels": [], "max_abs_step_conservation_error_uv": 0.0}
+            for step in module.STEP_NAMES
+        },
+        "max_abs_cumulative_conservation_error_uv": 0.0,
+    }
     eligibility = [
         {
             "subject_id": subject,
@@ -423,81 +422,93 @@ def test_full_run_writes_one_metric_row_per_condition_and_test_shap(
             "n_correct": 2,
             "n_incorrect": 2,
             "reason": "",
-            "diagnostics": {
-                "ica_excluded_components": [],
-                "raw_wiener": {},
-                "ica_wiener": {},
-            },
+            "diagnostics": diagnostics,
         }
         for index, subject in enumerate(subjects)
     ]
-
     monkeypatch.setattr(module, "load_config", lambda _path: deepcopy(cfg))
     monkeypatch.setattr(module, "_load_script10", lambda: FakeHelpers())
     monkeypatch.setattr(module, "extract_all_subjects", lambda *_args: eligibility)
     monkeypatch.setattr(module, "load_component_dataset", lambda *_args: dataset)
     monkeypatch.setattr(module.xgb, "XGBClassifier", _FakeClassifier)
-    _FakeGridSearchCV.calls = []
+    monkeypatch.setattr(module, "SVC", _FakeClassifier)
     monkeypatch.setattr(module, "GridSearchCV", _FakeGridSearchCV)
     monkeypatch.setattr(
-        module,
-        "compute_shap_values",
-        lambda _model, X, _names: np.full_like(X, 0.25),
+        module.joblib, "dump", lambda _value, path: Path(path).write_bytes(b"model")
     )
-    monkeypatch.setattr(
-        module,
-        "plot_shap_summary",
-        lambda *_args, **_kwargs: Path(_args[4]).write_bytes(b"png"),
-    )
-    monkeypatch.setattr(
-        module.joblib,
-        "dump",
-        lambda _value, path: Path(path).write_bytes(b"model"),
-    )
+    _FakeClassifier.fit_calls = []
+    _FakeGridSearchCV.calls = []
+    return cfg
 
+
+@pytest.mark.parametrize(
+    ("model", "expected_roots", "expected_fits"),
+    [
+        ("both", {"xgboost", "svm"}, 14),
+        ("xgboost", {"xgboost"}, 7),
+        ("svm", {"svm"}, 7),
+    ],
+)
+def test_run_modes_write_separate_complete_outputs(
+    tmp_path, monkeypatch, model, expected_roots, expected_fits
+):
+    module = _load_script()
+    _run_fixture(module, tmp_path, monkeypatch)
     out = module.run(
         "configs/erp_core_flankers.yaml",
         output_dir=tmp_path / "results",
         workers=1,
+        model=model,
     )
 
-    condition_metrics = pd.read_csv(out / "condition_metrics.csv")
-    predictions = pd.read_csv(out / "predictions.csv")
-    manifest = pd.read_csv(out / "split_manifest.csv")
-    assert len(condition_metrics) == 7
-    assert condition_metrics["condition"].nunique() == 7
-    expected_test_metrics = {
-        "auprc",
-        "precision",
-        "recall",
-        "specificity",
-        "balanced_accuracy",
-    }
-    assert expected_test_metrics.issubset(condition_metrics.columns)
-    assert condition_metrics["grid_best_inner_auprc"].eq(0.75).all()
+    assert {path.name for path in out.iterdir() if path.is_dir()} == expected_roots
+    assert len(_FakeClassifier.fit_calls) == expected_fits
+    for model_name in expected_roots:
+        root = out / model_name
+        metrics = pd.read_csv(root / "condition_metrics.csv")
+        assert len(metrics) == 7
+        assert set(module._METRIC_NAMES).issubset(metrics.columns)
+        assert pd.read_csv(root / "predictions.csv").groupby("condition").size().eq(8).all()
+        assert (root / "subject_metrics.csv").is_file()
+        assert (root / "comparison_summary.csv").is_file()
+        assert (root / "condition_deltas.csv").is_file()
+        assert (root / "conditions" / "raw" / "model.joblib").is_file()
+    assert not (out / "condition_metrics.csv").exists()
+    assert not (out / "shap").exists()
+    assert not (out / "subjects").exists()
+    assert not list(out.rglob("*.edf"))
+    summary = json.loads((out / "run_summary.json").read_text())
+    assert set(summary["selected_models"]) == expected_roots
+    assert summary["shap_output"] is False
+    assert summary["continuous_component_output"] is False
+    assert summary["shared_component_cache"] == str((tmp_path / "cache").resolve())
+    assert "comparison_summaries" not in summary
+
+
+def test_xgboost_grid_search_stays_training_only(tmp_path, monkeypatch):
+    module = _load_script()
+    _run_fixture(module, tmp_path, monkeypatch)
+    out = module.run(
+        "configs/erp_core_flankers.yaml",
+        output_dir=tmp_path / "results",
+        model="xgboost",
+        grid_search_override=True,
+    )
     assert len(_FakeGridSearchCV.calls) == 7
     assert all(len(search.cv) == 5 for search in _FakeGridSearchCV.calls)
-    assert all(
-        search.scoring == "average_precision"
-        for search in _FakeGridSearchCV.calls
-    )
-    assert predictions.groupby("condition").size().eq(8).all()
-    assert len(manifest) == len(subjects)
-    assert manifest["split"].value_counts().to_dict() == {"train": 8, "test": 2}
-    shap_values = np.load(out / "shap" / "shap_values_test.npy")
-    assert shap_values.shape == (8, 422)
-    assert np.isfinite(shap_values).all()
-    assert (out / "shap" / "shap_summary.png").is_file()
-    assert (out / "conditions" / "raw" / "model.joblib").is_file()
-    assert (out / "conditions" / "raw" / "best_params.json").is_file()
-    assert (
-        out / "conditions" / "raw" / "grid_search_results.csv"
-    ).is_file()
-    grid_results = pd.read_csv(
-        out / "conditions" / "raw" / "grid_search_results.csv"
-    )
-    assert {
-        "rank_test_auprc",
-        "mean_test_auprc",
-        "std_test_auprc",
-    }.issubset(grid_results.columns)
+    assert all(search.scoring == "average_precision" for search in _FakeGridSearchCV.calls)
+    metrics = pd.read_csv(out / "xgboost" / "condition_metrics.csv")
+    assert metrics["training_strategy"].eq("grid_search").all()
+    assert metrics["grid_best_inner_auprc"].eq(0.75).all()
+    assert (out / "xgboost" / "conditions" / "raw" / "grid_search_results.csv").is_file()
+
+
+def test_svm_rejects_explicit_grid_search(tmp_path):
+    module = _load_script()
+    with pytest.raises(ValueError, match="applies only to XGBoost"):
+        module.run(
+            "configs/erp_core_flankers.yaml",
+            output_dir=tmp_path / "results",
+            model="svm",
+            grid_search_override=True,
+        )

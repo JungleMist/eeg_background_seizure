@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Compare seven ERP-CORE ERN signal-component conditions with XGBoost.
+"""Compare serial ERP-CORE ERN ECMAD components with XGBoost and SVM.
 
 Every condition uses the same response-locked trials and one deterministic
-subject-disjoint train/test split.  GridSearchCV runs only within the training
-subjects.  The ``raw`` condition means common preprocessing without ICA or
+subject-disjoint train/test split. Three ECMAD steps run in series, with each
+specific output feeding the next step and each coherent condition representing
+only the component separated at that step. By default both XGBoost and a fixed
+RBF SVM are trained. The ``raw`` condition means common preprocessing without
 ECMAD denoising; it is not the unfiltered EEGLAB recording.
 """
 from __future__ import annotations
@@ -18,12 +20,11 @@ import json
 import math
 from multiprocessing import get_context
 from pathlib import Path
+import shutil
+import sys
 from typing import Any, Sequence
 
 import joblib
-import matplotlib
-
-matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 import yaml
@@ -41,6 +42,7 @@ from sklearn.metrics import (
 from sklearn.model_selection import GridSearchCV, StratifiedGroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 from threadpoolctl import threadpool_limits
 
 from eeg_bg.config.settings import load_config
@@ -48,9 +50,6 @@ from eeg_bg.features.extraction import (
     build_feature_names,
     extract_epoch_features_for_layout,
 )
-from eeg_bg.ml.shap_analysis import compute_shap_values, plot_shap_summary
-
-
 ERP_ERN_CHANNELS: tuple[str, ...] = (
     "FP1", "FP2", "F3", "F4", "F7", "F8", "FC3", "FC4", "C3", "C4",
     "P3", "P4", "P7", "P8", "O1", "O2", "Fz", "FCz", "Cz",
@@ -66,25 +65,25 @@ ERP_ERN_SYMMETRIC_PAIRS: tuple[tuple[str, str], ...] = (
     ("O1", "O2"),
 )
 
-BASE_CONDITIONS: tuple[str, ...] = (
-    "wiener_specific",
-    "wiener_coherent",
-    "ica_wiener_specific",
-    "ica_wiener_coherent",
-    "raw",
-    "ica",
+STEP_NAMES: tuple[str, ...] = ("step1", "step2", "step3")
+COMPONENT_NAMES: tuple[str, ...] = tuple(
+    f"{step}_{component}"
+    for step in STEP_NAMES
+    for component in ("specific", "coherent")
 )
-COMBINED_CONDITION = "wiener_specific_coherent"
-CONDITIONS: tuple[str, ...] = (
-    "wiener_specific",
-    "wiener_coherent",
-    COMBINED_CONDITION,
-    "ica_wiener_specific",
-    "ica_wiener_coherent",
-    "raw",
-    "ica",
+CONDITIONS: tuple[str, ...] = ("raw", *COMPONENT_NAMES)
+MODEL_NAMES: tuple[str, ...] = ("xgboost", "svm")
+_CACHE_SCHEMA = 2
+_METRIC_NAMES: tuple[str, ...] = (
+    "auroc",
+    "auprc",
+    "f1",
+    "precision",
+    "recall",
+    "specificity",
+    "balanced_accuracy",
+    "accuracy",
 )
-_CACHE_SCHEMA = 1
 
 
 @dataclass(frozen=True)
@@ -102,14 +101,6 @@ class ComponentDataset:
     samples: np.ndarray
 
     def matrix(self, condition: str) -> np.ndarray:
-        if condition == COMBINED_CONDITION:
-            return np.concatenate(
-                [
-                    self.features["wiener_specific"],
-                    self.features["wiener_coherent"],
-                ],
-                axis=1,
-            )
         try:
             return self.features[condition]
         except KeyError as exc:
@@ -134,8 +125,9 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help=(
-            "Subject processes for feature generation and GridSearchCV parallel "
-            "jobs; each XGBoost fit uses one CPU thread (default: 1)."
+            "Subject processes and model-training CPU workers. With GridSearchCV, "
+            "workers parallelize candidates and each fit uses one thread "
+            "(default: 1)."
         ),
     )
     parser.add_argument(
@@ -144,9 +136,30 @@ def _parse_args() -> argparse.Namespace:
         help="Override the deterministic split/GridSearchCV seed.",
     )
     parser.add_argument(
+        "--model",
+        choices=("both", *MODEL_NAMES),
+        default="both",
+        help="Train both model families or only one (default: both).",
+    )
+    parser.add_argument(
+        "--grid-search",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable or disable training-only XGBoost GridSearchCV. The config "
+            "value erp_core.distributed_component_models.xgboost."
+            "grid_search_enabled is used when omitted (default: disabled)."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
-        help="Recompute subject caches and overwrite result files.",
+        help="Recompute feature caches and overwrite result files.",
+    )
+    parser.add_argument(
+        "--recompute-components",
+        action="store_true",
+        help="Ignore valid shared continuous-component caches and regenerate them.",
     )
     return parser.parse_args()
 
@@ -157,6 +170,21 @@ def _load_script10():
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load ERP-CORE helpers from {path}")
     module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_script15():
+    path = Path(__file__).with_name(
+        "15_compare_erp_core_ern_distributed_components_eegnet.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_erp_distributed_component_helpers", path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load distributed ECMAD helpers from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -192,62 +220,55 @@ def _project_path(value: str | Path, config_path: Path) -> Path:
     return path.resolve()
 
 
-def build_feature_layouts(cfg: dict) -> tuple[FeatureLayout, FeatureLayout]:
+def _feature_layout(channels: Sequence[str]) -> FeatureLayout:
+    ordered = tuple(channel for channel in ERP_ERN_CHANNELS if channel in channels)
+    channel_set = set(ordered)
+    pairs = tuple(
+        pair
+        for pair in ERP_ERN_SYMMETRIC_PAIRS
+        if pair[0] in channel_set and pair[1] in channel_set
+    )
+    return FeatureLayout(
+        channels=ordered,
+        symmetric_pairs=pairs,
+        feature_names=tuple(build_feature_names(ordered, pairs)),
+    )
+
+
+def build_feature_layouts(cfg: dict) -> dict[str, FeatureLayout]:
     full_names = tuple(
         build_feature_names(ERP_ERN_CHANNELS, ERP_ERN_SYMMETRIC_PAIRS)
     )
-    grouped = {
-        str(channel)
-        for group in cfg["channels"]["channel_groups"]
-        for channel in group
-    }
-    coherent_channels = tuple(
-        channel for channel in ERP_ERN_CHANNELS if channel in grouped
+    full = FeatureLayout(
+        channels=ERP_ERN_CHANNELS,
+        symmetric_pairs=ERP_ERN_SYMMETRIC_PAIRS,
+        feature_names=full_names,
     )
-    if not coherent_channels:
-        raise ValueError(
-            "No ERP ERN feature channel appears in channels.channel_groups"
-        )
-    coherent_set = set(coherent_channels)
-    coherent_pairs = tuple(
-        pair
-        for pair in ERP_ERN_SYMMETRIC_PAIRS
-        if pair[0] in coherent_set and pair[1] in coherent_set
-    )
-    coherent_names = tuple(
-        build_feature_names(coherent_channels, coherent_pairs)
-    )
-    return (
-        FeatureLayout(
-            channels=ERP_ERN_CHANNELS,
-            symmetric_pairs=ERP_ERN_SYMMETRIC_PAIRS,
-            feature_names=full_names,
-        ),
-        FeatureLayout(
-            channels=coherent_channels,
-            symmetric_pairs=coherent_pairs,
-            feature_names=coherent_names,
-        ),
-    )
+    try:
+        steps = cfg["erp_core"]["distributed_components"]["steps"]
+    except KeyError as exc:
+        raise KeyError("Missing erp_core.distributed_components.steps") from exc
+    if tuple(steps) != STEP_NAMES:
+        raise ValueError(f"Distributed ECMAD steps must be ordered as {STEP_NAMES}")
+    layouts = {"raw": full}
+    for step_name in STEP_NAMES:
+        grouped = {
+            str(channel)
+            for group in steps[step_name]["channel_groups"]
+            for channel in group
+        }
+        coherent = _feature_layout(grouped)
+        if not coherent.channels:
+            raise ValueError(f"{step_name} has no ERP ERN feature channels")
+        layouts[f"{step_name}_specific"] = full
+        layouts[f"{step_name}_coherent"] = coherent
+    return layouts
 
 
 def condition_feature_names(
-    full_layout: FeatureLayout,
-    coherent_layout: FeatureLayout,
+    layouts: dict[str, FeatureLayout],
 ) -> dict[str, tuple[str, ...]]:
-    names = {
-        "wiener_specific": full_layout.feature_names,
-        "wiener_coherent": coherent_layout.feature_names,
-        "ica_wiener_specific": full_layout.feature_names,
-        "ica_wiener_coherent": coherent_layout.feature_names,
-        "raw": full_layout.feature_names,
-        "ica": full_layout.feature_names,
-    }
-    names[COMBINED_CONDITION] = tuple(
-        [f"specific__{name}" for name in full_layout.feature_names]
-        + [f"coherent__{name}" for name in coherent_layout.feature_names]
-    )
-    return names
+    return {condition: layouts[condition].feature_names for condition in CONDITIONS}
 
 
 def _source_files(recording: Path) -> list[Path]:
@@ -261,8 +282,7 @@ def _source_files(recording: Path) -> list[Path]:
 def _cache_fingerprint(
     recording: Path,
     cfg: dict,
-    full_layout: FeatureLayout,
-    coherent_layout: FeatureLayout,
+    layouts: dict[str, FeatureLayout],
 ) -> str:
     payload = {
         "schema": _CACHE_SCHEMA,
@@ -275,18 +295,22 @@ def _cache_fingerprint(
             for path in _source_files(recording)
         ],
         "preprocessing": cfg["preprocessing"],
-        "channels": cfg["channels"],
         "wiener": cfg["wiener"],
+        "distributed_components": cfg["erp_core"]["distributed_components"],
+        "line_freq": cfg["erp_core"].get("line_freq"),
         "ern": cfg["erp_core"]["ern"],
         "response_pairing_window_sec": cfg["erp_core"][
             "response_pairing_window_sec"
         ],
-        "standard_ica": cfg["erp_core"]["standard_ica"],
         "feature_freq_band": (0.5, 30.0),
-        "full_channels": full_layout.channels,
-        "full_pairs": full_layout.symmetric_pairs,
-        "coherent_channels": coherent_layout.channels,
-        "coherent_pairs": coherent_layout.symmetric_pairs,
+        "feature_layouts": {
+            condition: {
+                "channels": layout.channels,
+                "symmetric_pairs": layout.symmetric_pairs,
+                "feature_names": layout.feature_names,
+            }
+            for condition, layout in layouts.items()
+        },
     }
     encoded = json.dumps(
         _jsonable(payload), sort_keys=True, separators=(",", ":")
@@ -295,7 +319,7 @@ def _cache_fingerprint(
 
 
 def _cache_path(cache_root: Path, subject_id: str) -> Path:
-    return cache_root / subject_id / "components.npz"
+    return cache_root / subject_id / "features.npz"
 
 
 def _load_subject_cache(
@@ -309,7 +333,7 @@ def _load_subject_cache(
             return None
         features = {
             condition: np.asarray(data[f"X_{condition}"], dtype=np.float64)
-            for condition in BASE_CONDITIONS
+            for condition in CONDITIONS
         }
         dataset = ComponentDataset(
             features=features,
@@ -331,7 +355,7 @@ def _save_subject_cache(
     temporary = path.with_suffix(".tmp.npz")
     arrays: dict[str, Any] = {
         f"X_{condition}": dataset.features[condition].astype(np.float32)
-        for condition in BASE_CONDITIONS
+        for condition in CONDITIONS
     }
     np.savez_compressed(
         temporary,
@@ -343,18 +367,6 @@ def _save_subject_cache(
         diagnostics=np.asarray(json.dumps(_jsonable(diagnostics), sort_keys=True)),
     )
     temporary.replace(path)
-
-
-def derive_coherent_raw(source, specific):
-    if source.ch_names != specific.ch_names:
-        raise ValueError("Source and specific Raw objects have different channels")
-    if source.n_times != specific.n_times or not np.isclose(
-        source.info["sfreq"], specific.info["sfreq"]
-    ):
-        raise ValueError("Source and specific Raw objects are not time-aligned")
-    coherent = source.copy()
-    coherent._data = source.get_data() - specific.get_data()
-    return coherent
 
 
 def _epochs_to_features(
@@ -387,14 +399,6 @@ def _epochs_to_features(
     return X
 
 
-def _summarize_wiener(diagnostics: dict) -> dict:
-    return {
-        key: value
-        for key, value in diagnostics.items()
-        if key != "window_diagnostics"
-    }
-
-
 def extract_subject_components(
     subject_id: str,
     recording: Path,
@@ -402,13 +406,13 @@ def extract_subject_components(
     cache_root: Path,
     helpers,
     force: bool,
+    distributed: Any | None = None,
+    recompute_components: bool = False,
 ) -> tuple[ComponentDataset, dict, bool]:
-    full_layout, coherent_layout = build_feature_layouts(cfg)
-    fingerprint = _cache_fingerprint(
-        recording, cfg, full_layout, coherent_layout
-    )
+    layouts = build_feature_layouts(cfg)
+    fingerprint = _cache_fingerprint(recording, cfg, layouts)
     path = _cache_path(cache_root, subject_id)
-    if not force:
+    if not force and not recompute_components:
         cached = _load_subject_cache(path, fingerprint)
         if cached is not None:
             dataset, diagnostics = cached
@@ -416,8 +420,19 @@ def extract_subject_components(
 
     import mne
 
+    if distributed is None:
+        distributed = _load_script15()
     original = helpers._read_recording(mne, recording)
     common = helpers._common_preprocess(original, cfg)
+    missing = [
+        channel
+        for channel in distributed.ERP_CORE_EEG_CHANNELS
+        if channel not in common.ch_names
+    ]
+    if missing:
+        raise ValueError(f"Missing ERP-CORE 30-channel input: {missing}")
+    common.pick(list(distributed.ERP_CORE_EEG_CHANNELS))
+    common.reorder_channels(list(distributed.ERP_CORE_EEG_CHANNELS))
     events, event_id = mne.events_from_annotations(common, verbose=False)
     table = helpers.build_response_table(
         events,
@@ -426,37 +441,17 @@ def extract_subject_components(
         float(cfg["erp_core"]["response_pairing_window_sec"]),
     )
 
-    ica_raw, excluded = helpers._standard_ica(common, cfg)
-    wiener_specific, raw_wiener_diagnostics = helpers._wiener_continuous(
-        common, cfg, subject_id
+    branches, component_diagnostics, components_cached = (
+        distributed.load_or_create_distributed_components(
+            common,
+            recording,
+            cfg,
+            subject_id,
+            helpers,
+            cache_root,
+            recompute_components,
+        )
     )
-    ica_wiener_specific, ica_wiener_diagnostics = helpers._wiener_continuous(
-        ica_raw, cfg, f"{subject_id}_ica"
-    )
-    wiener_coherent = derive_coherent_raw(common, wiener_specific)
-    ica_wiener_coherent = derive_coherent_raw(ica_raw, ica_wiener_specific)
-
-    np.testing.assert_allclose(
-        wiener_specific.get_data() + wiener_coherent.get_data(),
-        common.get_data(),
-        rtol=1e-7,
-        atol=1e-12,
-    )
-    np.testing.assert_allclose(
-        ica_wiener_specific.get_data() + ica_wiener_coherent.get_data(),
-        ica_raw.get_data(),
-        rtol=1e-7,
-        atol=1e-12,
-    )
-
-    branches = {
-        "raw": common,
-        "wiener_specific": wiener_specific,
-        "wiener_coherent": wiener_coherent,
-        "ica_wiener_specific": ica_wiener_specific,
-        "ica_wiener_coherent": ica_wiener_coherent,
-        "ica": ica_raw,
-    }
     epochs = helpers._make_shared_epochs(
         branches,
         table,
@@ -470,13 +465,10 @@ def extract_subject_components(
     labels = (~epochs["raw"].metadata["correct"].to_numpy(bool)).astype(np.int8)
     samples = np.asarray(epochs["raw"].events[:, 0], dtype=np.int64)
     features: dict[str, np.ndarray] = {}
-    for condition in BASE_CONDITIONS:
-        layout = (
-            coherent_layout
-            if condition in {"wiener_coherent", "ica_wiener_coherent"}
-            else full_layout
+    for condition in CONDITIONS:
+        features[condition] = _epochs_to_features(
+            epochs[condition], layouts[condition]
         )
-        features[condition] = _epochs_to_features(epochs[condition], layout)
         branch_labels = (
             ~epochs[condition].metadata["correct"].to_numpy(bool)
         ).astype(np.int8)
@@ -494,26 +486,26 @@ def extract_subject_components(
     )
     counts = np.bincount(labels, minlength=2)
     diagnostics = {
-        "subject_id": subject_id,
-        "recording": str(recording),
+        **component_diagnostics,
+        "components_cached": components_cached,
         "n_trials": len(labels),
         "n_correct": int(counts[0]),
         "n_incorrect": int(counts[1]),
-        "ica_excluded_components": [int(value) for value in excluded],
-        "raw_wiener": _summarize_wiener(raw_wiener_diagnostics),
-        "ica_wiener": _summarize_wiener(ica_wiener_diagnostics),
     }
     _save_subject_cache(path, dataset, fingerprint, diagnostics)
     return dataset, diagnostics, False
 
 
 def _extract_subject_worker(
-    args: tuple[str, str, dict, str, bool],
+    args: tuple[str, str, dict, str, bool, bool],
     helpers: Any | None = None,
+    distributed: Any | None = None,
 ) -> dict:
-    subject_id, recording, cfg, cache_root, force = args
+    subject_id, recording, cfg, cache_root, force, recompute_components = args
     if helpers is None:
         helpers = _load_script10()
+    if distributed is None:
+        distributed = _load_script15()
     with threadpool_limits(limits=1):
         try:
             dataset, diagnostics, cached = extract_subject_components(
@@ -523,6 +515,8 @@ def _extract_subject_worker(
                 Path(cache_root),
                 helpers,
                 force,
+                distributed,
+                recompute_components,
             )
         except Exception as exc:
             return {
@@ -554,6 +548,7 @@ def extract_all_subjects(
     cfg: dict,
     cache_root: Path,
     force: bool,
+    recompute_components: bool,
     workers: int,
 ) -> list[dict]:
     jobs = [
@@ -563,6 +558,7 @@ def extract_all_subjects(
             cfg,
             str(cache_root),
             force,
+            recompute_components,
         )
         for item in recordings
     ]
@@ -570,10 +566,11 @@ def extract_all_subjects(
         return []
     if workers == 1:
         helpers = _load_script10()
+        distributed = _load_script15()
         rows = []
         for index, job in enumerate(jobs, start=1):
             print(f"[features {index}/{len(jobs)}] {job[0]}")
-            rows.append(_extract_subject_worker(job, helpers))
+            rows.append(_extract_subject_worker(job, helpers, distributed))
         return rows
 
     rows_by_subject: dict[str, dict] = {}
@@ -610,12 +607,10 @@ def load_component_dataset(
     cfg: dict,
     cache_root: Path,
 ) -> ComponentDataset:
-    full_layout, coherent_layout = build_feature_layouts(cfg)
+    layouts = build_feature_layouts(cfg)
     datasets: list[ComponentDataset] = []
     for subject_id in subject_ids:
-        fingerprint = _cache_fingerprint(
-            recordings_by_subject[subject_id], cfg, full_layout, coherent_layout
-        )
+        fingerprint = _cache_fingerprint(recordings_by_subject[subject_id], cfg, layouts)
         cached = _load_subject_cache(
             _cache_path(cache_root, subject_id), fingerprint
         )
@@ -629,7 +624,7 @@ def load_component_dataset(
             condition: np.concatenate(
                 [dataset.features[condition] for dataset in datasets], axis=0
             )
-            for condition in BASE_CONDITIONS
+            for condition in CONDITIONS
         },
         y=np.concatenate([dataset.y for dataset in datasets]),
         subject_ids=np.concatenate([dataset.subject_ids for dataset in datasets]),
@@ -675,7 +670,7 @@ def split_subjects(
 ) -> tuple[list[str], list[str]]:
     """Make one deterministic subject-level train/test split."""
     if not 0.0 < test_size < 1.0:
-        raise ValueError("component_xgboost.test_size must be in (0, 1)")
+        raise ValueError("distributed_component_models.test_size must be in (0, 1)")
     ordered = np.asarray(sorted(set(subject_ids)), dtype=object)
     if len(ordered) < 3:
         raise ValueError("At least three eligible subjects are required")
@@ -791,6 +786,55 @@ def fit_grid_search_xgboost(
     return scaler, model, best_params, float(search.best_score_), cv_results
 
 
+def fit_default_xgboost(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    random_state: int,
+    workers: int,
+    device: str,
+) -> tuple[StandardScaler, Any]:
+    """Fit one model using XGBoost defaults plus required task parameters."""
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_train)
+    model = xgb.XGBClassifier(
+        **_xgb_params(
+            {},
+            y_train,
+            random_state,
+            workers=workers,
+            device=device,
+        )
+    )
+    model.fit(X_scaled, y_train)
+    return scaler, model
+
+
+def fit_svm(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    random_state: int,
+    svm_cfg: dict,
+) -> tuple[StandardScaler, SVC, dict[str, Any]]:
+    """Fit the fixed probability-enabled RBF SVM from experiment config."""
+    params = {
+        "kernel": str(svm_cfg.get("kernel", "rbf")),
+        "C": float(svm_cfg.get("C", 1.0)),
+        "gamma": svm_cfg.get("gamma", "scale"),
+        "class_weight": svm_cfg.get("class_weight", "balanced"),
+        "probability": bool(svm_cfg.get("probability", True)),
+        "random_state": random_state,
+    }
+    if params["kernel"] != "rbf":
+        raise ValueError("distributed_component_models.svm.kernel must be 'rbf'")
+    if not params["probability"]:
+        raise ValueError("distributed_component_models.svm.probability must be true")
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_train)
+    model = SVC(**params)
+    model.fit(X_scaled, y_train)
+    return scaler, model, _jsonable(params)
+
+
 def classification_metrics(
     y: np.ndarray,
     probabilities: np.ndarray,
@@ -821,7 +865,7 @@ def _prediction_frame(
     test_index: np.ndarray,
     probabilities: np.ndarray,
     threshold: float,
-) -> pd.DataFrame:
+) -> None:
     return pd.DataFrame(
         {
             "condition": condition,
@@ -859,139 +903,10 @@ def _subject_metric_rows(
     return rows
 
 
-def _feature_metadata(name: str, component: str, index: int) -> dict[str, Any]:
-    if name.startswith("asym_"):
-        _, left, right, band = name.split("_", 3)
-        return {
-            "feature_index": index,
-            "feature": f"{component}__{name}",
-            "component": component,
-            "channel": "",
-            "pair_left": left,
-            "pair_right": right,
-            "family": "asymmetry",
-            "band": band,
-        }
-    channel, suffix = name.split("_", 1)
-    if suffix.endswith("_power"):
-        family = "band_power"
-        band = suffix.removesuffix("_power")
-    elif suffix.startswith("hjorth_"):
-        family = "hjorth"
-        band = ""
-    elif suffix == "spectral_entropy":
-        family = "spectral_entropy"
-        band = ""
-    else:
-        family = "other"
-        band = ""
-    return {
-        "feature_index": index,
-        "feature": f"{component}__{name}",
-        "component": component,
-        "channel": channel,
-        "pair_left": "",
-        "pair_right": "",
-        "family": family,
-        "band": band,
-    }
-
-
-def build_combined_feature_metadata(
-    full_layout: FeatureLayout,
-    coherent_layout: FeatureLayout,
-) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for component, names in (
-        ("specific", full_layout.feature_names),
-        ("coherent", coherent_layout.feature_names),
-    ):
-        for name in names:
-            rows.append(_feature_metadata(name, component, len(rows)))
-    return pd.DataFrame(rows)
-
-
-def aggregate_shap(
-    shap_values: np.ndarray,
-    metadata: pd.DataFrame,
-) -> dict[str, pd.DataFrame]:
-    if shap_values.ndim != 2 or shap_values.shape[1] != len(metadata):
-        raise ValueError("SHAP values do not match combined feature metadata")
-    mean_abs = np.mean(np.abs(shap_values), axis=0)
-    feature = metadata.copy()
-    feature["mean_abs_shap"] = mean_abs
-    feature["rank"] = (
-        feature["mean_abs_shap"].rank(method="first", ascending=False).astype(int)
-    )
-    feature = feature.sort_values("rank", kind="mergesort").reset_index(drop=True)
-
-    component_rows = []
-    total = float(np.sum(mean_abs))
-    for component, group in metadata.groupby("component", sort=False):
-        values = mean_abs[group["feature_index"].to_numpy(int)]
-        component_total = float(np.sum(values))
-        component_rows.append(
-            {
-                "component": component,
-                "n_features": len(values),
-                "mean_abs_shap_per_feature": float(np.mean(values)),
-                "total_mean_abs_shap": component_total,
-                "total_abs_share": component_total / total if total else 0.0,
-            }
-        )
-    component_frame = pd.DataFrame(component_rows)
-
-    family_rows = []
-    for keys, group in metadata.groupby(
-        ["component", "family", "band"], sort=False, dropna=False
-    ):
-        values = mean_abs[group["feature_index"].to_numpy(int)]
-        family_rows.append(
-            {
-                "component": keys[0],
-                "family": keys[1],
-                "band": keys[2],
-                "n_features": len(values),
-                "mean_abs_shap": float(np.mean(values)),
-                "total_mean_abs_shap": float(np.sum(values)),
-            }
-        )
-    family_frame = pd.DataFrame(family_rows)
-
-    channel_contributions: dict[tuple[str, str], list[tuple[float, float]]] = {}
-    for row in metadata.itertuples(index=False):
-        value = float(mean_abs[int(row.feature_index)])
-        if row.family == "asymmetry":
-            for channel in (row.pair_left, row.pair_right):
-                channel_contributions.setdefault(
-                    (row.component, channel), []
-                ).append((0.5 * value, 0.5))
-        else:
-            channel_contributions.setdefault(
-                (row.component, row.channel), []
-            ).append((value, 1.0))
-    channel_frame = pd.DataFrame(
-        [
-            {
-                "component": component,
-                "channel": channel,
-                "mean_abs_shap": sum(value for value, _ in contributions)
-                / sum(weight for _, weight in contributions),
-            }
-            for (component, channel), contributions in channel_contributions.items()
-        ]
-    )
-    return {
-        "feature": feature,
-        "component": component_frame,
-        "family": family_frame,
-        "channel": channel_frame,
-    }
-
-
 def _comparison_summary(condition_metrics: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "condition",
+        "training_strategy",
         "auroc",
         "auprc",
         "f1",
@@ -1010,51 +925,30 @@ def _comparison_summary(condition_metrics: pd.DataFrame) -> pd.DataFrame:
 
 
 def _condition_deltas(condition_metrics: pd.DataFrame) -> pd.DataFrame:
-    comparisons = (
-        ("wiener_specific_minus_raw", "wiener_specific", "raw"),
-        ("wiener_coherent_minus_raw", "wiener_coherent", "raw"),
-        (
-            "specific_coherent_minus_specific",
-            COMBINED_CONDITION,
-            "wiener_specific",
-        ),
-        ("ica_minus_raw", "ica", "raw"),
-        (
-            "ica_wiener_specific_minus_ica",
-            "ica_wiener_specific",
-            "ica",
-        ),
-        (
-            "ica_wiener_coherent_minus_coherent",
-            "ica_wiener_coherent",
-            "wiener_coherent",
-        ),
-    )
     indexed = condition_metrics.set_index("condition")
     rows = []
-    for label, target, reference in comparisons:
-        for metric in (
-            "auroc",
-            "auprc",
-            "f1",
-            "precision",
-            "recall",
-            "specificity",
-            "balanced_accuracy",
-            "accuracy",
-        ):
-            rows.append(
-                {
+    for step_name in STEP_NAMES:
+        comparisons = (
+            ("specific_minus_raw", f"{step_name}_specific", "raw"),
+            ("coherent_minus_raw", f"{step_name}_coherent", "raw"),
+            (
+                "specific_minus_coherent",
+                f"{step_name}_specific",
+                f"{step_name}_coherent",
+            ),
+        )
+        for label, target, reference in comparisons:
+            for metric in _METRIC_NAMES:
+                rows.append({
+                    "step": step_name,
                     "comparison": label,
                     "target_condition": target,
                     "reference_condition": reference,
                     "metric": metric,
                     "delta": float(
-                        indexed.loc[target, metric]
-                        - indexed.loc[reference, metric]
+                        indexed.loc[target, metric] - indexed.loc[reference, metric]
                     ),
-                }
-            )
+                })
     return pd.DataFrame(rows)
 
 
@@ -1064,43 +958,150 @@ def _diagnostics_frame(eligibility_rows: list[dict]) -> pd.DataFrame:
         if not row["eligible"]:
             continue
         diagnostics = row["diagnostics"]
-        raw_wiener = diagnostics["raw_wiener"]
-        ica_wiener = diagnostics["ica_wiener"]
-        rows.append(
-            {
-                "subject_id": row["subject_id"],
-                "cached": row["cached"],
-                "ica_excluded_components": json.dumps(
-                    diagnostics["ica_excluded_components"]
-                ),
-                "ica_excluded_count": len(
-                    diagnostics["ica_excluded_components"]
-                ),
-                "raw_wiener_windows": raw_wiener.get("windows", 0),
-                "raw_wiener_processed_channel_windows": raw_wiener.get(
+        result = {
+            "subject_id": row["subject_id"],
+            "cached": row["cached"],
+            "max_abs_cumulative_conservation_error_uv": diagnostics[
+                "max_abs_cumulative_conservation_error_uv"
+            ],
+        }
+        for step_name in STEP_NAMES:
+            step = diagnostics["steps"][step_name]
+            result.update({
+                f"{step_name}_windows": step.get("windows", 0),
+                f"{step_name}_processed_channel_windows": step.get(
                     "processed_channel_windows", 0
                 ),
-                "raw_wiener_solve_failures": raw_wiener.get("solve_failures", 0),
-                "raw_wiener_below_coherence": raw_wiener.get(
+                f"{step_name}_solve_failures": step.get("solve_failures", 0),
+                f"{step_name}_below_coherence": step.get(
                     "below_coherence_candidates", 0
                 ),
-                "raw_wiener_group_rates": json.dumps(
-                    raw_wiener.get("group_processing_rates", {}), sort_keys=True
+                f"{step_name}_active_channels": json.dumps(
+                    step.get("active_channels", [])
                 ),
-                "ica_wiener_windows": ica_wiener.get("windows", 0),
-                "ica_wiener_processed_channel_windows": ica_wiener.get(
-                    "processed_channel_windows", 0
+                f"{step_name}_group_rates": json.dumps(
+                    step.get("group_processing_rates", {}), sort_keys=True
                 ),
-                "ica_wiener_solve_failures": ica_wiener.get("solve_failures", 0),
-                "ica_wiener_below_coherence": ica_wiener.get(
-                    "below_coherence_candidates", 0
+                f"{step_name}_max_abs_conservation_error_uv": step.get(
+                    "max_abs_step_conservation_error_uv", 0.0
                 ),
-                "ica_wiener_group_rates": json.dumps(
-                    ica_wiener.get("group_processing_rates", {}), sort_keys=True
-                ),
-            }
-        )
+            })
+        rows.append(result)
     return pd.DataFrame(rows)
+
+
+def _train_model_family(
+    model_name: str,
+    dataset: ComponentDataset,
+    train_index: np.ndarray,
+    test_index: np.ndarray,
+    train_subjects: Sequence[str],
+    test_subjects: Sequence[str],
+    feature_names: dict[str, tuple[str, ...]],
+    cfg: dict,
+    experiment_cfg: dict,
+    random_state: int,
+    workers: int,
+    threshold: float,
+    device: str,
+    grid_search_enabled: bool,
+    inner_folds: list[tuple[np.ndarray, np.ndarray]] | None,
+    out: Path,
+) -> pd.DataFrame:
+    model_root = out / model_name
+    condition_rows: list[dict[str, Any]] = []
+    prediction_frames: list[pd.DataFrame] = []
+    for condition_index, condition in enumerate(CONDITIONS, start=1):
+        X = dataset.matrix(condition)
+        if X.shape[1] != len(feature_names[condition]):
+            raise RuntimeError(
+                f"{condition} feature shape/name mismatch: "
+                f"{X.shape[1]} != {len(feature_names[condition])}"
+            )
+        if model_name == "xgboost" and grid_search_enabled:
+            print(f"[XGBoost GridSearchCV {condition_index}/{len(CONDITIONS)}] {condition}")
+            if inner_folds is None:
+                raise RuntimeError("GridSearchCV folds were not initialized")
+            scaler, fitted, best_params, grid_score, grid_results = (
+                fit_grid_search_xgboost(
+                    X[train_index],
+                    dataset.y[train_index],
+                    inner_folds,
+                    cfg,
+                    random_state,
+                    workers,
+                    device,
+                )
+            )
+            training_strategy = "grid_search"
+        elif model_name == "xgboost":
+            print(f"[XGBoost {condition_index}/{len(CONDITIONS)}] {condition}")
+            scaler, fitted = fit_default_xgboost(
+                X[train_index],
+                dataset.y[train_index],
+                random_state,
+                workers,
+                device,
+            )
+            best_params = {}
+            grid_score = None
+            grid_results = None
+            training_strategy = "default_parameters"
+        else:
+            print(f"[SVM {condition_index}/{len(CONDITIONS)}] {condition}")
+            scaler, fitted, best_params = fit_svm(
+                X[train_index],
+                dataset.y[train_index],
+                random_state,
+                experiment_cfg["svm"],
+            )
+            grid_score = None
+            grid_results = None
+            training_strategy = "fixed_parameters"
+
+        X_test = scaler.transform(X[test_index])
+        probabilities = fitted.predict_proba(X_test)[:, 1]
+        scores = classification_metrics(dataset.y[test_index], probabilities, threshold)
+        condition_rows.append({
+            "condition": condition,
+            "training_strategy": training_strategy,
+            "n_train_subjects": len(train_subjects),
+            "n_test_subjects": len(test_subjects),
+            "n_train_trials": len(train_index),
+            "n_test_trials": len(test_index),
+            **{metric: scores[metric] for metric in _METRIC_NAMES},
+            "threshold": threshold,
+            "grid_best_inner_auprc": grid_score,
+            "best_params": json.dumps(best_params, sort_keys=True),
+            "confusion_matrix": json.dumps(scores["confusion_matrix"]),
+        })
+        predictions = _prediction_frame(
+            condition, dataset, test_index, probabilities, threshold
+        )
+        prediction_frames.append(predictions)
+        condition_dir = model_root / "conditions" / condition
+        condition_dir.mkdir(parents=True, exist_ok=True)
+        joblib.dump(scaler, condition_dir / "scaler.joblib")
+        joblib.dump(fitted, condition_dir / "model.joblib")
+        _save_json(best_params, condition_dir / "best_params.json")
+        if grid_results is not None:
+            grid_results.to_csv(condition_dir / "grid_search_results.csv", index=False)
+        predictions.to_csv(condition_dir / "predictions.csv", index=False)
+        _save_json(scores, condition_dir / "metrics.json")
+
+    condition_metrics = pd.DataFrame(condition_rows)
+    condition_metrics.to_csv(model_root / "condition_metrics.csv", index=False)
+    predictions = pd.concat(prediction_frames, ignore_index=True)
+    predictions.to_csv(model_root / "predictions.csv", index=False)
+    pd.DataFrame(_subject_metric_rows(predictions, threshold)).to_csv(
+        model_root / "subject_metrics.csv", index=False
+    )
+    comparison = _comparison_summary(condition_metrics)
+    comparison.to_csv(model_root / "comparison_summary.csv", index=False)
+    _condition_deltas(condition_metrics).to_csv(
+        model_root / "condition_deltas.csv", index=False
+    )
+    return None
 
 
 def run(
@@ -1109,16 +1110,24 @@ def run(
     output_dir: Path | None = None,
     workers: int = 1,
     random_state_override: int | None = None,
+    model: str = "both",
+    grid_search_override: bool | None = None,
     force: bool = False,
+    recompute_components: bool = False,
 ) -> Path:
     if workers < 1:
         raise ValueError("--workers must be >= 1")
+    if model not in {"both", *MODEL_NAMES}:
+        raise ValueError(f"Unknown model selection: {model}")
+    selected_models = MODEL_NAMES if model == "both" else (model,)
+    if model == "svm" and grid_search_override is True:
+        raise ValueError("--grid-search applies only to XGBoost")
     config_path = Path(config_path)
     cfg = load_config(config_path)
-    experiment_cfg = cfg["erp_core"]["component_xgboost"]
+    experiment_cfg = cfg["erp_core"]["distributed_component_models"]
     test_size = float(experiment_cfg["test_size"])
     if not 0.0 < test_size < 1.0:
-        raise ValueError("component_xgboost.test_size must be in (0, 1)")
+        raise ValueError("distributed_component_models.test_size must be in (0, 1)")
     random_state = (
         int(random_state_override)
         if random_state_override is not None
@@ -1126,24 +1135,36 @@ def run(
     )
     threshold = float(experiment_cfg.get("decision_threshold", 0.5))
     if not 0.0 < threshold < 1.0:
-        raise ValueError("component_xgboost.decision_threshold must be in (0, 1)")
-    device = str(experiment_cfg.get("device", "cpu"))
+        raise ValueError(
+            "distributed_component_models.decision_threshold must be in (0, 1)"
+        )
+    xgboost_cfg = experiment_cfg["xgboost"]
+    device = str(xgboost_cfg.get("device", "cpu"))
+    grid_search_enabled = "xgboost" in selected_models and (
+        bool(grid_search_override)
+        if grid_search_override is not None
+        else bool(xgboost_cfg.get("grid_search_enabled", False))
+    )
     resolved_cfg = deepcopy(cfg)
-    resolved_cfg["erp_core"]["component_xgboost"]["random_state"] = random_state
+    resolved_experiment = resolved_cfg["erp_core"]["distributed_component_models"]
+    resolved_experiment["random_state"] = random_state
+    resolved_experiment["selected_models"] = list(selected_models)
+    resolved_experiment["xgboost"]["grid_search_enabled"] = grid_search_enabled
 
     out = (
         output_dir.expanduser().resolve()
         if output_dir is not None
         else _project_path(experiment_cfg["output_dir"], config_path)
     )
-    if out.exists() and any(out.iterdir()) and not force:
-        raise FileExistsError(
-            f"Output directory is not empty: {out}; pass --force to overwrite files"
-        )
+    if out.exists() and any(out.iterdir()):
+        if not force:
+            raise FileExistsError(
+                f"Output directory is not empty: {out}; pass --force to overwrite files"
+            )
+        shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
-    cache_root = (
-        Path(cfg["paths"]["cache_dir"])
-        / str(experiment_cfg.get("cache_subdir", "erp_core_ern_components"))
+    cache_root = _project_path(
+        cfg["erp_core"]["distributed_components"]["cache_subdir"], config_path
     )
     cache_root.mkdir(parents=True, exist_ok=True)
 
@@ -1160,7 +1181,7 @@ def run(
         str(item["subject_id"]): Path(item["ern"]) for item in recordings
     }
     eligibility_rows = extract_all_subjects(
-        recordings, cfg, cache_root, force, workers
+        recordings, cfg, cache_root, force, recompute_components, workers
     )
     eligibility_frame = pd.DataFrame(
         [{key: value for key, value in row.items() if key != "diagnostics"}
@@ -1168,7 +1189,7 @@ def run(
     )
     eligibility_frame.to_csv(out / "eligibility.csv", index=False)
     diagnostics_frame = _diagnostics_frame(eligibility_rows)
-    diagnostics_frame.to_csv(out / "ica_diagnostics.csv", index=False)
+    diagnostics_frame.to_csv(out / "processing_diagnostics.csv", index=False)
     eligible_subjects = sorted(
         str(row["subject_id"])
         for row in eligibility_rows
@@ -1180,12 +1201,6 @@ def run(
     train_subjects, test_subjects = split_subjects(
         eligible_subjects, test_size, random_state
     )
-    grid_cv_folds = int(cfg["ml"]["xgboost"]["cv_folds"])
-    if len(train_subjects) < grid_cv_folds:
-        raise ValueError(
-            f"GridSearchCV needs at least {grid_cv_folds} training subjects; "
-            f"found {len(train_subjects)}"
-        )
     train_index = np.flatnonzero(
         np.isin(dataset.subject_ids, np.asarray(train_subjects, dtype=str))
     )
@@ -1196,29 +1211,32 @@ def run(
         raise RuntimeError("Deterministic subject split produced an empty partition")
     if set(dataset.subject_ids[train_index]) & set(dataset.subject_ids[test_index]):
         raise RuntimeError("Subject leakage between train and test partitions")
-    inner_folds = make_group_folds(
-        dataset.y[train_index],
-        dataset.subject_ids[train_index],
-        grid_cv_folds,
-        random_state,
-    )
-    full_layout, coherent_layout = build_feature_layouts(cfg)
-    feature_names = condition_feature_names(full_layout, coherent_layout)
+    grid_cv_folds: int | None = None
+    inner_folds: list[tuple[np.ndarray, np.ndarray]] | None = None
+    if grid_search_enabled:
+        grid_cv_folds = int(cfg["ml"]["xgboost"]["cv_folds"])
+        if len(train_subjects) < grid_cv_folds:
+            raise ValueError(
+                f"GridSearchCV needs at least {grid_cv_folds} training subjects; "
+                f"found {len(train_subjects)}"
+            )
+        inner_folds = make_group_folds(
+            dataset.y[train_index],
+            dataset.subject_ids[train_index],
+            grid_cv_folds,
+            random_state,
+        )
+    layouts = build_feature_layouts(cfg)
+    feature_names = condition_feature_names(layouts)
     feature_layout_payload = {
         condition: {
             "feature_count": len(names),
             "feature_names": names,
+            "channels": layouts[condition].channels,
+            "symmetric_pairs": layouts[condition].symmetric_pairs,
         }
         for condition, names in feature_names.items()
     }
-    feature_layout_payload["full_channels"] = list(full_layout.channels)
-    feature_layout_payload["full_symmetric_pairs"] = list(
-        full_layout.symmetric_pairs
-    )
-    feature_layout_payload["coherent_channels"] = list(coherent_layout.channels)
-    feature_layout_payload["coherent_symmetric_pairs"] = list(
-        coherent_layout.symmetric_pairs
-    )
     _save_json(feature_layout_payload, out / "feature_layout.json")
 
     split_manifest_rows = []
@@ -1246,137 +1264,25 @@ def run(
         out / "split_manifest.json",
     )
 
-    condition_metric_rows: list[dict[str, Any]] = []
-    prediction_frames: list[pd.DataFrame] = []
-    test_shap: np.ndarray | None = None
-    test_scaled: np.ndarray | None = None
-    combined_metadata = build_combined_feature_metadata(
-        full_layout, coherent_layout
-    )
-
-    for condition_index, condition in enumerate(CONDITIONS, start=1):
-        X = dataset.matrix(condition)
-        if X.shape[1] != len(feature_names[condition]):
-            raise RuntimeError(
-                f"{condition} feature shape/name mismatch: "
-                f"{X.shape[1]} != {len(feature_names[condition])}"
-            )
-        print(
-            f"[GridSearchCV {condition_index}/{len(CONDITIONS)}] {condition}"
-        )
-        scaler, model, best_params, grid_best_score, grid_results = (
-            fit_grid_search_xgboost(
-                X[train_index],
-                dataset.y[train_index],
-                inner_folds,
-                cfg,
-                random_state,
-                workers,
-                device,
-            )
-        )
-        X_test = scaler.transform(X[test_index])
-        probabilities = model.predict_proba(X_test)[:, 1]
-        scores = classification_metrics(
-            dataset.y[test_index], probabilities, threshold
-        )
-        condition_metric_rows.append(
-            {
-                "condition": condition,
-                "n_train_subjects": len(train_subjects),
-                "n_test_subjects": len(test_subjects),
-                "n_train_trials": len(train_index),
-                "n_test_trials": len(test_index),
-                "auroc": scores["auroc"],
-                "auprc": scores["auprc"],
-                "f1": scores["f1"],
-                "precision": scores["precision"],
-                "recall": scores["recall"],
-                "specificity": scores["specificity"],
-                "balanced_accuracy": scores["balanced_accuracy"],
-                "accuracy": scores["accuracy"],
-                "threshold": threshold,
-                "grid_best_inner_auprc": grid_best_score,
-                "best_params": json.dumps(best_params, sort_keys=True),
-                "confusion_matrix": json.dumps(scores["confusion_matrix"]),
-            }
-        )
-        predictions = _prediction_frame(
-            condition,
+    for model_name in selected_models:
+        _train_model_family(
+            model_name,
             dataset,
+            train_index,
             test_index,
-            probabilities,
+            train_subjects,
+            test_subjects,
+            feature_names,
+            cfg,
+            experiment_cfg,
+            random_state,
+            workers,
             threshold,
+            device,
+            grid_search_enabled,
+            inner_folds,
+            out,
         )
-        prediction_frames.append(predictions)
-        condition_dir = out / "conditions" / condition
-        condition_dir.mkdir(parents=True, exist_ok=True)
-        joblib.dump(scaler, condition_dir / "scaler.joblib")
-        joblib.dump(model, condition_dir / "model.joblib")
-        _save_json(best_params, condition_dir / "best_params.json")
-        grid_results.to_csv(
-            condition_dir / "grid_search_results.csv", index=False
-        )
-        predictions.to_csv(condition_dir / "predictions.csv", index=False)
-        _save_json(scores, condition_dir / "metrics.json")
-
-        if condition == COMBINED_CONDITION:
-            test_shap = np.asarray(
-                compute_shap_values(
-                    model, X_test, list(feature_names[condition])
-                ),
-                dtype=np.float64,
-            )
-            if test_shap.shape != X_test.shape:
-                raise RuntimeError(
-                    f"Unexpected SHAP shape {test_shap.shape}; "
-                    f"expected {X_test.shape}"
-                )
-            test_scaled = X_test
-
-    condition_metrics = pd.DataFrame(condition_metric_rows)
-    condition_metrics.to_csv(out / "condition_metrics.csv", index=False)
-    predictions = pd.concat(prediction_frames, ignore_index=True)
-    predictions.to_csv(out / "predictions.csv", index=False)
-    subject_metrics = pd.DataFrame(
-        _subject_metric_rows(predictions, threshold)
-    )
-    subject_metrics.to_csv(out / "subject_metrics.csv", index=False)
-    comparison = _comparison_summary(condition_metrics)
-    comparison.to_csv(out / "comparison_summary.csv", index=False)
-    deltas = _condition_deltas(condition_metrics)
-    deltas.to_csv(out / "condition_deltas.csv", index=False)
-
-    if test_shap is None or test_scaled is None:
-        raise RuntimeError("Combined-condition held-out SHAP was not generated")
-    if np.isnan(test_shap).any() or np.isnan(test_scaled).any():
-        raise RuntimeError("Combined-condition held-out SHAP contains NaN")
-    shap_dir = out / "shap"
-    shap_dir.mkdir(parents=True, exist_ok=True)
-    np.save(shap_dir / "shap_values_test.npy", test_shap.astype(np.float32))
-    np.save(shap_dir / "scaled_features_test.npy", test_scaled.astype(np.float32))
-    shap_tables = aggregate_shap(test_shap, combined_metadata)
-    shap_tables["feature"].to_csv(
-        shap_dir / "shap_feature_importance.csv", index=False
-    )
-    shap_tables["component"].to_csv(
-        shap_dir / "shap_component_importance.csv", index=False
-    )
-    shap_tables["family"].to_csv(
-        shap_dir / "shap_family_importance.csv", index=False
-    )
-    shap_tables["channel"].to_csv(
-        shap_dir / "shap_channel_importance.csv", index=False
-    )
-    plot_shap_summary(
-        test_shap,
-        test_scaled,
-        list(feature_names[COMBINED_CONDITION]),
-        "Held-out SHAP: Wiener Specific + Coherent",
-        shap_dir / "shap_summary.png",
-        max_display=int(cfg["ml"]["shap"]["max_display"]),
-        dpi=int(cfg["ml"]["shap"]["dpi"]),
-    )
 
     summary = {
         "input_data_dir": str(source_root),
@@ -1392,37 +1298,71 @@ def run(
         "feature_counts": {
             condition: len(names) for condition, names in feature_names.items()
         },
-        "full_channels": full_layout.channels,
-        "coherent_channels": coherent_layout.channels,
+        "feature_channels": {
+            condition: layout.channels for condition, layout in layouts.items()
+        },
         "random_state": random_state,
         "decision_threshold": threshold,
+        "selected_models": list(selected_models),
+        "model_output_roots": {
+            model_name: str(out / model_name) for model_name in selected_models
+        },
+        "xgboost_training_strategy": (
+            "grid_search" if grid_search_enabled else "default_parameters"
+        ) if "xgboost" in selected_models else None,
+        "xgboost_grid_search_enabled": grid_search_enabled,
         "xgboost_grid_cv_folds": grid_cv_folds,
-        "xgboost_grid_scoring": "average_precision",
-        "xgboost_grid_param_space": build_grid_param_space(cfg),
+        "xgboost_grid_scoring": (
+            "average_precision" if grid_search_enabled else None
+        ),
+        "xgboost_grid_param_space": (
+            build_grid_param_space(cfg) if grid_search_enabled else None
+        ),
         "xgboost_grid_n_estimators_policy": (
             "Ignore configured n_estimators candidates and fix 500 during "
             "GridSearchCV, matching scripts/06_train_xgboost.py."
+            if grid_search_enabled
+            else None
         ),
-        "xgboost_device": device,
+        "xgboost_default_parameter_policy": (
+            "Use XGBoost defaults except required task, class-weight, seed, "
+            "device, and worker parameters."
+            if "xgboost" in selected_models and not grid_search_enabled
+            else None
+        ),
+        "xgboost_device": device if "xgboost" in selected_models else None,
+        "svm_parameters": (
+            _jsonable(experiment_cfg["svm"]) if "svm" in selected_models else None
+        ),
         "feature_worker_processes": workers,
-        "grid_search_parallel_jobs": 1 if device == "cuda" else workers,
-        "xgboost_threads_per_fit": 1,
+        "grid_search_parallel_jobs": (
+            (1 if device == "cuda" else workers)
+            if grid_search_enabled
+            else None
+        ),
+        "xgboost_threads_per_fit": (
+            (1 if grid_search_enabled else workers)
+            if "xgboost" in selected_models
+            else None
+        ),
         "raw_definition": (
             "Common EEG selection, montage, notch, bandpass, resampling, raw-based "
             "trial rejection, and baseline; no ICA or Wiener denoising."
         ),
         "component_identities": {
-            "raw_wiener": "common_raw = wiener_specific + wiener_coherent",
-            "ica_wiener": (
-                "ica = ica_wiener_specific + ica_wiener_coherent"
+            "step1": "raw = step1_specific + step1_coherent",
+            "step2": "step1_specific = step2_specific + step2_coherent",
+            "step3": "step2_specific = step3_specific + step3_coherent",
+            "cumulative": (
+                "raw = step3_specific + step1_coherent + "
+                "step2_coherent + step3_coherent"
             ),
         },
         "label_encoding": {"correct": 0, "incorrect": 1},
-        "shap_policy": (
-            "Only wiener_specific_coherent; the final model explains only "
-            "the deterministic held-out test subjects."
-        ),
-        "comparison_summary": comparison.to_dict(orient="records"),
+        "shap_output": False,
+        "continuous_component_output": False,
+        "shared_component_cache": str(cache_root),
+        "recompute_components": recompute_components,
     }
     _save_json(summary, out / "run_summary.json")
     (out / "config_resolved.yaml").write_text(
@@ -1441,7 +1381,10 @@ def main() -> None:
         output_dir=args.output_dir,
         workers=args.workers,
         random_state_override=args.random_state,
+        model=args.model,
+        grid_search_override=args.grid_search,
         force=args.force,
+        recompute_components=args.recompute_components,
     )
     print(f"Results: {output}")
 
