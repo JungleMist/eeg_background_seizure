@@ -801,6 +801,20 @@ Full training loop for one condition: builds `EEGEpochDataset`/`DataLoader` for 
 
 **Returns:** `{"val": {...}, "test": {...}}` metric dicts. **Writes** `best_model.pt` (state dict), `best_params.json`, `val_metrics.json`/`test_metrics.json`, `val_predictions.csv`/`test_predictions.csv` to `out_dir`.
 
+### `eeg_bg.ml.erp_eegnet`
+
+```python
+from eeg_bg.ml.erp_eegnet import TrialSequenceDataset, train_condition
+```
+
+Reusable ERP trial-level EEGNet method used by the ERP-CORE component scripts.
+`TrialSequenceDataset` yields `(1, n_channels, n_times)` tensors, while
+`train_condition(condition, dataset, partitions, model_cfg, out_dir,
+random_state)` performs subject-partitioned training, validation-AUPRC
+checkpoint selection, validation balanced-accuracy threshold selection, and
+test evaluation. The dataset object only needs `matrix()`, `y`, and
+`subject_ids`, so decomposition and cache implementations remain independent.
+
 ---
 
 ## Internal Design Notes

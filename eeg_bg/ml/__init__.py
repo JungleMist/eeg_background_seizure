@@ -28,6 +28,10 @@ cnn_predict_epochs : callable
     Run a fitted EEGNet over a DataLoader; return subject-level prediction DataFrame.
 train_cnn : callable
     Full EEGNet training loop with early stopping; writes output files.
+TrialSequenceDataset : class
+    Reusable ERP trial-level dataset wrapper for EEGNet.
+train_erp_condition : callable
+    Train EEGNet for one ERP condition with subject-level partitions.
 """
 from eeg_bg.ml.xgb_pipeline import (
     train_xgboost,
@@ -47,6 +51,10 @@ try:
     from eeg_bg.ml.cnn_model import EEGNet
     from eeg_bg.ml.cnn_dataset import EEGEpochDataset
     from eeg_bg.ml.cnn_pipeline import cnn_predict_epochs, train_cnn
+    from eeg_bg.ml.erp_eegnet import (
+        TrialSequenceDataset,
+        train_condition as train_erp_condition,
+    )
 except ImportError:
     pass  # torch not installed; CNN pipeline unavailable
 
@@ -68,4 +76,6 @@ __all__ = [
     "EEGEpochDataset",
     "cnn_predict_epochs",
     "train_cnn",
+    "TrialSequenceDataset",
+    "train_erp_condition",
 ]
