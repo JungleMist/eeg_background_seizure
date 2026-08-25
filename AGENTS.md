@@ -91,6 +91,9 @@ conda run -n eeg_pipeline python scripts/17_cache_tuab_continuous_wiener.py [--d
 # 18 — Paired TUAB raw/specific/coherent epochs from script 17 caches
 conda run -n eeg_pipeline python scripts/18_extract_tuab_component_epochs.py [--input-dir PATH] [--output-dir PATH] [--mode frequency|phasegated|zerophase] [--workers N] [--force]
 
+# 19 — Independent TUAB EEGNet models from script 18 paired epochs
+conda run -n eeg_pipeline python scripts/19_train_tuab_component_eegnet.py [--input-dir PATH] [--output-dir PATH] [--mode frequency|phasegated|zerophase] [--condition raw|specific|coherent|all] [--device auto|cpu|cuda|mps] [--workers N] [--force]
+
 # ERP-CORE counterpart of the fixed 8-cell Wiener phase/coherence experiment
 bash scripts/run_erp_core_wiener_phase_grid.sh [--data-dir PATH] [--fif PATH]
 ```
@@ -105,6 +108,12 @@ overlap-add Wiener processing, and writes separate float32 NPZ sequences under
 Script 18 reconstructs raw from those paired continuous components, applies a
 shared raw-derived artifact-rejection mask to non-overlapping epochs, and stores
 raw/specific/coherent together with TUAB train/val/test and abnormal/normal labels.
+
+Script 19 trains separate raw, specific, and coherent EEGNet models from those
+paired epochs. It streams one recording at a time, uses record-equal class-
+weighted loss, selects checkpoints by validation recording AUPRC, freezes a
+validation balanced-accuracy threshold, and reports the official test split at
+the recording level.
 
 The TUAB counterpart of the fixed 8-cell Wiener phase/coherence experiment is `bash scripts/run_tuab_wiener_threshold_phase_experiment.sh [--workers N] [--from N]`. Its `configs/exp_tuab_wiener_phase_{1..8}.yaml` files inherit through `exp_tuab_wiener_phase_base.yaml` → `tuab.yaml`, share `cache_tuab`, and write isolated outputs under `results_tuab/exp_wiener_phase/`. The wrapper also runs script 09 with the TUAB config prefix after training and archiving. To limit disk use, the shared experiment driver keeps `epochs/` as the required common input but enforces that `wiener_frequency/`, `wiener_phasegated/`, and `ica/` never coexist; the active derived cache is deleted immediately after its XGBoost feature extraction finishes.
 

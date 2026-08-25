@@ -9,3 +9,25 @@ paths:
 
 dataset:
   active: "tuab"
+
+# Script 19: independent raw/specific/coherent EEGNet models on Script 18
+# recording caches.  Validation recording AUPRC selects the checkpoint;
+# validation recording balanced accuracy selects the frozen threshold.
+ml:
+  tuab_component_eegnet:
+    random_state: 42
+    device: auto
+    num_workers: 0
+    F1: 8
+    D: 2
+    dropout: 0.25
+    lr: 0.001
+    weight_decay: 0.0001
+    batch_size: 64
+    records_per_step: 4
+    max_epochs: 200
+    patience: 20
+    lr_patience: 10
+    lr_factor: 0.5
+    early_stopping_metric: validation_recording_auprc
+    threshold_selection: validation_recording_balanced_accuracy
