@@ -10,6 +10,13 @@ paths:
 dataset:
   active: "tuab"
 
+channels:
+  channel_groups:
+    - [FP1, FP2, F3, F4, F7, F8, FZ]
+    - [F3, T3, T5, C3, CZ]
+    - [F4, T4, T6, C4]
+    - [P3, P4, PZ, O1, O2]
+
 wiener:
   mode: phasegated
   phase_gate_threshold_rad: 0.01

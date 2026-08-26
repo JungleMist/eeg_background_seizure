@@ -5,7 +5,7 @@ extends: default.yaml
 paths:
   data_root: "/root/autodl-tmp/data/v3.0.1"
   cache_dir: "/root/autodl-tmp/cache"
-  results_dir: "results_tuab_phase005"
+  results_dir: "results_tuab_phase01"
 
 dataset:
   active: "tuab"
@@ -19,7 +19,7 @@ channels:
 
 wiener:
   mode: phasegated
-  phase_gate_threshold_rad: 0.05
+  phase_gate_threshold_rad: 0.1
   coherent_gate_enabled: false
 
 # Script 19: independent raw/specific/coherent EEGNet models on Script 18
