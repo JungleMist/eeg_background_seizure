@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-WORKERS=1
+WORKERS=10
 CHECK_CONFIG=0
 FROM_PHASE=""
 
