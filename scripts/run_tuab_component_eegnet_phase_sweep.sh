@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run TUAB continuous ECMAD preprocessing and component EEGNet training for
-# phase-gate thresholds 0.01, 0.05, and 0.5.
+# phase-gate thresholds 0.01, 0.05, 0.1, 0.5, and 1.
 
 set -euo pipefail
 
@@ -58,13 +58,17 @@ CONDA_RUN=(conda run -n eeg_pipeline --no-capture-output)
 CONFIGS=(
     "configs/tuab_phase001.yaml"
     "configs/tuab_phase005.yaml"
+    "configs/tuab_phase01.yaml"
     "configs/tuab_phase05.yaml"
+    "configs/tuab_phase1.yaml"
 )
-PHASES=("0.01" "0.05" "0.5")
+PHASES=("0.01" "0.05" "0.1" "0.5" "1")
 RESULT_DIR_NAMES=(
     "results_tuab_phase001"
     "results_tuab_phase005"
+    "results_tuab_phase01"
     "results_tuab_phase05"
+    "results_tuab_phase1"
 )
 EXPECTED_DATA_ROOT="/root/autodl-tmp/data/v3.0.1"
 EXPECTED_CACHE_DIR="/root/autodl-tmp/cache"
