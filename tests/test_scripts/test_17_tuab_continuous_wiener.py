@@ -126,6 +126,21 @@ def _install_processing_fakes(monkeypatch, module, calls: list[str]) -> None:
     monkeypatch.setattr(module, "wiener_continuous_raw", fake_wiener)
 
 
+def test_float32_conservation_error_is_diagnostic_only():
+    module = _load_script()
+    source = np.asarray([[2.4254305]], dtype=np.float32)
+    specific = np.asarray([[258.5]], dtype=np.float32)
+    coherent = source - specific
+
+    error = module._float32_conservation_error(source, specific, coherent)
+
+    assert error > 1e-5
+    corrupted_error = module._float32_conservation_error(
+        source, specific, coherent + np.float32(0.01)
+    )
+    assert corrupted_error > error
+
+
 def test_processes_first_1200_seconds_and_writes_separate_components(
     tmp_path, monkeypatch,
 ):
