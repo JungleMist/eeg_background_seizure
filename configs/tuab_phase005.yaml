@@ -5,7 +5,7 @@ extends: default.yaml
 paths:
   data_root: "/root/autodl-tmp/data/v3.0.1"
   cache_dir: "/root/autodl-tmp/cache"
-  results_dir: "results_tuab_phase005"
+  results_dir: "results/results_tuab_phase005"
 
 dataset:
   active: "tuab"
