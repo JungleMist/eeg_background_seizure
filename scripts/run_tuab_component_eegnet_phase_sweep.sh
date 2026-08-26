@@ -6,6 +6,7 @@ set -euo pipefail
 
 WORKERS=1
 CHECK_CONFIG=0
+FROM_PHASE=""
 
 usage() {
     cat <<'EOF'
@@ -13,7 +14,8 @@ Usage:
   bash scripts/run_tuab_component_eegnet_phase_sweep.sh [options]
 
 Options:
-  --workers N       Worker processes for scripts 17 and 18 (default: 1)
+  --workers N       Worker processes for scripts 17, 18, and 19 (default: 1)
+  --from PHASE      Start from this phase (0.01, 0.05, 0.1, 0.5, or 1)
   --check-config    Validate configs and cleanup boundaries, then exit
   -h, --help        Show this help
 EOF
@@ -27,6 +29,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             WORKERS="$2"
+            shift 2
+            ;;
+        --from)
+            if [[ $# -lt 2 ]]; then
+                echo "--from requires a phase argument" >&2
+                exit 1
+            fi
+            FROM_PHASE="$2"
             shift 2
             ;;
         --check-config)
@@ -70,6 +80,20 @@ RESULT_DIR_NAMES=(
     "results_tuab_phase05"
     "results_tuab_phase1"
 )
+START_INDEX=0
+if [[ -n "$FROM_PHASE" ]]; then
+    START_INDEX=-1
+    for index in "${!PHASES[@]}"; do
+        if [[ "${PHASES[$index]}" == "$FROM_PHASE" ]]; then
+            START_INDEX="$index"
+            break
+        fi
+    done
+    if (( START_INDEX < 0 )); then
+        echo "--from must be one of: ${PHASES[*]}" >&2
+        exit 1
+    fi
+fi
 EXPECTED_DATA_ROOT="/root/autodl-tmp/data/v3.0.1"
 EXPECTED_CACHE_DIR="/root/autodl-tmp/cache"
 
@@ -238,13 +262,14 @@ echo "Started: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 echo "Host: $(hostname)"
 echo "Project root: $PROJECT_ROOT"
 echo "Git commit: $(git rev-parse HEAD)"
-echo "Workers for scripts 17/18: $WORKERS"
+echo "Workers for scripts 17/18/19: $WORKERS"
 echo "Phase order: ${PHASES[*]}"
+echo "Starting phase: ${PHASES[$START_INDEX]}"
 echo "Configs: ${CONFIGS[*]}"
 echo "Cleanup target: $PHASE_CACHE_DIR"
 echo "Log file: $LOG_FILE"
 
-for index in "${!CONFIGS[@]}"; do
+for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
     config="${CONFIGS[$index]}"
     phase="${PHASES[$index]}"
     results_dir="$(config_value "$config" "paths.results_dir")"
@@ -264,7 +289,7 @@ for index in "${!CONFIGS[@]}"; do
         --config "$config" --workers "$WORKERS"
     run_step "phase=$phase script=19 component EEGNet" \
         "${CONDA_RUN[@]}" python scripts/19_train_tuab_component_eegnet.py \
-        --config "$config" --force
+        --config "$config" --workers "$WORKERS" --force
 
     for artifact in run_summary.json condition_metrics.csv; do
         if [[ ! -s "$output_dir/$artifact" ]]; then
