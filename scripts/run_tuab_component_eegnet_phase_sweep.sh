@@ -14,7 +14,7 @@ Usage:
   bash scripts/run_tuab_component_eegnet_phase_sweep.sh [options]
 
 Options:
-  --workers N       Worker processes for scripts 17, 18, and 19 (default: 1)
+  --workers N       Worker processes for scripts 17, 18, 19, and 20 (default: 1)
   --from PHASE      Start from this phase (0.01, 0.05, 0.1, 0.5, or 1)
   --check-config    Validate configs and cleanup boundaries, then exit
   -h, --help        Show this help
@@ -262,7 +262,7 @@ echo "Started: $(date '+%Y-%m-%d %H:%M:%S %Z')"
 echo "Host: $(hostname)"
 echo "Project root: $PROJECT_ROOT"
 echo "Git commit: $(git rev-parse HEAD)"
-echo "Workers for scripts 17/18/19: $WORKERS"
+echo "Workers for scripts 17/18/19/20: $WORKERS"
 echo "Phase order: ${PHASES[*]}"
 echo "Starting phase: ${PHASES[$START_INDEX]}"
 echo "Configs: ${CONFIGS[*]}"
@@ -293,11 +293,36 @@ for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
 
     for artifact in run_summary.json condition_metrics.csv; do
         if [[ ! -s "$output_dir/$artifact" ]]; then
-            echo "Missing or empty result artifact: $output_dir/$artifact" >&2
+            echo "Missing or empty Script 19 result artifact: $output_dir/$artifact" >&2
             exit 1
         fi
-        echo "Verified result artifact: $output_dir/$artifact"
+        echo "Verified Script 19 result artifact: $output_dir/$artifact"
     done
+
+    # Script 20 consumes the epochs produced by Script 18 directly.  Keep it
+    # before the phase-cache cleanup so Script 19 and Script 20 share the same
+    # one-time Script 17/18 Wiener result and its derived epoch cache.
+    xgb_output_dir="$results_dir/tuab_component_xgboost/base211"
+    run_step "phase=$phase script=20 component XGBoost" \
+        "${CONDA_RUN[@]}" python scripts/20_train_tuab_component_xgboost.py \
+        --config "$config" --condition all --feature-set base211 --workers "$WORKERS"
+
+    for artifact in comparison_summary.csv; do
+        if [[ ! -s "$xgb_output_dir/$artifact" ]]; then
+            echo "Missing or empty Script 20 result artifact: $xgb_output_dir/$artifact" >&2
+            exit 1
+        fi
+        echo "Verified Script 20 result artifact: $xgb_output_dir/$artifact"
+    done
+    for condition in raw specific coherent; do
+        artifact="$xgb_output_dir/$condition/model.joblib"
+        if [[ ! -s "$artifact" ]]; then
+            echo "Missing or empty Script 20 model artifact: $artifact" >&2
+            exit 1
+        fi
+        echo "Verified Script 20 model artifact: $artifact"
+    done
+
     safe_clear_phase_cache
     echo "Phase $phase completed successfully."
 done
