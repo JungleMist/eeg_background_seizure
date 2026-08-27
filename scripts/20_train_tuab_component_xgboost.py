@@ -4,6 +4,10 @@ Script 18 stores paired ``raw``, ``specific`` and ``coherent`` arrays in one
 NPZ per recording.  This entry point keeps those three conditions independent
 while reusing the feature profiles and XGBoost training/evaluation semantics
 used by Script 06.
+
+``--workers`` controls file-level feature-extraction worker processes.  The
+three conditions remain sequential, and cached features are loaded without
+starting workers, matching Script 06's execution model.
 """
 from __future__ import annotations
 
@@ -346,6 +350,10 @@ if __name__ == "__main__":
     parser.add_argument("--condition", choices=[*CONDITIONS, "all"], default="all")
     parser.add_argument("--feature-set", choices=list(PROFILES), default="base211")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--workers", type=_positive_int, default=None)
+    parser.add_argument(
+        "--workers", type=_positive_int, default=None,
+        help="Feature extraction worker processes "
+             "(default: ProcessPoolExecutor default)",
+    )
     args = parser.parse_args()
     main(args.config, args.condition, args.force, args.feature_set, args.workers)

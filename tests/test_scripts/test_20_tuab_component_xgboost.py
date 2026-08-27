@@ -1,4 +1,5 @@
 """Focused tests for Script 20's Script 18 cache adapter."""
+import argparse
 import importlib.util
 from pathlib import Path
 
@@ -87,6 +88,16 @@ def test_source_inventory_rejects_invalid_tuab_mapping(tmp_path):
 
     with pytest.raises(ValueError, match="Invalid TUAB label mapping"):
         module._source_inventory(tmp_path, _cfg())
+
+
+def test_workers_must_be_positive():
+    module = _load_script()
+
+    assert module._positive_int("2") == 2
+    with pytest.raises(argparse.ArgumentTypeError, match="positive integer"):
+        module._positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError, match="positive integer"):
+        module._positive_int("-1")
 
 
 def test_feature_cache_schema_mismatch_requires_force(tmp_path, monkeypatch):
