@@ -14,7 +14,7 @@ Usage:
   bash scripts/run_tuab_component_eegnet_phase_sweep.sh [options]
 
 Options:
-  --workers N       Worker processes for scripts 17, 18, 19, and 20 (default: 1)
+  --workers N       Worker processes for scripts 17, 18, 19, and 20 (default: 10)
   --from PHASE      Start from this phase (0.01, 0.05, 0.1, 0.5, or 1)
   --check-config    Validate configs and cleanup boundaries, then exit
   -h, --help        Show this help
@@ -305,7 +305,8 @@ for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
     xgb_output_dir="$results_dir/tuab_component_xgboost/base211"
     run_step "phase=$phase script=20 component XGBoost" \
         "${CONDA_RUN[@]}" python scripts/20_train_tuab_component_xgboost.py \
-        --config "$config" --condition all --feature-set base211 --workers "$WORKERS"
+        --config "$config" --condition all --feature-set base211 \
+        --workers "$WORKERS" --force
 
     for artifact in comparison_summary.csv; do
         if [[ ! -s "$xgb_output_dir/$artifact" ]]; then
