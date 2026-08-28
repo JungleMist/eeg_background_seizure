@@ -83,6 +83,11 @@ def _write_record(
     coherent = (raw * np.float32(0.25)).astype(np.float32)
     coherent[:, -1] = 0.0
     specific = (raw - coherent).astype(np.float32)
+    specific_coherent = np.concatenate([specific, coherent], axis=1)
+    combined_names = (
+        *(f"specific::{channel}" for channel in STANDARD_19),
+        *(f"coherent::{channel}" for channel in STANDARD_19),
+    )
     starts = np.arange(n_epochs, dtype=np.int64) * 2500
     path = root / f"{evaluation_id}.npz"
     np.savez_compressed(
@@ -90,6 +95,7 @@ def _write_record(
         raw=raw,
         specific=specific,
         coherent=coherent,
+        specific_coherent=specific_coherent,
         epoch_start_samples=starts,
         epoch_start_sec=starts.astype(np.float64) / 125.0,
         label=np.asarray(label, dtype=np.int8),
@@ -100,12 +106,13 @@ def _write_record(
         evaluation_id=np.asarray(evaluation_id),
         subject_id=np.asarray(evaluation_id),
         ch_names=np.asarray(STANDARD_19, dtype="U"),
+        specific_coherent_ch_names=np.asarray(combined_names, dtype="U"),
         sfreq=np.asarray(125.0),
         epoch_samples=np.asarray(2500),
         n_epochs=np.asarray(n_epochs),
         source_mode=np.asarray(source_mode),
         fingerprint=np.asarray(f"fingerprint-{evaluation_id}"),
-        schema_version=np.asarray(1),
+        schema_version=np.asarray(2),
     )
     return path
 
@@ -169,6 +176,9 @@ def test_discovers_script18_records_and_maps_validation_split(module, tmp_path):
     }
     assert {record["label"] for record in records} == {0, 1}
     assert all(record["epoch_samples"] == 2500 for record in records)
+    assert all(
+        len(record["specific_coherent_ch_names"]) == 38 for record in records
+    )
 
 
 def test_rejects_patient_leakage(module, tmp_path):
@@ -258,6 +268,19 @@ def test_eegnet_accepts_tuab_19_by_2500_input(module):
     assert torch.isfinite(output).all()
 
 
+def test_eegnet_accepts_tuab_38_by_2500_input(module):
+    model = module._make_model(
+        38,
+        2500,
+        {"F1": 8, "D": 2, "dropout": 0.25},
+    )
+    model.eval()
+    with torch.no_grad():
+        output = model(torch.zeros(2, 1, 38, 2500))
+    assert output.shape == (2, 1)
+    assert torch.isfinite(output).all()
+
+
 def test_training_outputs_cache_reuse_and_force(
     module, tmp_path, monkeypatch
 ):
@@ -287,6 +310,12 @@ def test_training_outputs_cache_reuse_and_force(
     assert params["threshold_selection"] == (
         "validation_recording_balanced_accuracy"
     )
+    combined_params = json.loads(
+        (
+            result / "conditions" / "specific_coherent" / "best_params.json"
+        ).read_text()
+    )
+    assert combined_params["n_channels"] == 38
     predictions = pd.read_csv(condition_dir / "test_predictions.csv")
     assert len(predictions) == 2
     assert set(predictions["evaluation_id"]) == {"test_abn", "test_norm"}

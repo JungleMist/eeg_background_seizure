@@ -22,8 +22,9 @@ wiener:
   phase_gate_threshold_rad: 0.01
   coherent_gate_enabled: false
 
-# Script 19: independent raw/specific/coherent EEGNet models on Script 18
-# recording caches. Validation recording AUPRC selects the checkpoint;
+# Script 19: independent raw/specific/coherent/specific_coherent EEGNet models
+# on Script 18 caches. specific_coherent concatenates both 19-channel banks.
+# Validation recording AUPRC selects the checkpoint;
 # validation recording balanced accuracy selects the frozen threshold.
 ml:
   tuab_component_eegnet:

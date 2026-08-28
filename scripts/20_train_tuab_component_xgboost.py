@@ -1,12 +1,12 @@
 """Train independent TUAB XGBoost models from Script 18 epoch caches.
 
-Script 18 stores paired ``raw``, ``specific`` and ``coherent`` arrays in one
-NPZ per recording.  This entry point keeps those three conditions independent
-while reusing the feature profiles and XGBoost training/evaluation semantics
-used by Script 06.
+Script 18 stores paired ``raw``, ``specific``, ``coherent`` and channel-axis
+``specific_coherent`` arrays in one NPZ per recording.  This entry point keeps
+those four conditions independent while reusing the feature profiles and
+XGBoost training/evaluation semantics used by Script 06.
 
 ``--workers`` controls file-level feature-extraction worker processes.  The
-three conditions remain sequential, and cached features are loaded without
+four conditions remain sequential, and cached features are loaded without
 starting workers, matching Script 06's execution model.
 """
 from __future__ import annotations
@@ -45,7 +45,10 @@ from eeg_bg.ml.shap_analysis import (
 )
 
 
-CONDITIONS = ("raw", "specific", "coherent")
+SCRIPT18_SCHEMA_VERSION = 2
+COMBINED_CONDITION = "specific_coherent"
+BASE_CONDITIONS = ("raw", "specific", "coherent")
+CONDITIONS = (*BASE_CONDITIONS, COMBINED_CONDITION)
 ARRAY_KEYS = {condition: condition for condition in CONDITIONS}
 
 
@@ -62,6 +65,32 @@ def _scalar(data: Any, key: str) -> Any:
     return array.item() if array.ndim == 0 else value
 
 
+def _combined_channel_names(ch_names: list[str]) -> list[str]:
+    return [
+        *(f"specific::{channel}" for channel in ch_names),
+        *(f"coherent::{channel}" for channel in ch_names),
+    ]
+
+
+def _condition_feature_names(profile_name: str, condition: str) -> list[str]:
+    names = list(PROFILES[profile_name].names)
+    if condition != COMBINED_CONDITION:
+        return names
+    return [
+        *(f"specific::{name}" for name in names),
+        *(f"coherent::{name}" for name in names),
+    ]
+
+
+def _condition_feature_dim(profile_name: str, condition: str) -> int:
+    multiplier = 2 if condition == COMBINED_CONDITION else 1
+    return multiplier * PROFILES[profile_name].dim
+
+
+def _aggregate_feature_names(names: list[str]) -> list[str]:
+    return [name.split("::", 1)[-1] for name in names]
+
+
 def _save_json(payload: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -76,7 +105,8 @@ def _source_inventory(input_root: Path, cfg: dict) -> tuple[list[Path], str, dic
     for path in files:
         with np.load(path, allow_pickle=True) as data:
             required = {
-                "raw", "specific", "coherent", "ch_names", "sfreq", "split",
+                "raw", "specific", "coherent", COMBINED_CONDITION,
+                "ch_names", "specific_coherent_ch_names", "sfreq", "split",
                 "label", "class_name", "patient_id", "recording_id",
                 "evaluation_id", "fingerprint", "source_mode", "schema_version",
             }
@@ -86,6 +116,16 @@ def _source_inventory(input_root: Path, cfg: dict) -> tuple[list[Path], str, dic
             channels = [str(ch) for ch in data["ch_names"]]
             if channels != expected_channels:
                 raise ValueError(f"Script 18 cache {path} has invalid channel order")
+            source_schema = int(_scalar(data, "schema_version"))
+            if source_schema != SCRIPT18_SCHEMA_VERSION:
+                raise ValueError(f"Unsupported Script 18 schema in {path}")
+            combined_channels = [
+                str(ch) for ch in data["specific_coherent_ch_names"]
+            ]
+            if combined_channels != _combined_channel_names(expected_channels):
+                raise ValueError(
+                    f"Script 18 cache {path} has invalid combined channel order"
+                )
             sfreq = float(_scalar(data, "sfreq"))
             if not np.isclose(sfreq, float(cfg["preprocessing"]["target_sfreq"])):
                 raise ValueError(f"Script 18 cache {path} has unexpected sampling rate")
@@ -96,17 +136,34 @@ def _source_inventory(input_root: Path, cfg: dict) -> tuple[list[Path], str, dic
             split = str(_scalar(data, "split"))
             if split not in {"train", "val", "test"}:
                 raise ValueError(f"Invalid split {split!r} in {path}")
-            shapes = [tuple(np.asarray(data[key]).shape) for key in CONDITIONS]
-            if not shapes[0] or any(shape != shapes[0] for shape in shapes[1:]):
+            shapes = {
+                key: tuple(np.asarray(data[key]).shape) for key in CONDITIONS
+            }
+            base_shape = shapes["raw"]
+            if not base_shape or any(
+                shapes[key] != base_shape for key in BASE_CONDITIONS[1:]
+            ):
                 raise ValueError(f"Component shape mismatch in {path}")
-            if len(shapes[0]) != 3 or shapes[0][1] != len(expected_channels):
-                raise ValueError(f"Invalid epoch shape in {path}: {shapes[0]}")
+            if len(base_shape) != 3 or base_shape[1] != len(expected_channels):
+                raise ValueError(f"Invalid epoch shape in {path}: {base_shape}")
+            expected_combined_shape = (
+                base_shape[0], 2 * len(expected_channels), base_shape[2]
+            )
+            if shapes[COMBINED_CONDITION] != expected_combined_shape:
+                raise ValueError(
+                    f"Invalid combined epoch shape in {path}: "
+                    f"{shapes[COMBINED_CONDITION]}"
+                )
+            for key in CONDITIONS:
+                if data[key].dtype != np.dtype(np.float32):
+                    raise ValueError(f"Script 18 cache {path} has non-float32 {key}")
             records.append({
                 "path": str(path),
                 "fingerprint": str(_scalar(data, "fingerprint")),
                 "source_mode": str(_scalar(data, "source_mode")),
                 "evaluation_id": str(_scalar(data, "evaluation_id")),
-                "n_epochs": shapes[0][0],
+                "schema_version": source_schema,
+                "n_epochs": base_shape[0],
             })
     encoded = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
     return files, hashlib.sha256(encoded).hexdigest(), {
@@ -129,10 +186,27 @@ def _extract_file(args: tuple) -> tuple:
         evaluation_id = str(_scalar(data, "evaluation_id"))
         patient_id = str(_scalar(data, "patient_id"))
         recording_id = str(_scalar(data, "recording_id"))
-        rows = [profile.extract_fn(
-            epoch, ch_names, sfreq, nperseg, freq_band, conn_nperseg
-        ) for epoch in epochs]
-    if any(len(row) != profile.dim for row in rows):
+        if condition == COMBINED_CONDITION:
+            n_channels = len(ch_names)
+            rows = [
+                np.concatenate([
+                    profile.extract_fn(
+                        epoch[:n_channels], ch_names, sfreq, nperseg,
+                        freq_band, conn_nperseg,
+                    ),
+                    profile.extract_fn(
+                        epoch[n_channels:], ch_names, sfreq, nperseg,
+                        freq_band, conn_nperseg,
+                    ),
+                ])
+                for epoch in epochs
+            ]
+        else:
+            rows = [profile.extract_fn(
+                epoch, ch_names, sfreq, nperseg, freq_band, conn_nperseg
+            ) for epoch in epochs]
+    expected_dim = _condition_feature_dim(profile_name, condition)
+    if any(len(row) != expected_dim for row in rows):
         raise ValueError(f"Feature profile {profile_name} returned an unexpected dimension")
     n = len(rows)
     return (index, rows, [label] * n, [evaluation_id] * n,
@@ -167,8 +241,11 @@ def _build_features(files: list[Path], condition: str, split: str, cfg: dict,
         ):
             target.extend(source)
     if not rows:
-        return FeatureDataset(np.empty((0, PROFILES[profile_name].dim)),
-                              np.empty(0, dtype=np.int64), [], [], [], [])
+        return FeatureDataset(
+            np.empty((0, _condition_feature_dim(profile_name, condition))),
+            np.empty(0, dtype=np.int64),
+            [], [], [], [],
+        )
     return FeatureDataset(np.asarray(rows, dtype=np.float64),
                           np.asarray(labels, dtype=np.int64), evaluation_ids,
                           patient_ids, recording_ids, dataset_names)
@@ -181,6 +258,7 @@ def _cache_path(root: Path, profile: str, condition: str, split: str) -> Path:
 def _load_or_extract(files, input_root, source_fingerprint, condition, split,
                      cfg, profile_name, force, max_workers):
     feat_path = _cache_path(input_root, profile_name, condition, split)
+    feature_names = _condition_feature_names(profile_name, condition)
     schema_payload = {
         "profile": profile_name,
         "profile_hash": PROFILES[profile_name].hash,
@@ -190,6 +268,12 @@ def _load_or_extract(files, input_root, source_fingerprint, condition, split,
         "dataset_name": "tuab",
         "source_fingerprint": source_fingerprint,
         "condition": condition,
+        "feature_dim": len(feature_names),
+        "feature_names": feature_names,
+        "specific_coherent_layout": (
+            "channel_axis_specific_then_coherent"
+            if condition == COMBINED_CONDITION else None
+        ),
     }
     schema_hash = hashlib.sha256(json.dumps(
         schema_payload, sort_keys=True, separators=(",", ":")
@@ -198,6 +282,11 @@ def _load_or_extract(files, input_root, source_fingerprint, condition, split,
         with np.load(feat_path, allow_pickle=True) as data:
             if str(_scalar(data, "schema_hash")) != schema_hash:
                 raise ValueError(f"Feature cache schema mismatch at {feat_path}; re-run with --force")
+            if data["X"].ndim != 2 or data["X"].shape[1] != len(feature_names):
+                raise ValueError(
+                    f"Feature cache dimension mismatch at {feat_path}; "
+                    "re-run with --force"
+                )
             return FeatureDataset(
                 data["X"].astype(np.float64), data["y"].astype(np.int64),
                 [str(x) for x in data["evaluation_ids"]],
@@ -251,7 +340,17 @@ def run_condition(condition, cfg, files, input_root, source_fingerprint,
         raise ValueError("Training split must contain both TUAB labels")
     out_dir = out_root / profile_name / condition
     out_dir.mkdir(parents=True, exist_ok=True)
-    metadata = {**source_meta, "condition": condition, "feature_set": profile_name}
+    feature_names = _condition_feature_names(profile_name, condition)
+    metadata = {
+        **source_meta,
+        "condition": condition,
+        "feature_set": profile_name,
+        "feature_dim": len(feature_names),
+        "specific_coherent_layout": (
+            "channel_axis_specific_then_coherent"
+            if condition == COMBINED_CONDITION else None
+        ),
+    }
     meta_path = out_dir / "run_metadata.json"
     if meta_path.exists() and not force:
         previous = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -296,11 +395,18 @@ def run_condition(condition, cfg, files, input_root, source_fingerprint,
         test_metrics.update({"positive_class": "normal", "aggregation_unit": "recording"})
         _save_json(test_metrics, out_dir / "test_metrics.json")
 
-        names = PROFILES[profile_name].names
+        names = feature_names
+        aggregate_names = _aggregate_feature_names(names)
         shap_values = compute_shap_values(model, X_test, names)
         np.save(out_dir / "shap_values_test.npy", shap_values)
-        _save_json(aggregate_shap_by_band(shap_values, names), out_dir / "shap_by_band.json")
-        _save_json(aggregate_shap_by_channel(shap_values, names), out_dir / "shap_by_channel.json")
+        _save_json(
+            aggregate_shap_by_band(shap_values, aggregate_names),
+            out_dir / "shap_by_band.json",
+        )
+        _save_json(
+            aggregate_shap_by_channel(shap_values, aggregate_names),
+            out_dir / "shap_by_channel.json",
+        )
         plot_shap_summary(shap_values, X_test, names,
                           title=f"SHAP Summary — {condition} [{profile_name}] (test set)",
                           output_path=out_dir / "shap_summary.png",
@@ -327,6 +433,8 @@ def main(config_path="configs/tuab.yaml", condition="all", force=False,
         "output_dir": str(out_root),
         "requested_mode": mode,
         "source_fingerprint": source_fingerprint,
+        "conditions": list(CONDITIONS),
+        "specific_coherent_layout": "channel_axis_specific_then_coherent",
     }
     (out_root / "config_resolved.yaml").write_text(
         yaml.safe_dump(resolved_cfg, sort_keys=False), encoding="utf-8"

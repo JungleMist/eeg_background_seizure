@@ -1,4 +1,4 @@
-"""Extract paired raw/specific/coherent epochs from Script 17 caches."""
+"""Extract paired raw/specific/coherent TUAB component epochs."""
 from __future__ import annotations
 
 import argparse
@@ -20,9 +20,10 @@ from eeg_bg.config.settings import load_config
 from eeg_bg.io.dataset import active_dataset_name
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 SUPPORTED_MODES = ("frequency", "phasegated", "zerophase")
 COMPONENTS = ("specific", "coherent")
+COMBINED_CONDITION = "specific_coherent"
 IDENTITY_FIELDS = (
     "patient_id", "recording_id", "evaluation_id", "class_name", "label",
     "split", "source_partition",
@@ -106,6 +107,13 @@ def discover_inputs(input_root: Path) -> list[dict[str, Path]]:
 def _scalar(data, key: str) -> Any:
     value = data[key]
     return value.item() if np.asarray(value).ndim == 0 else value
+
+
+def _combined_channel_names(ch_names: list[str] | tuple[str, ...]) -> list[str]:
+    return [
+        *(f"specific::{channel}" for channel in ch_names),
+        *(f"coherent::{channel}" for channel in ch_names),
+    ]
 
 
 def _read_header(paths: dict[str, Path], cfg: dict) -> dict:
@@ -195,6 +203,7 @@ def _epoch_fingerprint(header: dict, cfg: dict) -> str:
         "artifact_threshold_uv": float(preprocessing["artifact_threshold_uv"]),
         "rejection_policy": "raw_shared_mask",
         "ch_names": header["ch_names"],
+        "specific_coherent_ch_names": _combined_channel_names(header["ch_names"]),
         "sfreq": float(header["sfreq"]),
         "identity": {key: _jsonable(header[key]) for key in IDENTITY_FIELDS},
     }
@@ -208,7 +217,9 @@ def _output_cache_matches(path: Path, fingerprint: str) -> dict | None:
     try:
         with np.load(path, allow_pickle=False) as data:
             required = {
-                "raw", "specific", "coherent", "fingerprint", "schema_version",
+                "raw", "specific", "coherent", COMBINED_CONDITION,
+                "ch_names", "specific_coherent_ch_names",
+                "fingerprint", "schema_version",
                 "n_candidate_epochs", "n_rejected_epochs", "n_epochs",
                 "epoch_samples", "sfreq",
             }
@@ -220,6 +231,35 @@ def _output_cache_matches(path: Path, fingerprint: str) -> dict | None:
                 raise CacheMismatch(
                     f"Epoch cache configuration/source mismatch: {path}; "
                     "re-run with --force"
+                )
+            n_epochs = int(_scalar(data, "n_epochs"))
+            epoch_samples = int(_scalar(data, "epoch_samples"))
+            ch_names = [str(value) for value in data["ch_names"]]
+            expected_shape = (n_epochs, len(ch_names), epoch_samples)
+            combined_shape = (n_epochs, 2 * len(ch_names), epoch_samples)
+            for condition in ("raw", "specific", "coherent"):
+                if data[condition].shape != expected_shape:
+                    raise CacheMismatch(
+                        f"Epoch cache {condition} shape mismatch: {path}"
+                    )
+                if data[condition].dtype != np.dtype(np.float32):
+                    raise CacheMismatch(
+                        f"Epoch cache {condition} dtype mismatch: {path}"
+                    )
+            if data[COMBINED_CONDITION].shape != combined_shape:
+                raise CacheMismatch(
+                    f"Epoch cache {COMBINED_CONDITION} shape mismatch: {path}"
+                )
+            if data[COMBINED_CONDITION].dtype != np.dtype(np.float32):
+                raise CacheMismatch(
+                    f"Epoch cache {COMBINED_CONDITION} dtype mismatch: {path}"
+                )
+            combined_names = [
+                str(value) for value in data["specific_coherent_ch_names"]
+            ]
+            if combined_names != _combined_channel_names(ch_names):
+                raise CacheMismatch(
+                    f"Epoch cache combined channel order mismatch: {path}"
                 )
             return {
                 "n_candidate_epochs": int(_scalar(data, "n_candidate_epochs")),
@@ -286,6 +326,9 @@ def _extract_epochs(
         coherent_epochs = np.stack(
             [coherent[:, start:start + epoch_samples] for start in accepted]
         ).astype(np.float32, copy=False)
+    specific_coherent_epochs = np.concatenate(
+        [specific_epochs, coherent_epochs], axis=1
+    ).astype(np.float32, copy=False)
     np.testing.assert_allclose(
         specific_epochs + coherent_epochs, raw_epochs, rtol=1e-6, atol=1e-5
     )
@@ -293,6 +336,7 @@ def _extract_epochs(
         "raw": raw_epochs,
         "specific": specific_epochs,
         "coherent": coherent_epochs,
+        COMBINED_CONDITION: specific_coherent_epochs,
         "epoch_start_samples": accepted,
         "epoch_start_sec": accepted.astype(np.float64) / sfreq,
         "epoch_samples": epoch_samples,
@@ -365,6 +409,7 @@ def _process_one(args) -> dict:
             output_path,
             raw=extracted["raw"], specific=extracted["specific"],
             coherent=extracted["coherent"],
+            specific_coherent=extracted[COMBINED_CONDITION],
             epoch_start_samples=extracted["epoch_start_samples"],
             epoch_start_sec=extracted["epoch_start_sec"],
             label=np.asarray(int(header["label"]), dtype=np.int8),
@@ -376,6 +421,9 @@ def _process_one(args) -> dict:
             subject_id=np.asarray(str(header["evaluation_id"])),
             source_partition=np.asarray(str(header["source_partition"])),
             ch_names=np.asarray(header["ch_names"], dtype="U"),
+            specific_coherent_ch_names=np.asarray(
+                _combined_channel_names(header["ch_names"]), dtype="U"
+            ),
             sfreq=np.asarray(float(header["sfreq"])),
             epoch_length_sec=np.asarray(
                 float(cfg["preprocessing"]["epoch_length_sec"])
@@ -496,6 +544,8 @@ def main(
         "requested_mode": effective_mode,
         "source_modes": sorted(set(manifest["source_mode"].astype(str))),
         "rejection_policy": "raw_shared_mask",
+        "conditions": ["raw", "specific", "coherent", COMBINED_CONDITION],
+        "specific_coherent_layout": "channel_axis_specific_then_coherent",
     }
     _atomic_yaml(resolved, output_root / "config_resolved.yaml")
     return manifest
@@ -503,7 +553,10 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Extract paired TUAB raw/specific/coherent epoch caches"
+        description=(
+            "Extract paired TUAB raw/specific/coherent/specific_coherent "
+            "epoch caches"
+        )
     )
     parser.add_argument("--config", default="configs/tuab.yaml")
     parser.add_argument("--input-dir", default=None)

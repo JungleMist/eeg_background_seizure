@@ -31,12 +31,18 @@ from eeg_bg.ml.erp_eegnet import (
 )
 
 
-SCHEMA_VERSION = 1
-SCRIPT18_SCHEMA_VERSION = 1
-CONDITIONS = ("raw", "specific", "coherent")
+SCHEMA_VERSION = 2
+SCRIPT18_SCHEMA_VERSION = 2
+COMBINED_CONDITION = "specific_coherent"
+CONDITIONS = ("raw", "specific", "coherent", COMBINED_CONDITION)
 SUPPORTED_MODES = ("frequency", "phasegated", "zerophase")
 SPLIT_MAP = {"train": "train", "val": "validation", "test": "test"}
-CONDITION_SEED_OFFSETS = {"raw": 1, "specific": 2, "coherent": 3}
+CONDITION_SEED_OFFSETS = {
+    "raw": 1,
+    "specific": 2,
+    "coherent": 3,
+    COMBINED_CONDITION: 4,
+}
 CONDITION_ARTIFACTS = (
     "best_model.pt",
     "best_params.json",
@@ -145,6 +151,17 @@ def _scalar(data: Any, key: str) -> Any:
     return value.item() if np.asarray(value).ndim == 0 else value
 
 
+def _combined_channel_names(ch_names: tuple[str, ...]) -> tuple[str, ...]:
+    return (
+        *(f"specific::{channel}" for channel in ch_names),
+        *(f"coherent::{channel}" for channel in ch_names),
+    )
+
+
+def _condition_n_channels(condition: str, base_channels: int) -> int:
+    return 2 * base_channels if condition == COMBINED_CONDITION else base_channels
+
+
 def _npz_array_header(path: Path, key: str) -> tuple[tuple[int, ...], np.dtype]:
     member = f"{key}.npy"
     with zipfile.ZipFile(path) as archive:
@@ -163,7 +180,8 @@ def _npz_array_header(path: Path, key: str) -> tuple[tuple[int, ...], np.dtype]:
 
 def _inspect_record(path: Path, cfg: dict, mode: str) -> dict[str, Any]:
     required = {
-        "raw", "specific", "coherent", "epoch_start_samples", "epoch_start_sec",
+        "raw", "specific", "coherent", COMBINED_CONDITION,
+        "specific_coherent_ch_names", "epoch_start_samples", "epoch_start_sec",
         "label", "class_name", "split", "patient_id", "recording_id",
         "evaluation_id", "subject_id", "ch_names", "sfreq", "epoch_samples",
         "n_epochs", "source_mode", "fingerprint", "schema_version",
@@ -182,6 +200,9 @@ def _inspect_record(path: Path, cfg: dict, mode: str) -> dict[str, Any]:
             "evaluation_id": str(_scalar(data, "evaluation_id")),
             "subject_id": str(_scalar(data, "subject_id")),
             "ch_names": tuple(str(value) for value in data["ch_names"]),
+            "specific_coherent_ch_names": tuple(
+                str(value) for value in data["specific_coherent_ch_names"]
+            ),
             "sfreq": float(_scalar(data, "sfreq")),
             "epoch_samples": int(_scalar(data, "epoch_samples")),
             "n_epochs": int(_scalar(data, "n_epochs")),
@@ -218,6 +239,10 @@ def _inspect_record(path: Path, cfg: dict, mode: str) -> dict[str, Any]:
     )
     if metadata["ch_names"] != expected_channels:
         raise ValueError(f"Channel order mismatch in {path}")
+    if metadata["specific_coherent_ch_names"] != _combined_channel_names(
+        expected_channels
+    ):
+        raise ValueError(f"Combined channel order mismatch in {path}")
     if not np.isclose(metadata["sfreq"], expected_sfreq):
         raise ValueError(f"Sampling-rate mismatch in {path}")
     if metadata["epoch_samples"] != expected_samples:
@@ -225,10 +250,12 @@ def _inspect_record(path: Path, cfg: dict, mode: str) -> dict[str, Any]:
     if metadata["n_epochs"] < 1:
         raise ValueError(f"Script 18 cache has no epochs: {path}")
 
-    expected_shape = (
-        metadata["n_epochs"], len(expected_channels), expected_samples
-    )
     for condition in CONDITIONS:
+        expected_shape = (
+            metadata["n_epochs"],
+            _condition_n_channels(condition, len(expected_channels)),
+            expected_samples,
+        )
         shape, dtype = _npz_array_header(path, condition)
         if shape != expected_shape:
             raise ValueError(
@@ -326,7 +353,9 @@ def _load_record(record: dict[str, Any], condition: str) -> dict[str, Any]:
         starts = np.asarray(data["epoch_start_samples"], dtype=np.int64)
         starts_sec = np.asarray(data["epoch_start_sec"], dtype=np.float64)
     expected_shape = (
-        record["n_epochs"], len(record["ch_names"]), record["epoch_samples"]
+        record["n_epochs"],
+        _condition_n_channels(condition, len(record["ch_names"])),
+        record["epoch_samples"],
     )
     if epochs.shape != expected_shape:
         raise ValueError(f"Runtime shape mismatch in {record['path']}")
@@ -538,6 +567,7 @@ def _condition_fingerprint(
     payload = {
         "schema_version": SCHEMA_VERSION,
         "condition": condition,
+        "n_channels": _condition_n_channels(condition, len(records[0]["ch_names"])),
         "inputs": [
             {
                 "evaluation_id": record["evaluation_id"],
@@ -642,7 +672,7 @@ def train_condition(
     class_weights = record_class_weights(split_records["train"])
     _set_random_seed(random_state)
     device = torch.device(resolved_device)
-    n_channels = len(records[0]["ch_names"])
+    n_channels = _condition_n_channels(condition, len(records[0]["ch_names"]))
     n_times = int(records[0]["epoch_samples"])
     model = _make_model(n_channels, n_times, model_cfg).to(device)
     criterion = nn.BCELoss(reduction="none")
@@ -980,6 +1010,7 @@ def run(
         "requested_device": requested_device,
         "resolved_device": resolved_device,
         "selected_conditions": list(selected),
+        "specific_coherent_layout": "channel_axis_specific_then_coherent",
         "checkpoint_selection": "validation_recording_auprc",
         "threshold_selection": "validation_recording_balanced_accuracy",
         "normalization": "epoch_channel_zscore",
@@ -1016,6 +1047,7 @@ def run(
             "threshold_selection": "validation_recording_balanced_accuracy",
             "final_test_evaluation": "single_frozen_evaluation_per_training_run",
             "normalization": "epoch_channel_zscore",
+            "specific_coherent_layout": "channel_axis_specific_then_coherent",
             "loss": "record_mean_weighted_bce",
             "recording_aggregation": "mean_epoch_probability",
             "condition_fingerprints": {

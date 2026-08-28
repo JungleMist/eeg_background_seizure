@@ -314,7 +314,7 @@ for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
         fi
         echo "Verified Script 20 result artifact: $xgb_output_dir/$artifact"
     done
-    for condition in raw specific coherent; do
+    for condition in raw specific coherent specific_coherent; do
         artifact="$xgb_output_dir/$condition/model.joblib"
         if [[ ! -s "$artifact" ]]; then
             echo "Missing or empty Script 20 model artifact: $artifact" >&2

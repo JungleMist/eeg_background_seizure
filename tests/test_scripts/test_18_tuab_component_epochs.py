@@ -112,6 +112,19 @@ def test_extracts_paired_epochs_using_raw_shared_rejection(tmp_path):
         assert data["raw"].shape == (1, 19, 2500)
         assert data["specific"].dtype == np.float32
         assert data["coherent"].dtype == np.float32
+        assert data["specific_coherent"].shape == (1, 38, 2500)
+        assert data["specific_coherent"].dtype == np.float32
+        np.testing.assert_array_equal(
+            data["specific_coherent"][:, :19], data["specific"]
+        )
+        np.testing.assert_array_equal(
+            data["specific_coherent"][:, 19:], data["coherent"]
+        )
+        expected_names = [
+            *(f"specific::{channel}" for channel in data["ch_names"]),
+            *(f"coherent::{channel}" for channel in data["ch_names"]),
+        ]
+        assert list(data["specific_coherent_ch_names"]) == expected_names
         np.testing.assert_allclose(data["specific"] + data["coherent"], data["raw"])
         np.testing.assert_array_equal(data["epoch_start_samples"], [0])
         np.testing.assert_array_equal(data["epoch_start_sec"], [0.0])
@@ -125,6 +138,29 @@ def test_extracts_paired_epochs_using_raw_shared_rejection(tmp_path):
         assert str(data["split"]) == "train"
         assert str(data["subject_id"]) == "aaaaa001_s001_t000"
         assert str(data["rejection_policy"]) == "raw_shared_mask"
+        assert int(data["schema_version"]) == 2
+
+
+def test_rejects_legacy_script18_output_schema(tmp_path):
+    module = _load_script()
+    path = tmp_path / "legacy.npz"
+    shape = (1, 19, 2500)
+    np.savez_compressed(
+        path,
+        raw=np.zeros(shape, dtype=np.float32),
+        specific=np.zeros(shape, dtype=np.float32),
+        coherent=np.zeros(shape, dtype=np.float32),
+        fingerprint=np.asarray("legacy"),
+        schema_version=np.asarray(1),
+        n_candidate_epochs=np.asarray(1),
+        n_rejected_epochs=np.asarray(0),
+        n_epochs=np.asarray(1),
+        epoch_samples=np.asarray(2500),
+        sfreq=np.asarray(125.0),
+    )
+
+    with pytest.raises(module.CacheMismatch, match="Incomplete epoch cache"):
+        module._output_cache_matches(path, "legacy")
 
 
 @pytest.mark.parametrize(
