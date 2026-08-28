@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import gc
 import hashlib
 import json
 from pathlib import Path
@@ -50,6 +51,11 @@ COMBINED_CONDITION = "specific_coherent"
 BASE_CONDITIONS = ("raw", "specific", "coherent")
 CONDITIONS = (*BASE_CONDITIONS, COMBINED_CONDITION)
 ARRAY_KEYS = {condition: condition for condition in CONDITIONS}
+
+
+def _release_condition_memory() -> None:
+    """Release objects left by one completed condition before the next."""
+    gc.collect()
 
 
 def _positive_int(value: str) -> int:
@@ -440,8 +446,15 @@ def main(config_path="configs/tuab.yaml", condition="all", force=False,
         yaml.safe_dump(resolved_cfg, sort_keys=False), encoding="utf-8"
     )
     conditions = CONDITIONS if condition == "all" else (condition,)
-    results = [run_condition(c, cfg, files, input_root, source_fingerprint, out_root,
-                             feature_set, force, max_workers, source_meta) for c in conditions]
+    results = []
+    for selected_condition in conditions:
+        try:
+            results.append(run_condition(
+                selected_condition, cfg, files, input_root, source_fingerprint,
+                out_root, feature_set, force, max_workers, source_meta,
+            ))
+        finally:
+            _release_condition_memory()
     if len(results) > 1:
         rows = []
         for result in results:

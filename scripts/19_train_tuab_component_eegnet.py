@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import gc
 import hashlib
 import json
 import math
@@ -654,6 +655,15 @@ def _set_random_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _release_condition_memory(resolved_device: str) -> None:
+    """Release objects and accelerator caches after one condition finishes."""
+    gc.collect()
+    if resolved_device == "cuda":
+        torch.cuda.empty_cache()
+    elif resolved_device == "mps":
+        torch.mps.empty_cache()
+
+
 def train_condition(
     condition: str,
     records: list[dict[str, Any]],
@@ -962,11 +972,14 @@ def run(
         if force:
             (condition_dir / "cache.json").unlink(missing_ok=True)
         print(f"[EEGNet {index}/{len(selected)}] {item}: training")
-        train_condition(
-            item, records, model_cfg, condition_dir,
-            base_random_state + CONDITION_SEED_OFFSETS[item],
-            resolved_device, effective_workers, fingerprint,
-        )
+        try:
+            train_condition(
+                item, records, model_cfg, condition_dir,
+                base_random_state + CONDITION_SEED_OFFSETS[item],
+                resolved_device, effective_workers, fingerprint,
+            )
+        finally:
+            _release_condition_memory(resolved_device)
 
     completed: list[dict[str, Any]] = []
     for item in CONDITIONS:

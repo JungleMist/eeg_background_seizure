@@ -188,6 +188,7 @@ def test_main_all_runs_and_summarizes_four_conditions(tmp_path, monkeypatch):
         "wiener": {"mode": "frequency"},
     }
     seen = []
+    releases = []
     monkeypatch.setattr(module, "load_config", lambda _: cfg)
     monkeypatch.setattr(
         module,
@@ -204,12 +205,26 @@ def test_main_all_runs_and_summarizes_four_conditions(tmp_path, monkeypatch):
         return {"condition": condition, "val_metrics": {}, "test_metrics": {}}
 
     monkeypatch.setattr(module, "run_condition", fake_run_condition)
+    monkeypatch.setattr(
+        module, "_release_condition_memory", lambda: releases.append(True)
+    )
 
     module.main("ignored.yaml", condition="all", feature_set="base211")
 
     assert seen == list(module.CONDITIONS)
+    assert len(releases) == len(module.CONDITIONS)
     summary = tmp_path / "results" / "tuab_component_xgboost" / "base211"
     assert list(np.loadtxt(
         summary / "comparison_summary.csv",
         delimiter=",", dtype=str, skiprows=1, usecols=0,
     )) == list(module.CONDITIONS)
+
+
+def test_release_condition_memory_collects_garbage(monkeypatch):
+    module = _load_script()
+    calls = []
+    monkeypatch.setattr(module.gc, "collect", lambda: calls.append("gc"))
+
+    module._release_condition_memory()
+
+    assert calls == ["gc"]

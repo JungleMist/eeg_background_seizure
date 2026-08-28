@@ -288,6 +288,10 @@ def test_training_outputs_cache_reuse_and_force(
     input_root = _write_input_tree(tmp_path)
     output_root = tmp_path / "training"
     monkeypatch.setattr(module, "_make_model", lambda *_: TinyEEGNet())
+    released_devices = []
+    monkeypatch.setattr(
+        module, "_release_condition_memory", released_devices.append
+    )
 
     result = module.run(
         config_path,
@@ -296,6 +300,7 @@ def test_training_outputs_cache_reuse_and_force(
         condition="all",
         device="cpu",
     )
+    assert released_devices == ["cpu"] * len(module.CONDITIONS)
 
     condition_dir = result / "conditions" / "raw"
     assert all(
@@ -333,6 +338,7 @@ def test_training_outputs_cache_reuse_and_force(
         condition="raw",
         device="cpu",
     )
+    assert released_devices == ["cpu"] * len(module.CONDITIONS)
 
     with pytest.raises(module.CacheMismatch, match="--force"):
         module.run(
@@ -343,6 +349,25 @@ def test_training_outputs_cache_reuse_and_force(
             device="cpu",
             random_state=99,
         )
+
+
+def test_release_condition_memory_clears_selected_accelerator_cache(
+    module, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(module.gc, "collect", lambda: calls.append("gc"))
+    monkeypatch.setattr(
+        module.torch.cuda, "empty_cache", lambda: calls.append("cuda")
+    )
+    monkeypatch.setattr(
+        module.torch.mps, "empty_cache", lambda: calls.append("mps")
+    )
+
+    module._release_condition_memory("cpu")
+    module._release_condition_memory("cuda")
+    module._release_condition_memory("mps")
+
+    assert calls == ["gc", "gc", "cuda", "gc", "mps"]
 
 
 def test_test_predictions_are_deferred_until_validation_is_frozen(
