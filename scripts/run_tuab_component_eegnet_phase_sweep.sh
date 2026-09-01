@@ -80,6 +80,8 @@ RESULT_DIR_NAMES=(
     "results_tuab_phase05"
     "results_tuab_phase1"
 )
+TARGET_CONDITION="specific_coherent"
+STALE_CONDITIONS=("raw" "specific" "coherent")
 START_INDEX=0
 if [[ -n "$FROM_PHASE" ]]; then
     START_INDEX=-1
@@ -204,6 +206,32 @@ safe_clear_phase_cache() {
     fi
 }
 
+clear_stale_model_outputs() {
+    local eegnet_output_dir="$1"
+    local xgb_output_dir="$2"
+    local condition path
+
+    for condition in "${STALE_CONDITIONS[@]}"; do
+        path="$eegnet_output_dir/conditions/$condition"
+        if [[ -e "$path" ]]; then
+            echo "Clearing stale EEGNet condition output: $path"
+            rm -rf -- "$path"
+        fi
+
+        path="$xgb_output_dir/$condition"
+        if [[ -e "$path" ]]; then
+            echo "Clearing stale XGBoost condition output: $path"
+            rm -rf -- "$path"
+        fi
+    done
+
+    path="$xgb_output_dir/comparison_summary.csv"
+    if [[ -e "$path" ]]; then
+        echo "Clearing stale XGBoost comparison summary: $path"
+        rm -f -- "$path"
+    fi
+}
+
 print_command() {
     printf 'Command:'
     printf ' %q' "$@"
@@ -264,6 +292,7 @@ echo "Project root: $PROJECT_ROOT"
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Workers for scripts 17/18/19/20: $WORKERS"
 echo "Phase order: ${PHASES[*]}"
+echo "Training condition: $TARGET_CONDITION"
 echo "Starting phase: ${PHASES[$START_INDEX]}"
 echo "Configs: ${CONFIGS[*]}"
 echo "Cleanup target: $PHASE_CACHE_DIR"
@@ -274,6 +303,7 @@ for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
     phase="${PHASES[$index]}"
     results_dir="$(config_value "$config" "paths.results_dir")"
     output_dir="$results_dir/tuab_component_eegnet_phasegated"
+    xgb_output_dir="$results_dir/tuab_component_xgboost/base211"
 
     echo ""
     echo "============================================================"
@@ -287,9 +317,11 @@ for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
     run_step "phase=$phase script=18 paired epoch cache" \
         "${CONDA_RUN[@]}" python scripts/18_extract_tuab_component_epochs.py \
         --config "$config" --workers "$WORKERS"
+    clear_stale_model_outputs "$output_dir" "$xgb_output_dir"
     run_step "phase=$phase script=19 component EEGNet" \
         "${CONDA_RUN[@]}" python scripts/19_train_tuab_component_eegnet.py \
-        --config "$config" --workers "$WORKERS" --force
+        --config "$config" --condition "$TARGET_CONDITION" \
+        --workers "$WORKERS" --force
 
     for artifact in run_summary.json condition_metrics.csv; do
         if [[ ! -s "$output_dir/$artifact" ]]; then
@@ -298,31 +330,50 @@ for ((index = START_INDEX; index < ${#CONFIGS[@]}; index++)); do
         fi
         echo "Verified Script 19 result artifact: $output_dir/$artifact"
     done
+    for artifact in best_model.pt best_params.json history.csv \
+        val_metrics.json test_metrics.json val_predictions.csv \
+        test_predictions.csv val_epoch_predictions.csv test_epoch_predictions.csv; do
+        artifact_path="$output_dir/conditions/$TARGET_CONDITION/$artifact"
+        if [[ ! -s "$artifact_path" ]]; then
+            echo "Missing or empty Script 19 condition artifact: $artifact_path" >&2
+            exit 1
+        fi
+        echo "Verified Script 19 condition artifact: $artifact_path"
+    done
+    for condition in "${STALE_CONDITIONS[@]}"; do
+        if [[ -e "$output_dir/conditions/$condition" ]]; then
+            echo "Unexpected stale EEGNet condition output: $output_dir/conditions/$condition" >&2
+            exit 1
+        fi
+    done
 
     # Script 20 consumes the epochs produced by Script 18 directly.  Keep it
     # before the phase-cache cleanup so Script 19 and Script 20 share the same
     # one-time Script 17/18 Wiener result and its derived epoch cache.
-    xgb_output_dir="$results_dir/tuab_component_xgboost/base211"
     run_step "phase=$phase script=20 component XGBoost" \
         "${CONDA_RUN[@]}" python scripts/20_train_tuab_component_xgboost.py \
-        --config "$config" --condition all --feature-set base211 \
+        --config "$config" --condition "$TARGET_CONDITION" --feature-set base211 \
         --workers "$WORKERS" --force
 
-    for artifact in comparison_summary.csv; do
-        if [[ ! -s "$xgb_output_dir/$artifact" ]]; then
-            echo "Missing or empty Script 20 result artifact: $xgb_output_dir/$artifact" >&2
+    for artifact in run_metadata.json data_stats.json model.joblib \
+        scaler.joblib best_params.json val_metrics.json test_metrics.json; do
+        artifact_path="$xgb_output_dir/$TARGET_CONDITION/$artifact"
+        if [[ ! -s "$artifact_path" ]]; then
+            echo "Missing or empty Script 20 condition artifact: $artifact_path" >&2
             exit 1
         fi
-        echo "Verified Script 20 result artifact: $xgb_output_dir/$artifact"
+        echo "Verified Script 20 condition artifact: $artifact_path"
     done
-    for condition in raw specific coherent specific_coherent; do
-        artifact="$xgb_output_dir/$condition/model.joblib"
-        if [[ ! -s "$artifact" ]]; then
-            echo "Missing or empty Script 20 model artifact: $artifact" >&2
+    for condition in "${STALE_CONDITIONS[@]}"; do
+        if [[ -e "$xgb_output_dir/$condition" ]]; then
+            echo "Unexpected stale XGBoost condition output: $xgb_output_dir/$condition" >&2
             exit 1
         fi
-        echo "Verified Script 20 model artifact: $artifact"
     done
+    if [[ -e "$xgb_output_dir/comparison_summary.csv" ]]; then
+        echo "Unexpected XGBoost comparison summary: $xgb_output_dir/comparison_summary.csv" >&2
+        exit 1
+    fi
 
     safe_clear_phase_cache
     echo "Phase $phase completed successfully."
